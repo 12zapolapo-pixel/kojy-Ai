@@ -1,0 +1,202 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── CSS Custom Properties ───────────────────────────────────────────────── */
+:root {
+  /* Surfaces */
+  --color-void:     #030712;
+  --color-base:     #050510;
+  --color-surface:  #0b1220;
+  --color-elevated: #121b31;
+  --color-overlay:  #1b2744;
+
+  /* Primary */
+  --color-primary:  #49dcb5;
+  --color-accent:   #8b5cf6;
+
+  /* Status */
+  --color-online:   #34d399;
+  --color-offline:  #4a4a6a;
+  --color-error:    #ef4444;
+  --color-warning:  #f59e0b;
+
+  /* Text */
+  --color-text-primary:   #f0f0ff;
+  --color-text-secondary: #9191b0;
+  --color-text-tertiary:  #5a5a7a;
+
+  /* Fonts */
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  /* Motion */
+  --ease-spring:    cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth:    cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-default:   cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ─── Base Reset ──────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  tab-size: 2;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(73,220,181,0.08), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(139,92,246,0.08), transparent 34%),
+    linear-gradient(180deg, #030712 0%, #02040a 100%);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv02","cv03","cv04","cv11";
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  letter-spacing: -0.01em;
+}
+
+/* Full-height app container */
+#root {
+  height: 100dvh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* ─── Typography ──────────────────────────────────────────────────────────── */
+code, pre, kbd, samp {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  letter-spacing: -0.03em;
+  font-weight: 600;
+}
+
+button, input, textarea, select {
+  font: inherit;
+  letter-spacing: inherit;
+}
+/* ─── Range Input (trait sliders) ─────────────────────────────────────────── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  border: 2px solid rgba(255,255,255,0.3);
+  box-shadow: 0 0 8px rgba(73,220,181,0.4);
+  cursor: grab;
+  margin-top: -6px;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.08);
+}
+
+/* ─── Selection ───────────────────────────────────────────────────────────── */
+::selection {
+  background-color: rgba(73,220,181,0.22);
+  color: #fff;
+}
+
+/* ─── Focus ring ──────────────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ─── Scrollbar (global thin style) ──────────────────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+
+::-webkit-scrollbar       { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+
+/* ─── Three.js Canvas (prevent bleed) ────────────────────────────────────── */
+canvas {
+  display: block;
+  outline: none;
+}
+
+/* ─── Animations ──────────────────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideRight {
+  from { opacity: 0; transform: translateX(-10px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ping {
+  75%, 100% { transform: scale(2); opacity: 0; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-6px); }
+}
+
+@keyframes shimmer {
+  0%   { transform: translateX(-30%); opacity: 0; }
+  20%  { opacity: 1; }
+  100% { transform: translateX(30%); opacity: 0; }
+}
+/* ─── Utility classes not in Tailwind ────────────────────────────────────── */
+.animate-fade-in    { animation: fadeIn    200ms var(--ease-default) both; }
+.animate-slide-up   { animation: slideUp   300ms var(--ease-spring)  both; }
+.animate-slide-right{ animation: slideRight 300ms var(--ease-default) both; }
+.animate-scale-in   { animation: scaleIn   200ms var(--ease-spring)  both; }
+.animate-spin       { animation: spin 1s linear infinite; }
+.animate-ping       { animation: ping 1s cubic-bezier(0,0,0.2,1) infinite; }
+.animate-pulse      { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
+.animate-float      { animation: float 3s ease-in-out infinite; }
+.animate-shimmer    { animation: shimmer 2.8s ease-in-out infinite; }
+
+/* ─── Print ───────────────────────────────────────────────────────────────── */
+@media print {
+  body { background: white; color: black; }
+}

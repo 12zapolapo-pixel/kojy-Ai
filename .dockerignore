@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/.turbo
+**/coverage
+**/.sqlite
+**/*.db
+.git
+.env
+.env.*
+!.env.example
+playwright-report
+test-results
+*.zip

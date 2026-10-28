@@ -1,0 +1,47 @@
+{
+  "name": "kojyai-platform",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "turbo run dev",
+    "start": "turbo run start",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "format": "prettier --write \"**/*.{ts,tsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,json,md}\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:e2e": "pnpm --filter @kojyai/web test:e2e",
+    "db:migrate": "pnpm --filter @kojyai/db db:migrate",
+    "db:studio": "pnpm --filter @kojyai/db db:studio",
+    "db:seed": "pnpm --filter @kojyai/api db:seed",
+    "db:generate": "pnpm --filter @kojyai/db db:generate"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.23.0",
+    "eslint": "^9.9.0",
+    "fast-check": "^3.22.0",
+    "fflate": "^0.8.2",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.0",
+    "prettier": "^3.3.3",
+    "turbo": "^2.0.14",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22.13",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@9.1.0",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}

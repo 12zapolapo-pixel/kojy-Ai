@@ -1,0 +1,10 @@
+{
+  // Contracts only re-exports the API's router *type*, so checking it means
+  // checking the API program it points at — reuse the API's paths/options.
+  "extends": "../../apps/api/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

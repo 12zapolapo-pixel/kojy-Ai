@@ -1,0 +1,39 @@
+{
+  "name": "@kojyai/worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/boot.ts",
+    "build": "node ../../scripts/build-server.mjs src/boot.ts dist/boot.js",
+    "start": "node dist/boot.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "@kojyai/db": "workspace:*",
+    "@kojyai/engine": "workspace:*",
+    "@kojyai/security": "workspace:*",
+    "@kojyai/shared": "workspace:*",
+    "@trpc/server": "^11.0.0",
+    "bullmq": "^5.12.0",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.33.0",
+    "ioredis": "^5.4.1",
+    "isolated-vm": "^7.0.0",
+    "nanoid": "^5.0.7",
+    "pg": "^8.13.0",
+    "pino": "^9.3.2",
+    "pino-pretty": "^11.2.2",
+    "typescript": "^5.5.4",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.0",
+    "vitest": "^2.0.5"
+  }
+}

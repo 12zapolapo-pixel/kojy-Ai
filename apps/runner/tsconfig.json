@@ -1,0 +1,89 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "@kojyai/shared": [
+        "../../packages/shared/src/index.ts"
+      ],
+      "@kojyai/shared/types": [
+        "../../packages/shared/src/types/index.ts"
+      ],
+      "@kojyai/shared/constants": [
+        "../../packages/shared/src/constants/index.ts"
+      ],
+      "@kojyai/shared/events": [
+        "../../packages/shared/src/events/index.ts"
+      ],
+      "@kojyai/shared/permissions": [
+        "../../packages/shared/src/permissions/index.ts"
+      ],
+      "@kojyai/shared/observability": [
+        "../../packages/shared/src/observability/index.ts"
+      ],
+      "@kojyai/shared/policy": [
+        "../../packages/shared/src/policy/index.ts"
+      ],
+      "@kojyai/shared/projects": [
+        "../../packages/shared/src/projects/index.ts"
+      ],
+      "@kojyai/shared/crypto": [
+        "../../packages/shared/src/crypto/index.ts"
+      ],
+      "@kojyai/shared/ai": [
+        "../../packages/shared/src/ai/index.ts"
+      ],
+      "@kojyai/engine": [
+        "../../packages/engine/src/index.ts"
+      ],
+      "@kojyai/engine/highrise": [
+        "../../packages/engine/src/highrise/index.ts"
+      ],
+      "@kojyai/engine/delegation": [
+        "../../packages/engine/src/delegation/index.ts"
+      ],
+      "@kojyai/engine/intelligence": [
+        "../../packages/engine/src/intelligence/index.ts"
+      ],
+      "@kojyai/engine/memory": [
+        "../../packages/engine/src/memory/index.ts"
+      ],
+      "@kojyai/engine/personality": [
+        "../../packages/engine/src/personality/index.ts"
+      ],
+      "@kojyai/engine/runtime": [
+        "../../packages/engine/src/runtime/index.ts"
+      ],
+      "@kojyai/security": [
+        "../../packages/security/src/index.ts"
+      ],
+      "@kojyai/analytics": [
+        "../../packages/analytics/src/index.ts"
+      ],
+      "@kojyai/db": [
+        "../../packages/db/src/index.ts"
+      ],
+      "@kojyai/db/schema": [
+        "../../packages/db/src/schema.ts"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

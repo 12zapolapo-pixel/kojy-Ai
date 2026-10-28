@@ -1,0 +1,138 @@
+# KojyAI — the whole stack on one server (e.g. an Oracle Cloud free VM).
+#
+#   ./scripts/setup-env.sh        # once: writes .env with fresh secrets
+#   docker compose up -d --build  # start / update everything
+#   docker compose logs -f api    # watch the API (or worker / web)
+#
+# Only the web container is reachable from outside (ports 80/443). Postgres,
+# Redis, the API and the worker talk to each other on a private network.
+# All data lives in named volumes, so rebuilding containers never loses it.
+
+name: kojyai
+
+x-node-env: &node-env
+  NODE_ENV: production
+  DATABASE_URL: postgres://kojyai:${POSTGRES_PASSWORD:?run scripts/setup-env.sh first}@postgres:5432/kojyai
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?run scripts/setup-env.sh first}
+  DB_SSL: "false"    # Postgres and Redis are on the private Docker network,
+  REDIS_TLS: "false" # so their traffic never leaves this machine
+  FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL in .env}
+  APP_URL: ${FRONTEND_URL}
+  TRUSTED_PROXY_IPS: 172.28.0.10 # the web container below
+  SQLITE_DIR: /app/data/sqlite
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kojyai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: kojyai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kojyai -d kojyai"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [internal]
+
+  api:
+    build: { context: ., target: api }
+    image: kojyai-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      <<: *node-env
+      PROJECTS_DIR: /app/projects
+    volumes:
+      - appdata:/app/data
+      - projects:/app/projects
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [internal]
+
+  worker:
+    build: { context: ., target: worker }
+    image: kojyai-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      <<: *node-env
+      BACKUP_DIR: /app/backups
+    volumes:
+      - appdata:/app/data
+      - backups:/app/backups
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      api: { condition: service_healthy } # the API applies DB migrations first
+    networks: [internal]
+
+  runner: # runs the Python bot projects, one process each
+    build: { context: ., target: runner }
+    image: kojyai-runner
+    restart: unless-stopped
+    env_file: .env
+    environment: *node-env
+    volumes:
+      - projects:/app/projects # shared with the API (it writes the code)
+      - venvs:/app/venvs       # each project's installed Python packages
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      api: { condition: service_healthy }
+    stop_grace_period: 15s # bots get SIGTERM, then 10s to exit
+    networks: [internal]
+
+  web:
+    build: { context: ., target: web }
+    image: kojyai-web
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api: { condition: service_healthy }
+    networks:
+      internal:
+        ipv4_address: 172.28.0.10
+
+networks:
+  internal:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  pgdata:
+  redisdata:
+  appdata:
+  backups:
+  projects:
+  venvs:
+  caddy_data:
+  caddy_config:

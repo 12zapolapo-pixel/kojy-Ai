@@ -1,0 +1,53 @@
+{
+  "name": "@kojyai/api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/boot.ts",
+    "build": "node ../../scripts/build-server.mjs src/boot.ts dist/boot.js --copy ../../packages/db/migrations=dist/migrations",
+    "start": "node dist/boot.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "db:seed": "tsx src/db/seed.ts"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "@hono/node-server": "^1.12.0",
+    "@hono/trpc-server": "^0.3.2",
+    "@kojyai/analytics": "workspace:*",
+    "@kojyai/billing": "workspace:*",
+    "@kojyai/db": "workspace:*",
+    "@kojyai/engine": "workspace:*",
+    "@kojyai/security": "workspace:*",
+    "@kojyai/shared": "workspace:*",
+    "@trpc/server": "^11.0.0",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.12.0",
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.33.0",
+    "hono": "^4.5.0",
+    "ioredis": "^5.4.1",
+    "isolated-vm": "^7.0.0",
+    "jose": "^5.9.0",
+    "nanoid": "^5.0.7",
+    "pg": "^8.13.0",
+    "pino": "^9.3.2",
+    "pino-pretty": "^11.2.2",
+    "stripe": "^16.9.0",
+    "superjson": "^2.2.1",
+    "typescript": "^5.5.4",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.5.0",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "vitest": "^2.0.5"
+  }
+}

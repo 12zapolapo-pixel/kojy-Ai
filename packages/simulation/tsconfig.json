@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "paths": {
+      "@kojyai/shared":               ["../shared/src/index.ts"],
+      "@kojyai/shared/types":         ["../shared/src/types/index.ts"],
+      "@kojyai/shared/constants":     ["../shared/src/constants/index.ts"],
+      "@kojyai/shared/events":        ["../shared/src/events/index.ts"],
+      "@kojyai/shared/permissions":   ["../shared/src/permissions/index.ts"],
+      "@kojyai/shared/observability": ["../shared/src/observability/index.ts"],
+      "@kojyai/shared/ai":            ["../shared/src/ai/index.ts"]
+    }
+  },
+  "include": ["src/**/*", "../shared/src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,68 @@
+{
+  "name": "@kojyai/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts"
+    },
+    "./types": {
+      "import": "./src/types/index.ts"
+    },
+    "./constants": {
+      "import": "./src/constants/index.ts"
+    },
+    "./events": {
+      "import": "./src/events/index.ts"
+    },
+    "./permissions": {
+      "import": "./src/permissions/index.ts"
+    },
+    "./observability": {
+      "import": "./src/observability/index.ts"
+    },
+    "./policy": {
+      "import": "./src/policy/index.ts"
+    },
+    "./crypto": {
+      "import": "./src/crypto/index.ts"
+    },
+    "./ai": {
+      "import": "./src/ai/index.ts"
+    },
+    "./projects": {
+      "import": "./src/projects/index.ts"
+    },
+    "./highrise": {
+      "import": "./src/highrise/index.ts"
+    },
+    "./highrise/defaultPersonality": {
+      "import": "./src/highrise/defaultPersonality.ts"
+    },
+    "./redis": {
+      "import": "./src/redis/index.ts"
+    },
+    "./logging": {
+      "import": "./src/logging/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "ws": "^8.18.0",
+    "@trpc/server": "^11.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "zod": "^3.23.8",
+    "@types/ws": "^8.5.10"
+  },
+  "peerDependencies": {
+    "zod": "^3.23.8"
+  },
+  "main": "./src/index.ts"
+}

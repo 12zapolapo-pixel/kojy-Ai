@@ -1,0 +1,30 @@
+{
+  "name": "@kojyai/runner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/boot.ts",
+    "build": "node ../../scripts/build-server.mjs src/boot.ts dist/boot.js --copy src/launcher.py=dist/launcher.py --copy ../../packages/db/migrations=dist/migrations",
+    "start": "node dist/boot.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kojyai/db": "workspace:*",
+    "@kojyai/shared": "workspace:*",
+    "dotenv": "^16.4.5",
+    "fflate": "^0.8.2",
+    "ws": "^8.18.0",
+    "drizzle-orm": "^0.33.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.0",
+    "pino": "^9.3.2",
+    "pino-pretty": "^11.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.19.0"
+  }
+}

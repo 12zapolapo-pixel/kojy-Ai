@@ -1,0 +1,12 @@
+{
+  "defaultViewMode": "source",
+  "foldHeading": false,
+  "showLineNumber": true,
+  "readableLineLength": true,
+  "theme": "obsidian",
+  "enabledPlugins": [],
+  "alwaysUpdateLinks": true,
+  "promptDelete": false,
+  "newFileLocation": "current",
+  "newLinkFormat": "shortest"
+}

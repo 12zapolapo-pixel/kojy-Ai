@@ -1,0 +1,43 @@
+{
+  "name": "@kojyai/engine",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts"
+    },
+    "./memory": {
+      "import": "./src/memory/MemoryEngine.ts"
+    },
+    "./intelligence": {
+      "import": "./src/intelligence/AdvancedSkills.ts"
+    },
+    "./personality": {
+      "import": "./src/personality/PersonalityEngine.ts"
+    },
+    "./relationships": {
+      "import": "./src/relationships/RelationshipEngine.ts"
+    },
+    "./delegation": {
+      "import": "./src/delegation/index.ts"
+    },
+    "./highrise": {
+      "import": "./src/highrise/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@kojyai/shared": "workspace:*",
+    "isolated-vm": "^7.0.0",
+    "ws": "^8.18.0",
+    "typescript": "^5.5.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.10"
+  },
+  "main": "./src/index.ts"
+}

@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, unit tests, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4 # version comes from package.json "packageManager"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  integration:
+    name: Integration tests (Postgres + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: kojyai
+          POSTGRES_PASSWORD: kojyai_ci
+          POSTGRES_DB: kojyai
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kojyai" --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://kojyai:kojyai_ci@localhost:5432/kojyai
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-only-jwt-secret-0123456789abcdef0123456789abcdef
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000" # quoted: unquoted YAML reads this as the number 0
+      GROQ_API_KEY: gsk_ci_placeholder
+      BILLING_DISABLED: "true"
+      SIGNUPS: open
+      API_TEST_URL: http://localhost:3001
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build and start the API (applies migrations)
+        run: |
+          pnpm --filter @kojyai/api build
+          (cd apps/api && node dist/boot.js > ../../api.log 2>&1 &)
+          for i in $(seq 1 60); do curl -sf localhost:3001/health && exit 0; sleep 1; done
+          cat api.log; exit 1
+      - run: pnpm test:integration
+      - if: failure()
+        run: cat api.log
+
+  docker:
+    name: Docker image (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [api, worker, runner, web, allinone]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
