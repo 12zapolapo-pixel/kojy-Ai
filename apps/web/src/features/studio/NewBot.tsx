@@ -4,10 +4,11 @@
  * OWNERSHIP: apps/web/src/features/studio
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
-import { trpc } from "../../lib/trpc";
+import { trpc, trpcClient } from "../../lib/trpc";
+import { fileToBase64, uploadedMessage } from "../projects/ChatTab";
 
 export function NewBot() {
   const navigate = useNavigate();
@@ -16,9 +17,28 @@ export function NewBot() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [templateId, setTemplateId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const create = trpc.projects.create.useMutation({
     onSuccess: (p) => { void utils.studio.bots.invalidate(); navigate(`/studio/p/${p.id}`); },
   });
+
+  // An existing bot (e.g. a Replit zip): make an empty bot, put the code in, hand it to Kojy.
+  const upload = async (file: File) => {
+    setUploadError(null);
+    if (file.size > 30 * 1024 * 1024) { setUploadError("That zip is over 30 MB."); return; }
+    setUploading(true);
+    try {
+      const botName = name.trim() || file.name.replace(/\.zip$/i, "").slice(0, 150) || "My bot";
+      const p = await trpcClient.projects.create.mutate({ name: botName });
+      const r = await trpcClient.projects.uploadZip.mutate({ id: p.id, zipBase64: await fileToBase64(file) });
+      await trpcClient.projects.chatSend.mutate({ id: p.id, text: uploadedMessage(file.name, r) });
+      void utils.studio.bots.invalidate();
+      navigate(`/studio/p/${p.id}`);
+    } catch (e) { setUploadError((e as Error).message); }
+    finally { setUploading(false); }
+  };
   const picked = templates.data?.find((t) => t.id === templateId);
   const finalName = name.trim() || picked?.name || "";
   const canCreate = !!finalName && (!!templateId || description.trim().length > 0);
@@ -30,6 +50,22 @@ export function NewBot() {
           <h1 className="text-xl font-semibold text-white">New bot</h1>
           <p className="text-sm text-white/45 mt-1">Describe the bot you want and Kojy builds it — or start from a ready-made bot and tell Kojy what to change.</p>
         </div>
+
+        <div className="rounded-xl border border-[#49dcb5]/30 bg-[#49dcb5]/[0.05] p-4 flex flex-wrap items-center gap-3">
+          <div className="flex-1 min-w-[12rem]">
+            <p className="text-sm text-white">Already have a bot?</p>
+            <p className="text-[11px] text-white/45 mt-0.5">Upload its .zip (e.g. from Replit: ⋮ → Download as zip). Kojy reads it, asks for its secrets and starts it.</p>
+          </div>
+          <input ref={fileInput} type="file" accept=".zip,application/zip" className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void upload(f); }} />
+          <button disabled={uploading} onClick={() => fileInput.current?.click()}
+            className="px-4 py-2 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg disabled:opacity-50">
+            {uploading ? "Uploading…" : "📎 Upload my bot (.zip)"}
+          </button>
+          {uploadError && <p className="basis-full text-xs text-red-400">{uploadError}</p>}
+        </div>
+
+        <p className="text-xs text-white/30 text-center">— or make a new one —</p>
 
         <div className="space-y-3">
           <input value={name} onChange={(e) => setName(e.target.value)} maxLength={150} placeholder={picked ? `Name (default: ${picked.name})` : "Bot name"}

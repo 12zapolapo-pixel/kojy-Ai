@@ -90,7 +90,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <div className="relative h-screen w-screen flex overflow-hidden bg-[#030712] text-white">
+    // h-dvh, not h-screen: on phones 100vh includes the browser's toolbar, which hid the bottom nav.
+    <div className="relative h-dvh w-screen flex overflow-hidden bg-[#030712] text-white">
       <div aria-hidden className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,rgba(73,220,181,0.14),transparent_38%),radial-gradient(ellipse_at_top_right,rgba(139,92,246,0.12),transparent_32%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_18%)]" />
       <div aria-hidden className="pointer-events-none absolute inset-0 bg-grid opacity-[0.08]" />
       {/* Sidebar */}

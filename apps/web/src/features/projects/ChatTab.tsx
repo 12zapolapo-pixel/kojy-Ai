@@ -21,11 +21,16 @@ const SUGGESTIONS = [
   "Build a new bot that greets people when they join and has a !dance command.",
 ];
 
-async function fileToBase64(file: File): Promise<string> {
+export async function fileToBase64(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(bin);
+}
+
+/** What the chat tells Kojy after a zip upload (also sent by New bot → Upload). */
+export function uploadedMessage(fileName: string, r: { written: number; keptData: string[]; entrypoint: string | null }): string {
+  return `I uploaded my bot's code (${fileName}: ${r.written} files${r.keptData.length ? `, kept ${r.keptData.length} existing data files` : ""}${r.entrypoint ? `, entrypoint ${r.entrypoint}` : ""}). Look at it, tell me briefly what it does, find which secrets it needs, and get it running.`;
 }
 
 const STUDIO_SUGGESTIONS = [
@@ -120,7 +125,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
       const r = await trpcClient.projects.uploadZip.mutate({ id: pid, zipBase64: await fileToBase64(file) });
       void utils.projects.invalidate();
       void utils.studio.bots.invalidate();
-      await send(`I uploaded my bot's code (${file.name}: ${r.written} files${r.keptData.length ? `, kept ${r.keptData.length} existing data files` : ""}${r.entrypoint ? `, entrypoint ${r.entrypoint}` : ""}). Look at it, tell me briefly what it does, find which secrets it needs, and get it running.`);
+      await send(uploadedMessage(file.name, r));
     } catch (e) { setError((e as Error).message); }
     finally { setUploading(false); }
   };
