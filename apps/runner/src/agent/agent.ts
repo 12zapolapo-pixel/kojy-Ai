@@ -62,7 +62,7 @@ export class Agent {
   private autofixLog = new Map<string, number[]>();
 
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
-    supervisor.onCrash = (uuid, streak, tail) => void this.onCrash(uuid, streak, tail);
+    supervisor.onCrash = (uuid, streak, tail, how) => void this.onCrash(uuid, streak, tail, how);
     // Daily check-ups: look every hour for bots that are due.
     const tick = () => void runCheckups(this.db, (uuid) => void this.run(uuid)).catch((err) => log.warn({ err }, "Check-ups failed"));
     setTimeout(tick, 60_000).unref();
@@ -272,7 +272,8 @@ export class Agent {
 
   // ── stabilizer ─────────────────────────────────────────────────────────────
 
-  private async onCrash(uuid: string, streak: number, tail: string[]): Promise<void> {
+  /** A bot crashed twice in a row, or (how: "error") its code failed twice while it stayed in the room. */
+  private async onCrash(uuid: string, streak: number, tail: string[], how: "crash" | "error" = "crash"): Promise<void> {
     if (streak < 2 || this.active.has(uuid)) return;
     // Only code errors: a network blip or Highrise outage isn't something to "fix".
     const traceback = tail.findIndex((l) => l.includes("Traceback (most recent call last)"));
@@ -292,16 +293,20 @@ export class Agent {
     this.autofixLog.set(uuid, recent);
 
     const trace = tail.slice(Math.max(0, traceback - 2)).slice(-40).join("\n");
+    const what = how === "error"
+      ? `The bot's code failed ${streak} times recently (the bot stayed in the room and skipped what failed)`
+      : `The bot crashed ${streak} times in a row`;
     await this.add({ thread: `project:${project.id}`, projectId: project.id }, "user",
-      `The bot crashed ${streak} times in a row. Its last output:\n${trace}\n\nFind the cause in the code, fix it, check it in the test room, then restart the bot and confirm in the logs that it stays up. Remember the lesson.`,
+      `${what}. Its last output:\n${trace}\n\nFind the cause in the code, fix it, check it in the test room, then restart the bot and confirm in the logs that ${how === "error" ? "the error is gone" : "it stays up"}. Remember the lesson.`,
       "crash");
-    log.info({ uuid, streak }, "Auto-fix started for a crashing bot");
+    log.info({ uuid, streak, how }, "Auto-fix started for a failing bot");
+    const problem = how === "error" ? "an error" : "a crash";
     void this.run(uuid).then(async () => {
       const [last] = await this.db.select({ content: projectMessages.content }).from(projectMessages)
         .where(and(eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.role, "assistant"))).orderBy(desc(projectMessages.id)).limit(1);
-      const summary = last?.content.trim().slice(0, 400) || "Kojy looked into the crash — see the chat.";
-      await notifyUser(this.db, project.ownerId, "bot_error", `Kojy worked on a crash in ${project.name}`, summary, `/studio/p/${uuid}`);
-      void sendAlert(`🛠️ ${project.name} kept crashing — Kojy: ${summary}`);
+      const summary = last?.content.trim().slice(0, 400) || `Kojy looked into ${problem} — see the chat.`;
+      await notifyUser(this.db, project.ownerId, "bot_error", `Kojy worked on ${problem} in ${project.name}`, summary, `/studio/p/${uuid}`);
+      void sendAlert(`🛠️ ${project.name} ${how === "error" ? "kept hitting an error" : "kept crashing"} — Kojy: ${summary}`);
     }).catch((err) => log.warn({ err, uuid }, "Auto-fix follow-up failed"));
   }
 }

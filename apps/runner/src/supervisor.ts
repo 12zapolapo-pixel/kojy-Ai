@@ -35,6 +35,8 @@ const LOG_MAX_BYTES = 2 * 1024 * 1024;
 const RESTART_DELAYS_S = [5, 15, 30, 60];
 const HEALTHY_RUN_MS = 120_000;
 const STOP_GRACE_MS = 10_000;
+/** Errors the launcher caught in the bot's hooks: 2 within this window go to Kojy (at most once per window). */
+const HOOK_ERROR_WINDOW_MS = 30 * 60_000;
 
 /** Always installed next to the project's own requirements.txt. */
 const BASE_REQUIREMENTS = ["highrise-bot-sdk==25.1.0", "setuptools<82"];
@@ -72,8 +74,13 @@ export class Supervisor {
   private crashStreak = new Map<string, number>();
   private busy = new Set<string>();
   private tails = new Map<string, string[]>();
-  /** Set by the coder AI: called when a bot crashes on its own (not stopped). */
-  onCrash?: (uuid: string, streak: number, tail: string[]) => void;
+  private hookErrors = new Map<string, number[]>();
+  private hookErrorsReported = new Map<string, number>();
+  /**
+   * Set by the coder AI: called when a bot crashes on its own (not stopped),
+   * or when its code keeps failing while it stays in the room (how: "error").
+   */
+  onCrash?: (uuid: string, streak: number, tail: string[], how?: "crash" | "error") => void;
 
   private activity: ActivityRecorder;
   /** Crash streak at which the owner was last told, so they hear once per streak. */
@@ -136,7 +143,7 @@ export class Supervisor {
       // fd 3: the launcher's activity reports (chat, join, tip… as JSON lines).
       const child = spawn(python, [LAUNCHER], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] });
       const run: Running = { child, startedAt: Date.now(), stopping: false, project: { id: project.id, orgId: project.orgId, ownerId: project.ownerId, name: project.name } };
-      this.readActivity(run);
+      this.readActivity(uuid, run);
       this.tails.set(uuid, []);
       this.procs.set(uuid, run);
       this.pipe(uuid, child);
@@ -187,7 +194,7 @@ export class Supervisor {
     this.activity.record({ orgId: run.project.orgId, source: "project", sourceId: run.project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null });
   }
 
-  private readActivity(run: Running): void {
+  private readActivity(uuid: string, run: Running): void {
     const stream = run.child.stdio[3] as NodeJS.ReadableStream | undefined;
     if (!stream) return;
     let partial = "";
@@ -197,12 +204,27 @@ export class Supervisor {
       partial = lines.pop() ?? "";
       for (const line of lines) {
         try {
-          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null };
-          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n);
+          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null; trace?: string };
+          if (e.k === "error") this.hookError(uuid, String(e.trace ?? ""));
+          else if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n);
         } catch { /* not ours */ }
       }
     });
     stream.on("error", () => undefined);
+  }
+
+  /**
+   * The launcher caught an error in one of the bot's hooks: it printed it,
+   * skipped that event and the bot stayed in the room. Code that keeps
+   * failing still goes to Kojy, as a crash would.
+   */
+  private hookError(uuid: string, trace: string): void {
+    const now = Date.now();
+    const recent = [...(this.hookErrors.get(uuid) ?? []).filter((t) => now - t < HOOK_ERROR_WINDOW_MS), now].slice(-20);
+    this.hookErrors.set(uuid, recent);
+    if (recent.length < 2 || now - (this.hookErrorsReported.get(uuid) ?? 0) < HOOK_ERROR_WINDOW_MS) return;
+    this.hookErrorsReported.set(uuid, now);
+    this.onCrash?.(uuid, recent.length, trace.split("\n"), "error");
   }
 
   /** The last ~80 console lines of the bot's current/last run. */
