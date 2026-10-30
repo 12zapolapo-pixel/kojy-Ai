@@ -27,7 +27,7 @@ import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/s
 import { listFiles } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
-import { chat, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
+import { chat, estimateTokens, aiConfigured, currentEndpoint, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt } from "./prompt.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
@@ -37,7 +37,6 @@ import { runCheckups } from "./checkup.js";
 const log = createLogger("agent");
 
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
-const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 3000);
 const AUTOFIX_PER_DAY = 3;
 
 type Row = typeof projectMessages.$inferSelect;
@@ -175,15 +174,17 @@ export class Agent {
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
 
         let message: ChatMessage | undefined;
-        // Too big for the plan → try again with less history (twice).
-        for (let budget = HISTORY_TOKENS; !message; budget = Math.floor(budget / 2)) {
+        // History sized for the AI that takes the request (Gemini's plan fits far
+        // more than Groq's). Too big for the plan → try again with less (3 times).
+        for (let shrink = 1; !message; shrink *= 2) {
+          const budget = Math.floor((currentEndpoint()?.historyTokens ?? 3000) / shrink);
           try {
             ({ message } = await chat({
               messages: await this.buildMessages(scope, budget), tools: scope.tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`),
             }));
           } catch (err) {
-            if (!(err instanceof RequestTooLargeError) || budget < HISTORY_TOKENS / 4) throw err;
+            if (!(err instanceof RequestTooLargeError) || shrink >= 8) throw err;
           }
         }
         const calls = message.tool_calls ?? [];
@@ -276,7 +277,7 @@ export class Agent {
     if (traceback < 0) return;
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (!project?.autoFix || project.desiredState !== "running") return;
-    if (!process.env.GROQ_API_KEY) return;
+    if (!aiConfigured()) return;
 
     const now = Date.now();
     const recent = (this.autofixLog.get(uuid) ?? []).filter((t) => now - t < 24 * 3600_000);

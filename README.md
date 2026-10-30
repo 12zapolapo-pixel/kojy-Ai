@@ -81,5 +81,7 @@ The API applies pending migrations when it starts.
 Every setting is documented in [.env.example](.env.example). The required
 ones are `FRONTEND_URL`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET`,
 `ENCRYPTION_KEY` and one AI key (`GROQ_API_KEY` — free at
-<https://console.groq.com/keys>). Billing is off by default
+<https://console.groq.com/keys>). For a much more capable Kojy, also set
+`AGENT_API_KEY` to a free Gemini key (<https://aistudio.google.com/apikey>);
+Groq then becomes Kojy's backup. Billing is off by default
 (`BILLING_DISABLED=true`): every feature is free and unlocked.

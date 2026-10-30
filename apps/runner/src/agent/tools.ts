@@ -63,8 +63,11 @@ export const TOOL_SPECS: ToolSpec[] = [
     { path: str("file path"), content: str("full file content") }, ["path", "content"]),
   fn("delete_file", "Delete a file.", { path: str("file path") }, ["path"]),
   fn("check_code", "Compile every .py file and import the bot's entrypoint in the bot's Python environment (installs requirements.txt changes first). Shows errors with tracebacks."),
-  fn("test_in_room", "Run a copy of the bot for a few seconds in a fake Highrise room (real room and data are untouched). User 'tester' joins (optional) and says the chat lines. Returns what the bot did and any errors.",
-    { chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" }, join: { type: "boolean" }, seconds: { type: "integer" } }, ["chat"]),
+  fn("test_in_room", "Run a copy of the bot for up to 60 seconds in a fake Highrise room (real room and data are untouched). User 'tester' joins (optional) and says the chat lines. Returns what the bot did and any errors. To test a timer, make its interval a setting and shorten it with env.",
+    {
+      chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" }, join: { type: "boolean" }, seconds: { type: "integer" },
+      env: { type: "array", items: { type: "string" }, description: "NAME=value settings for this test only, e.g. [\"ANNOUNCE_SECONDS=5\"]" },
+    }, ["chat"]),
   fn("find_env_vars", "Find the environment variables (secrets/settings) the code reads, and which are already set."),
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
@@ -84,6 +87,20 @@ export const TOOL_SPECS: ToolSpec[] = [
 
 const TEXT_EXT = /\.(py|txt|md|json|ya?ml|toml|ini|cfg|env|example|js|ts|html|css|sh)$|(^|\/)(Dockerfile|Procfile|requirements[^/]*)$/i;
 const clip = (s: string, max = 6000) => (s.length > max ? `${s.slice(0, max)}\n… (${s.length - max} more characters)` : s);
+
+// Settings a test may not change: the fake room's address and the bot's identity,
+// plus the ones that decide which Python and code run.
+const FIXED_TEST_ENV = /^(HIGHRISE_|HR_|KOJY_|PYTHON|VIRTUAL_ENV$|PATH$|HOME$|LD_)/;
+
+/** test_in_room's env: ["NAME=value", …] → settings for that test only (max 10). */
+export function testSettings(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const item of (Array.isArray(raw) ? raw : []).slice(0, 10)) {
+    const m = /^([A-Z][A-Z0-9_]{0,63})=(.{0,200})$/s.exec(String(item).trim());
+    if (m && !FIXED_TEST_ENV.test(m[1]!)) out[m[1]!] = m[2]!;
+  }
+  return out;
+}
 
 function runCapture(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
@@ -244,17 +261,20 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       case "test_in_room": {
         if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
+        const extraEnv = testSettings(args.env);
         const python = await ctx.supervisor.ensureVenv(uuid, dir);
         const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
         const r = await runRoomTest({
-          projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat,
+          projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat, extraEnv,
           join: args.join === true, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
         });
         const verdict = !r.connected ? "The bot never connected to the test room."
           : r.exitedEarly ? `The bot crashed during the test (exit code ${r.exitCode}).`
           : r.errors.length ? "The bot ran, but errors were printed." : "The bot ran without errors.";
+        const settings = Object.entries(extraEnv).map(([k, v]) => `${k}=${v}`);
         const output = [
           verdict,
+          settings.length ? `Test-only settings: ${settings.join(", ")}` : "",
           `What happened:\n${r.actions.join("\n") || "(nothing)"}`,
           r.errors.length ? `Errors:\n${r.errors.join("\n")}` : "",
           `Console (last lines):\n${r.output.slice(-40).join("\n")}`,

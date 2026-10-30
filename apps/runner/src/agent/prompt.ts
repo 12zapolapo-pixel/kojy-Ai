@@ -26,7 +26,17 @@ Actions (await, on self.highrise): chat(msg) · send_whisper(user_id, msg) · se
 · send_message(conversation_id, text) · get_messages(conversation_id) · set_outfit(items) · get_inventory()
 self.webapi has REST lookups (get_user(user_id), get_room(room_id), get_item(item_id)).
 Responses can be an Error object (check isinstance(resp, Error) from highrise.models). Chat messages max ~255 chars.
-Started by the platform as "module.path:ClassName" with HIGHRISE_ROOM_ID / HIGHRISE_BOT_TOKEN from Secrets; never hard-code tokens, use os.environ.`;
+Started by the platform as "module.path:ClassName" with HIGHRISE_ROOM_ID / HIGHRISE_BOT_TOKEN from Secrets; never hard-code tokens, use os.environ.
+Timers (e.g. a message every few minutes): never block a handler (no time.sleep or endless loop in on_start). on_start runs again after a reconnect, so replace the old task:
+  async def on_start(self, session_metadata): (import asyncio, os)
+      if getattr(self, "timer", None): self.timer.cancel()
+      self.timer = asyncio.create_task(self.every())
+  async def every(self):
+      while True:
+          await asyncio.sleep(int(os.environ.get("ANNOUNCE_SECONDS", "180")))
+          try: await self.highrise.chat("...")
+          except Exception as e: print("timer:", e, flush=True)
+The test room runs at most 60s: test a timer with test_in_room env=["ANNOUNCE_SECONDS=5"], never by waiting the real interval.`;
 
 export function systemPrompt(p: {
   projectName: string; entrypoint: string; status: string; secrets: string[]; memories: string[]; fileCount: number;

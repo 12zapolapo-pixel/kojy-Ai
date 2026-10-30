@@ -51,6 +51,8 @@ export interface RoomTestOptions {
   /** Also send a join event for "tester" first. */
   join?: boolean;
   seconds?: number;
+  /** Settings for this test only, e.g. a short timer interval. Can't change the room or token. */
+  extraEnv?: Record<string, string>;
 }
 
 function describe(msg: Record<string, unknown>): string | null {
@@ -105,6 +107,7 @@ export async function runRoomTest(opts: RoomTestOptions): Promise<RoomTestResult
     cwd: work,
     env: {
       ...opts.env,
+      ...opts.extraEnv,
       KOJY_ENTRY: opts.entrypoint,
       HR_BOTAPI_URL: `ws://127.0.0.1:${port}`,
       HIGHRISE_ROOM_ID: opts.env.HIGHRISE_ROOM_ID ?? "test-room",
