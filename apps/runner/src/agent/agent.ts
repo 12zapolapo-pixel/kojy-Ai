@@ -218,8 +218,8 @@ export class Agent {
 
   /**
    * System prompt + as much recent history as fits the budget. Older tool
-   * results are shrunk to their one-line summary; the cut always starts at a
-   * user message so tool calls and their results stay paired.
+   * results are shrunk to their one-line summary; the history always starts at
+   * a user message so tool calls and their results stay paired.
    */
   private async buildMessages(scope: Scope, historyTokens: number): Promise<ChatMessage[]> {
     const [rowsDesc, system] = await Promise.all([
@@ -246,7 +246,6 @@ export class Agent {
     // Newest first, until the budget runs out; results after the last user message stay full.
     const picked: ChatMessage[] = [];
     let budget = historyTokens;
-    let cut = 0;
     for (let i = rows.length - 1; i >= 0; i--) {
       const full = i >= lastUser || rows[i]!.role === "user";
       let m = toMsg(rows[i]!, full);
@@ -256,13 +255,16 @@ export class Agent {
         m = toMsg(rows[i]!, false);
         cost = estimateTokens(JSON.stringify(m));
       }
-      if (cost > budget && i < lastUser) { cut = i + 1; break; }
+      if (cost > budget && i < lastUser) break;
       budget -= cost;
       picked.unshift(m);
     }
-    // Start at a user message so no tool result is left without its call.
+    // Start at a user message, whether the budget or the 80-row window did the
+    // cutting: a history that begins mid-task leaves a tool result without its
+    // call, and Gemini refuses a tool call that doesn't follow a user turn (400).
     let start = 0;
-    if (cut > 0) { while (start < picked.length && picked[start]!.role !== "user") start++; }
+    while (start < picked.length && picked[start]!.role !== "user") start++;
+    if (start === picked.length) start = 0; // no user message at all: keep what there is
     const history = pairToolCalls(picked.slice(start));
 
     return [{ role: "system", content: system }, ...history];

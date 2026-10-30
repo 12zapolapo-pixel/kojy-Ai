@@ -1,4 +1,4 @@
-import { pairToolCalls } from "../../../apps/runner/src/agent/agent.js";
+import { Agent, pairToolCalls } from "../../../apps/runner/src/agent/agent.js";
 import type { ChatMessage } from "../../../apps/runner/src/agent/groq.js";
 
 const call = (id: string): ChatMessage => ({ role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name: "list_files", arguments: "{}" } }] });
@@ -18,5 +18,20 @@ describe("coder AI history", () => {
 
   it("drops results without a call", () => {
     expect(pairToolCalls([user("a"), result("x")])).toEqual([user("a")]);
+  });
+
+  it("starts at a user message when the 80-row window, not the budget, begins mid-task", async () => {
+    // Oldest first: the window opens on one of Kojy's steps (Gemini refuses a tool call that doesn't follow a user turn).
+    const oldestFirst = [
+      { role: "assistant", kind: "text", content: "", data: { toolCalls: [{ id: "c1", type: "function", function: { name: "list_files", arguments: "{}" } }] } },
+      { role: "tool", kind: "tool", content: "bot.py", data: { toolCallId: "c1", summary: "Listed files" } },
+      { role: "assistant", kind: "text", content: "Done.", data: null },
+      { role: "user", kind: "text", content: "hi", data: null },
+    ];
+    const rows = [...oldestFirst].reverse(); // the runner reads newest first
+    const db = { select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => rows }) }) }) }) };
+    const agent = new Agent(db as any, {} as any, null);
+    const messages: ChatMessage[] = await (agent as any).buildMessages({ thread: "project:1", projectId: 1, system: async () => "SYS" }, 30_000);
+    expect(messages.map((m) => m.role)).toEqual(["system", "user"]);
   });
 });
