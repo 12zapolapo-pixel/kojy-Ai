@@ -10,8 +10,9 @@
  * ~200K/day) only fits a short history and answer; Gemini's fits whole files.
  *   - paces itself: waits before a request that would go over the minute budget
  *   - on 429 it waits for the retry time and tries again
- *   - when an AI's daily budget is used up, its key is refused or it keeps
- *     failing, it moves to the next AI for a while
+ *   - when an AI's daily budget is used up, its key is refused, it doesn't
+ *     answer in time or keeps failing, it moves to the next AI for a while
+ *   - a request one AI refuses (a 400) goes to the next AI
  * GROQ_BASE_URL can point at any OpenAI-compatible server (used by tests).
  */
 
@@ -52,6 +53,8 @@ export interface Endpoint {
   /** Room on top of the answer for the model's reasoning tokens. */
   reasoningTokens: number;
   reasoningEffort?: string;
+  /** Longest wait for one answer; after that the next AI gets the request. */
+  timeoutMs: number;
 }
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
@@ -73,12 +76,14 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
     const gemini = baseUrl.includes("generativelanguage.googleapis.com");
     const effort = env.AGENT_REASONING_EFFORT ?? (gemini ? "medium" : undefined);
     list.push({
-      id: "agent", baseUrl, key: agentKey, model: env.AGENT_MODEL ?? "gemini-3.8-flash", kind: gemini ? "gemini" : "openai",
+      // gemini-3.6-flash: answered a tool call in ~2s when 3.8 Flash took minutes (free plan, Oct 2026).
+      id: "agent", baseUrl, key: agentKey, model: env.AGENT_MODEL ?? "gemini-3.6-flash", kind: gemini ? "gemini" : "openai",
       tokensPerMinute: setting(env.AGENT_TOKENS_PER_MINUTE, 200_000),
       historyTokens: setting(env.AGENT_HISTORY_TOKENS, 30_000),
       maxOutputTokens: setting(env.AGENT_MAX_OUTPUT_TOKENS, 8000),
       reasoningTokens: 8000,
       ...(effort && effort !== "none" ? { reasoningEffort: effort } : {}),
+      timeoutMs: setting(env.AGENT_TIMEOUT_SECONDS, 90) * 1000,
     });
   }
   const groqKey = env.GROQ_API_KEY;
@@ -94,6 +99,7 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
       maxOutputTokens: setting(own.AGENT_MAX_OUTPUT_TOKENS, 1200),
       reasoningTokens: 800, // headroom for gpt-oss reasoning tokens
       reasoningEffort: "medium",
+      timeoutMs: 120_000,
     });
     list.push(groq(smart));
     if (fast !== smart) list.push(groq(fast));
@@ -141,16 +147,51 @@ function retrySeconds(res: Response, text: string): number | null {
   return m ? Math.ceil(Number(m[1])) : null;
 }
 
+const shortArgs = (args: string) => (args.length > 200 ? `${args.slice(0, 200)}…` : args);
+
 /**
- * The request body for one AI. Gemini 3 gets its thought signatures back and
- * keeps its default temperature (lower values can make it loop); other AIs
- * get standard tool calls only, since extra fields can be refused.
+ * Gemini 3 refuses a tool call without its thought signature, and the steps
+ * Groq made (every chat from before Gemini, too) have none. Gemini gets those
+ * steps as plain text instead: "I ran list_files({})." then an app message
+ * with the result (Gemini refuses a request that ends on its own turn). A
+ * step is Gemini's own when any call is signed (parallel calls carry the
+ * signature on the first one only); those go as they are.
+ */
+export function unsignedStepsAsText(messages: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  const names = new Map<string, string>(); // call id → tool name, for steps turned into text
+  // Text joins a text message of the same role right before it, so turns keep alternating.
+  const add = (role: "user" | "assistant", text: string) => {
+    const last = out[out.length - 1];
+    if (last?.role === role && !last.tool_calls?.length) out[out.length - 1] = { ...last, content: [last.content, text].filter(Boolean).join("\n") };
+    else out.push({ role, content: text });
+  };
+  for (const m of messages) {
+    if (m.role === "assistant" && m.tool_calls?.length && !m.tool_calls.some((c) => c.extra_content)) {
+      add("assistant", [m.content, ...m.tool_calls.map((c) => `I ran ${c.function.name}(${shortArgs(c.function.arguments)}).`)].filter(Boolean).join("\n"));
+      for (const c of m.tool_calls) names.set(c.id, c.function.name);
+    } else if (m.role === "tool" && m.tool_call_id && names.has(m.tool_call_id)) {
+      add("user", `[app] Result of ${names.get(m.tool_call_id)}: ${m.content ?? ""}`);
+    } else if ((m.role === "assistant" || m.role === "user") && !m.tool_calls?.length) {
+      add(m.role, m.content ?? "");
+    } else {
+      out.push(m);
+    }
+  }
+  return out;
+}
+
+/**
+ * The request body for one AI. Gemini 3 gets its thought signatures back,
+ * other AIs' steps as text, and its default temperature (lower values can
+ * make it loop); other AIs get standard tool calls only, since extra fields
+ * can be refused.
  */
 export function requestBody(ep: Endpoint, messages: ChatMessage[], tools: ToolSpec[], maxTokens: number): Record<string, unknown> {
-  const msgs = ep.kind === "gemini" ? messages : messages.map((m) => (m.tool_calls?.length
+  const msgs = ep.kind === "gemini" ? unsignedStepsAsText(messages) : messages.map((m) => (m.tool_calls?.length
     ? { ...m, tool_calls: m.tool_calls.map(({ id, type, function: f }) => ({ id, type, function: f })) }
     : m));
-  // A tool without settings goes without "parameters"; Gemini refuses an empty object schema.
+  // Gemini gets tools without settings with no "parameters" at all, the plainest valid form.
   const specs = ep.kind !== "gemini" ? tools : tools.map((t) => {
     const params: Record<string, unknown> = { ...t.function.parameters };
     const fn: Record<string, unknown> = { ...t.function, parameters: params };
@@ -185,16 +226,19 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY (a free Gemini key from aistudio.google.com/apikey) or GROQ_API_KEY (free at console.groq.com/keys) in the server's .env.");
   }
   const skip = (ep: Endpoint, ms: number, why: string) => skipped.set(ep.id, { until: Date.now() + ms, why });
+  // AIs that refused this particular request; the next one gets it instead.
+  const refused = new Map<string, string>();
+  const usable = (e: Endpoint) => available(e) && !refused.has(e.id);
   let serverErrors = 0;
 
   for (let attempt = 0; attempt < 8; attempt++) {
     if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
-    const ep = all.find(available);
+    const ep = all.find(usable);
     if (!ep) {
-      const why = all.map((e) => skipped.get(e.id)?.why).filter(Boolean).pop();
+      const why = [...refused.values(), ...all.map((e) => skipped.get(e.id)?.why)].filter(Boolean).pop();
       throw new AiUnavailableError(why ?? "The AI is busy right now — try again in a minute.");
     }
-    const hasNext = all.some((e) => e !== ep && available(e));
+    const hasNext = all.some((e) => e !== ep && usable(e));
     const maxTokens = opts.maxTokens ?? ep.maxOutputTokens;
     const body = requestBody(ep, opts.messages, opts.tools, maxTokens);
     const size = estimateTokens(JSON.stringify(body.messages)) + estimateTokens(JSON.stringify(body.tools)) + maxTokens;
@@ -208,31 +252,36 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       continue;
     }
 
+    // The owner's Stop, or this AI's time limit (an overloaded AI can take minutes).
+    const timeout = AbortSignal.timeout(ep.timeoutMs);
     let res: Response;
+    let text: string;
     try {
       res = await fetch(`${ep.baseUrl}/chat/completions`, {
         method: "POST",
-        signal: opts.signal ?? AbortSignal.timeout(120_000),
+        signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
         headers: { "content-type": "application/json", authorization: `Bearer ${ep.key}` },
         body: JSON.stringify(body),
       });
+      text = await res.text();
     } catch (err) {
       if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
-      if (!hasNext) throw new AiUnavailableError(`Couldn't reach the AI: ${(err as Error).message}`);
-      log.warn({ ai: ep.id, err: (err as Error).message }, "Couldn't reach the AI — using the next one for 5 minutes");
-      skip(ep, 5 * 60_000, `Couldn't reach the AI: ${(err as Error).message}`);
+      const why = timeout.aborted ? `The AI took longer than ${Math.round(ep.timeoutMs / 1000)}s to answer.` : `Couldn't reach the AI: ${(err as Error).message}`;
+      if (!hasNext) throw new AiUnavailableError(why);
+      log.warn({ ai: ep.id, why }, "AI didn't answer — using the next one for 5 minutes");
+      skip(ep, 5 * 60_000, why);
       continue;
     }
     recent.get(ep.id)!.push({ at: Date.now(), tokens: size });
 
     if (res.ok) {
-      const data = await res.json() as { choices?: { message: ChatMessage }[] };
+      let data: { choices?: { message: ChatMessage }[] } = {};
+      try { data = JSON.parse(text) as typeof data; } catch { /* reported as empty below */ }
       const message = data.choices?.[0]?.message;
       if (!message) throw new AiUnavailableError("The AI returned an empty answer.");
       return { message: { role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}) }, model: ep.model };
     }
 
-    const text = await res.text().catch(() => "");
     if (res.status === 429) {
       if (/Request too large/i.test(text)) throw new RequestTooLargeError("The conversation got too big for the free AI plan.");
       // Groq says "tokens per day (TPD)"; Gemini "GenerateRequestsPerDayPerProjectPerModel".
@@ -270,7 +319,11 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       await sleep(3000 * (attempt + 1));
       continue;
     }
-    throw new AiUnavailableError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
+    const why = `AI request failed (${res.status}): ${text.slice(0, 300)}`;
+    if (!hasNext) throw new AiUnavailableError(why);
+    // Refused by this AI (a 400 for something only it checks): the next one may take it.
+    log.warn({ ai: ep.id, status: res.status, error: text.slice(0, 300) }, "AI refused the request — trying the next one");
+    refused.set(ep.id, why);
   }
   throw new AiUnavailableError("The AI is busy right now — try again in a minute.");
 }

@@ -1,11 +1,11 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { chat, currentEndpoint, endpoints, requestBody, resetAiState, type ChatMessage } from "../../../apps/runner/src/agent/groq.js";
+import { chat, currentEndpoint, endpoints, requestBody, resetAiState, unsignedStepsAsText, type ChatMessage } from "../../../apps/runner/src/agent/groq.js";
 import { testSettings } from "../../../apps/runner/src/agent/tools.js";
 
 const KEYS = [
   "AGENT_API_KEY", "AGENT_BASE_URL", "AGENT_MODEL", "AGENT_TOKENS_PER_MINUTE", "AGENT_HISTORY_TOKENS", "AGENT_MAX_OUTPUT_TOKENS",
-  "AGENT_REASONING_EFFORT", "AGENT_FALLBACK_MODEL", "GROQ_API_KEY", "GROQ_BASE_URL", "GROQ_MODEL_SMART", "GROQ_MODEL_FAST",
+  "AGENT_REASONING_EFFORT", "AGENT_TIMEOUT_SECONDS", "AGENT_FALLBACK_MODEL", "GROQ_API_KEY", "GROQ_BASE_URL", "GROQ_MODEL_SMART", "GROQ_MODEL_FAST",
 ];
 let saved: Record<string, string | undefined> = {};
 beforeEach(() => {
@@ -29,7 +29,7 @@ describe("coder AI endpoints", () => {
     const list = endpoints({ AGENT_API_KEY: "g", GROQ_API_KEY: "gsk_x", AGENT_HISTORY_TOKENS: "40000" });
     expect(list.map((e) => e.id)).toEqual(["agent", "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b"]);
     expect(list[0]).toMatchObject({
-      kind: "gemini", model: "gemini-3.8-flash", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", historyTokens: 40000, maxOutputTokens: 8000,
+      kind: "gemini", model: "gemini-3.6-flash", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", historyTokens: 40000, maxOutputTokens: 8000,
     });
     expect(list[1]).toMatchObject({ historyTokens: 3000, maxOutputTokens: 1200, tokensPerMinute: 7500 });
   });
@@ -72,6 +72,49 @@ describe("coder AI requests", () => {
   });
 });
 
+describe("steps without a thought signature (made by Groq) for Gemini", () => {
+  const step = (id: string, signed = false): ChatMessage => ({
+    role: "assistant", content: null,
+    tool_calls: [{ id, type: "function", function: { name: "list_files", arguments: "{}" }, ...(signed ? { extra_content: { google: { thought_signature: "s" } } } : {}) }],
+  });
+  const result = (id: string, content = "bot.py"): ChatMessage => ({ role: "tool", tool_call_id: id, content });
+
+  it("become plain text, with the results as app messages so a request never ends on Gemini's turn", () => {
+    const out = unsignedStepsAsText([{ role: "user", content: "hi" }, step("g1"), result("g1"), step("g2"), result("g2", "ok"), { role: "assistant", content: "Done." }]);
+    expect(out).toEqual([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "I ran list_files({})." },
+      { role: "user", content: "[app] Result of list_files: bot.py" },
+      { role: "assistant", content: "I ran list_files({})." },
+      { role: "user", content: "[app] Result of list_files: ok" },
+      { role: "assistant", content: "Done." },
+    ]);
+  });
+
+  it("put the results of one step with several calls in one app message", () => {
+    const two: ChatMessage = { role: "assistant", content: "Looking.", tool_calls: [step("a").tool_calls![0]!, { ...step("b").tool_calls![0]!, function: { name: "get_logs", arguments: "{\"lines\":20}" } }] };
+    expect(unsignedStepsAsText([{ role: "user", content: "hi" }, two, result("a"), result("b", "started")])).toEqual([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "Looking.\nI ran list_files({}).\nI ran get_logs({\"lines\":20})." },
+      { role: "user", content: "[app] Result of list_files: bot.py\n[app] Result of get_logs: started" },
+    ]);
+  });
+
+  it("keep Gemini's own steps as real tool calls, including parallel calls signed on the first only", () => {
+    const parallel: ChatMessage = { role: "assistant", content: null, tool_calls: [step("a", true).tool_calls![0]!, step("b").tool_calls![0]!] };
+    const msgs = [{ role: "user", content: "hi" } as ChatMessage, step("s1", true), result("s1"), parallel, result("a"), result("b")];
+    expect(unsignedStepsAsText(msgs)).toEqual(msgs);
+  });
+
+  it("only applies to Gemini", () => {
+    const msgs = [{ role: "user", content: "hi" } as ChatMessage, step("g1"), result("g1")];
+    const [gemini] = endpoints({ AGENT_API_KEY: "g" });
+    const [groq] = endpoints({ GROQ_API_KEY: "gsk_x" });
+    expect((requestBody(gemini!, msgs, [], 10) as any).messages.map((m: ChatMessage) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect((requestBody(groq!, msgs, [], 10) as any).messages.map((m: ChatMessage) => m.role)).toEqual(["user", "assistant", "tool"]);
+  });
+});
+
 describe("coder AI fallback", () => {
   let server: http.Server;
   let base = "";
@@ -84,20 +127,29 @@ describe("coder AI fallback", () => {
       req.on("end", () => {
         const body = JSON.parse(raw || "{}") as { model?: string };
         seen.push(req.url ?? "");
+        const answer = () => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: `from ${body.model}` } }] }));
+        };
         if (req.url?.startsWith("/gemini")) {
           // Gemini's OpenAI-compatible API answers a used-up daily quota like this.
           res.writeHead(429, { "content-type": "application/json" });
           res.end(JSON.stringify([{ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Quota exceeded for quota id GenerateRequestsPerDayPerProjectPerModel-FreeTier" } }]));
-          return;
+        } else if (req.url?.startsWith("/refuse")) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify([{ error: { code: 400, message: "Function call is missing a thought_signature in functionCall parts." } }]));
+        } else if (req.url?.startsWith("/slow")) {
+          setTimeout(answer, 1500);
+        } else {
+          answer();
         }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: `from ${body.model}` } }] }));
       });
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
-  afterAll(() => new Promise<void>((r) => server.close(() => r())));
+  afterAll(() => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }));
+  beforeEach(() => { seen.length = 0; });
 
   it("moves to Groq when Gemini's daily limit is used up, and stays there", async () => {
     Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/gemini`, GROQ_API_KEY: "gsk_x", GROQ_BASE_URL: `${base}/groq` });
@@ -110,6 +162,26 @@ describe("coder AI fallback", () => {
   it("says why when every AI is used up", async () => {
     Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/gemini` });
     await expect(chat({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow(/daily limits are used up/);
+  });
+
+  it("gives a request to Groq when the main AI is too slow, even with the owner's Stop signal passed", async () => {
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/slow`, AGENT_TIMEOUT_SECONDS: "0.3", GROQ_API_KEY: "gsk_x", GROQ_BASE_URL: `${base}/groq` });
+    const r = await chat({ messages: [{ role: "user", content: "hi" }], tools: [], signal: new AbortController().signal });
+    expect(r.model).toBe("openai/gpt-oss-120b");
+    expect(currentEndpoint()?.id).toBe("groq:openai/gpt-oss-120b");
+  });
+
+  it("stops at the time limit when there's no other AI", async () => {
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/slow`, AGENT_TIMEOUT_SECONDS: "0.3" });
+    await expect(chat({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow(/took longer than/);
+  });
+
+  it("gives a refused request to the next AI without skipping the main AI afterwards", async () => {
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/refuse`, GROQ_API_KEY: "gsk_x", GROQ_BASE_URL: `${base}/groq` });
+    const r = await chat({ messages: [{ role: "user", content: "hi" }], tools: [] });
+    expect(r.model).toBe("openai/gpt-oss-120b");
+    expect(seen).toEqual(["/refuse/chat/completions", "/groq/chat/completions"]);
+    expect(currentEndpoint()?.id).toBe("agent");
   });
 });
 
