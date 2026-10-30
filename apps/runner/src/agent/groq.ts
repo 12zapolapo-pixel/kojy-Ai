@@ -3,13 +3,14 @@
  * OWNERSHIP: apps/runner/src/agent
  *
  * Kojy uses these AIs, best first (see endpoints()):
- *   1. AGENT_API_KEY — a bigger free plan: Google Gemini by default
- *      (AGENT_BASE_URL / AGENT_MODEL pick another OpenAI-compatible one)
+ *   1. AGENT_API_KEY — a bigger free plan: several Google Gemini models by
+ *      default, taking turns (AGENT_BASE_URL / AGENT_MODEL pick others)
  *   2. GROQ_API_KEY — Groq's free plan: gpt-oss-120b, then gpt-oss-20b
  * Each has its own budgets: Groq's free plan (per model: ~8K tokens/minute,
  * ~200K/day) only fits a short history and answer; Gemini's fits whole files.
  *   - paces itself: waits before a request that would go over the minute budget
- *   - on 429 it waits for the retry time and tries again
+ *   - on 429 it waits for the retry time and tries again — or, for Gemini,
+ *     hands the request to the next Gemini model at once (each has its own limits)
  *   - when an AI's daily budget is used up, its key is refused, it doesn't
  *     answer in time or keeps failing, it moves to the next AI for a while
  *   - a request one AI refuses (a 400) goes to the next AI
@@ -41,6 +42,8 @@ export class RequestTooLargeError extends AiUnavailableError {}
 export interface Endpoint {
   /** For logs, and the key for pacing and skipping. */
   id: string;
+  /** Models of one service; on a per-minute limit the next one in the group answers at once. */
+  group: "agent" | "groq";
   baseUrl: string;
   key: string;
   model: string;
@@ -59,6 +62,11 @@ export interface Endpoint {
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
 const GROQ_URL = "https://api.groq.com/openai/v1";
+// Gemini's free plan allows each model only 20 requests a day (and a few a
+// minute), counted per model, so Kojy takes turns with several. All of these
+// answered a real Kojy tool call in 1-2s (Oct 2026); gemini-3.8-flash took
+// minutes, so it's left out.
+const GEMINI_MODELS = "gemini-3.6-flash,gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite";
 
 /** A positive number setting, or the default. */
 const setting = (value: string | undefined, fallback: number) => {
@@ -75,16 +83,19 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
     const baseUrl = trimSlash(env.AGENT_BASE_URL ?? GEMINI_URL);
     const gemini = baseUrl.includes("generativelanguage.googleapis.com");
     const effort = env.AGENT_REASONING_EFFORT ?? (gemini ? "medium" : undefined);
-    list.push({
-      // gemini-3.6-flash: answered a tool call in ~2s when 3.8 Flash took minutes (free plan, Oct 2026).
-      id: "agent", baseUrl, key: agentKey, model: env.AGENT_MODEL ?? "gemini-3.6-flash", kind: gemini ? "gemini" : "openai",
-      tokensPerMinute: setting(env.AGENT_TOKENS_PER_MINUTE, 200_000),
-      historyTokens: setting(env.AGENT_HISTORY_TOKENS, 30_000),
-      maxOutputTokens: setting(env.AGENT_MAX_OUTPUT_TOKENS, 8000),
-      reasoningTokens: 8000,
-      ...(effort && effort !== "none" ? { reasoningEffort: effort } : {}),
-      timeoutMs: setting(env.AGENT_TIMEOUT_SECONDS, 90) * 1000,
-    });
+    // AGENT_MODEL: one model, or several separated by commas, best first.
+    const models = (env.AGENT_MODEL ?? (gemini ? GEMINI_MODELS : "")).split(",").map((m) => m.trim()).filter(Boolean);
+    for (const model of models) {
+      list.push({
+        id: `agent:${model}`, group: "agent", baseUrl, key: agentKey, model, kind: gemini ? "gemini" : "openai",
+        tokensPerMinute: setting(env.AGENT_TOKENS_PER_MINUTE, 200_000),
+        historyTokens: setting(env.AGENT_HISTORY_TOKENS, 30_000),
+        maxOutputTokens: setting(env.AGENT_MAX_OUTPUT_TOKENS, 8000),
+        reasoningTokens: 8000,
+        ...(effort && effort !== "none" ? { reasoningEffort: effort } : {}),
+        timeoutMs: setting(env.AGENT_TIMEOUT_SECONDS, 90) * 1000,
+      });
+    }
   }
   const groqKey = env.GROQ_API_KEY;
   if (groqKey && !groqKey.includes("placeholder")) {
@@ -93,7 +104,7 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
     const smart = own.AGENT_MODEL ?? env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
     const fast = env.AGENT_FALLBACK_MODEL ?? env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
     const groq = (model: string): Endpoint => ({
-      id: `groq:${model}`, baseUrl: trimSlash(env.GROQ_BASE_URL ?? GROQ_URL), key: groqKey, model, kind: "openai",
+      id: `groq:${model}`, group: "groq", baseUrl: trimSlash(env.GROQ_BASE_URL ?? GROQ_URL), key: groqKey, model, kind: "openai",
       tokensPerMinute: setting(own.AGENT_TOKENS_PER_MINUTE, 7500),
       historyTokens: setting(own.AGENT_HISTORY_TOKENS, 3000),
       maxOutputTokens: setting(own.AGENT_MAX_OUTPUT_TOKENS, 1200),
@@ -139,12 +150,14 @@ function usedLastMinute(id: string): number {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Seconds to wait from a 429: the retry-after header, or Gemini's "retry in 33.6s" / retryDelay. */
-function retrySeconds(res: Response, text: string): number | null {
-  const header = Number(res.headers.get("retry-after"));
+/** Seconds to wait from a 429: the retry-after header, or Gemini's "retry in 20.5s" / "retry in 5h38m24s" / retryDelay. */
+export function retrySeconds(headers: Headers, text: string): number | null {
+  const header = Number(headers.get("retry-after"));
   if (header > 0) return Math.ceil(header);
-  const m = /retry in ([\d.]+)\s*s/i.exec(text) ?? /"retryDelay"\s*:\s*"([\d.]+)s"/.exec(text);
-  return m ? Math.ceil(Number(m[1])) : null;
+  const m = /retry in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/i.exec(text);
+  if (m && (m[1] || m[2] || m[3])) return Math.ceil(Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0));
+  const delay = /"retryDelay"\s*:\s*"([\d.]+)s"/.exec(text);
+  return delay ? Math.ceil(Number(delay[1])) : null;
 }
 
 const shortArgs = (args: string) => (args.length > 200 ? `${args.slice(0, 200)}…` : args);
@@ -231,14 +244,27 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
   const usable = (e: Endpoint) => available(e) && !refused.has(e.id);
   let serverErrors = 0;
 
-  for (let attempt = 0; attempt < 8; attempt++) {
+  for (let attempt = 0; attempt < 8 + 2 * all.length; attempt++) {
     if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
     const ep = all.find(usable);
+    // A better model resting for a moment (a per-minute limit) is worth the short wait,
+    // rather than moving to a later service (Groq's budget can't hold Gemini's history).
+    const resting = all.filter((e) => !refused.has(e.id) && !available(e) && skipped.get(e.id)!.until - Date.now() <= 70_000
+      && (!ep || (all.indexOf(e) < all.indexOf(ep) && e.group !== ep.group)));
+    if (resting.length) {
+      const ms = Math.max(0, Math.min(...resting.map((e) => skipped.get(e.id)!.until)) - Date.now());
+      opts.onWait?.(Math.max(1, Math.ceil(ms / 1000)), "AI rate limit");
+      await sleep(ms);
+      continue;
+    }
     if (!ep) {
       const why = [...refused.values(), ...all.map((e) => skipped.get(e.id)?.why)].filter(Boolean).pop();
       throw new AiUnavailableError(why ?? "The AI is busy right now — try again in a minute.");
     }
     const hasNext = all.some((e) => e !== ep && usable(e));
+    // Another Gemini model takes the request instead of waiting out a per-minute limit
+    // (each model has its own). Groq waits for gpt-oss-120b, the stronger of its two.
+    const sibling = ep.group === "agent" && all.some((e) => e !== ep && e.group === ep.group && usable(e));
     const maxTokens = opts.maxTokens ?? ep.maxOutputTokens;
     const body = requestBody(ep, opts.messages, opts.tools, maxTokens);
     const size = estimateTokens(JSON.stringify(body.messages)) + estimateTokens(JSON.stringify(body.tools)) + maxTokens;
@@ -247,6 +273,7 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     if (used > 0 && used + size > ep.tokensPerMinute) {
       const oldest = recent.get(ep.id)![0]!;
       const wait = Math.max(1, Math.ceil((60_000 - (Date.now() - oldest.at)) / 1000));
+      if (sibling) { skip(ep, wait * 1000, "The AI's per-minute budget is used up."); continue; }
       opts.onWait?.(wait, "pacing for the free AI plan");
       await sleep(wait * 1000);
       continue;
@@ -284,13 +311,15 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
 
     if (res.status === 429) {
       if (/Request too large/i.test(text)) throw new RequestTooLargeError("The conversation got too big for the free AI plan.");
-      // Groq says "tokens per day (TPD)"; Gemini "GenerateRequestsPerDayPerProjectPerModel".
+      // Groq says "tokens per day (TPD)"; Gemini "requests per day", with "retry in 5h38m24s".
       if (/per ?day|TPD|RPD/i.test(text)) {
-        log.warn({ ai: ep.id }, "Daily AI budget used up — using the next AI for an hour");
-        skip(ep, 60 * 60_000, "The free AI plans' daily limits are used up. They reset within 24 hours (or add a paid key).");
+        const seconds = Math.min(24 * 3600, retrySeconds(res.headers, text) ?? 3600);
+        log.warn({ ai: ep.id, hours: Math.round(seconds / 360) / 10 }, "Daily AI budget used up — using the next AI until it resets");
+        skip(ep, seconds * 1000, "The free AI plans' daily limits are used up. They reset within 24 hours (or add a paid key).");
         continue;
       }
-      const wait = Math.min(65, retrySeconds(res, text) ?? 20);
+      const wait = Math.min(65, retrySeconds(res.headers, text) ?? 20);
+      if (sibling) { skip(ep, wait * 1000, "The AI's per-minute limit was reached."); continue; }
       opts.onWait?.(wait, "AI rate limit");
       await sleep(wait * 1000);
       continue;

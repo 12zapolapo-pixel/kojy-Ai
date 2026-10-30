@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { chat, currentEndpoint, endpoints, requestBody, resetAiState, unsignedStepsAsText, type ChatMessage } from "../../../apps/runner/src/agent/groq.js";
+import { chat, currentEndpoint, endpoints, requestBody, resetAiState, retrySeconds, unsignedStepsAsText, type ChatMessage } from "../../../apps/runner/src/agent/groq.js";
 import { testSettings } from "../../../apps/runner/src/agent/tools.js";
 
 const KEYS = [
@@ -25,13 +25,31 @@ describe("coder AI endpoints", () => {
     expect(list[0]).toMatchObject({ baseUrl: "https://api.groq.com/openai/v1", historyTokens: 5000, maxOutputTokens: 1200, tokensPerMinute: 7500 });
   });
 
-  it("puts Gemini first when AGENT_API_KEY is set, with Groq as the backup on Groq's budgets", () => {
+  it("puts several free Gemini models first when AGENT_API_KEY is set, with Groq as the backup on Groq's budgets", () => {
     const list = endpoints({ AGENT_API_KEY: "g", GROQ_API_KEY: "gsk_x", AGENT_HISTORY_TOKENS: "40000" });
-    expect(list.map((e) => e.id)).toEqual(["agent", "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b"]);
+    expect(list.map((e) => e.id)).toEqual([
+      "agent:gemini-3.6-flash", "agent:gemini-3-flash-preview", "agent:gemini-3.5-flash-lite", "agent:gemini-3.1-flash-lite",
+      "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b",
+    ]);
     expect(list[0]).toMatchObject({
-      kind: "gemini", model: "gemini-3.6-flash", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", historyTokens: 40000, maxOutputTokens: 8000,
+      group: "agent", kind: "gemini", model: "gemini-3.6-flash", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", historyTokens: 40000, maxOutputTokens: 8000,
     });
-    expect(list[1]).toMatchObject({ historyTokens: 3000, maxOutputTokens: 1200, tokensPerMinute: 7500 });
+    expect(list[4]).toMatchObject({ group: "groq", historyTokens: 3000, maxOutputTokens: 1200, tokensPerMinute: 7500 });
+  });
+
+  it("takes AGENT_MODEL as one model or a list; another service needs it", () => {
+    expect(endpoints({ AGENT_API_KEY: "g", AGENT_MODEL: "gemini-3.8-flash, gemini-3.6-flash" }).map((e) => e.model)).toEqual(["gemini-3.8-flash", "gemini-3.6-flash"]);
+    expect(endpoints({ AGENT_API_KEY: "k", AGENT_BASE_URL: "https://integrate.api.nvidia.com/v1" })).toEqual([]);
+    expect(endpoints({ AGENT_API_KEY: "k", AGENT_BASE_URL: "https://integrate.api.nvidia.com/v1", AGENT_MODEL: "x/y" })[0]).toMatchObject({ kind: "openai", model: "x/y" });
+  });
+
+  it("reads Gemini's and Groq's retry times", () => {
+    const none = new Headers();
+    expect(retrySeconds(none, "Please retry in 20.5s.")).toBe(21);
+    expect(retrySeconds(none, "Please retry in 5h38m24.137368371s.")).toBe(20305);
+    expect(retrySeconds(none, `"retryDelay": "33s"`)).toBe(33);
+    expect(retrySeconds(new Headers({ "retry-after": "7" }), "")).toBe(7);
+    expect(retrySeconds(none, "Rate limit reached, slow down")).toBeNull();
   });
 
   it("has no AI without keys (a placeholder key doesn't count)", () => {
@@ -119,6 +137,15 @@ describe("coder AI fallback", () => {
   let server: http.Server;
   let base = "";
   const seen: string[] = [];
+  const calls = new Map<string, number>(); // model → requests so far, for /mix
+
+  // Gemini's OpenAI-compatible API answers used-up quotas like these.
+  const quota = (res: http.ServerResponse, message: string) => {
+    res.writeHead(429, { "content-type": "application/json" });
+    res.end(JSON.stringify([{ error: { code: 429, status: "RESOURCE_EXHAUSTED", message } }]));
+  };
+  const PER_DAY = "Quota exceeded for metric: generate_content_free_tier_requests, limit: 20, description: Generate content requests per day limit exceeded on Free Tier.\nPlease retry in 5h38m24.1s.";
+  const PER_MINUTE = "Quota exceeded for metric: generate_content_free_tier_requests, limit: 5, description: Generate content requests per minute limit exceeded on Free Tier.\nPlease retry in 1s.";
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -126,15 +153,21 @@ describe("coder AI fallback", () => {
       req.on("data", (d) => (raw += d));
       req.on("end", () => {
         const body = JSON.parse(raw || "{}") as { model?: string };
-        seen.push(req.url ?? "");
+        seen.push(`${req.url ?? ""} ${body.model}`);
         const answer = () => {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: `from ${body.model}` } }] }));
         };
+        const n = (calls.get(body.model ?? "") ?? 0) + 1;
+        calls.set(body.model ?? "", n);
         if (req.url?.startsWith("/gemini")) {
-          // Gemini's OpenAI-compatible API answers a used-up daily quota like this.
-          res.writeHead(429, { "content-type": "application/json" });
-          res.end(JSON.stringify([{ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Quota exceeded for quota id GenerateRequestsPerDayPerProjectPerModel-FreeTier" } }]));
+          quota(res, "Quota exceeded for quota id GenerateRequestsPerDayPerProjectPerModel-FreeTier");
+        } else if (req.url?.startsWith("/rpm")) {
+          // m1 is at its per-minute limit; m2 answers.
+          if (body.model === "m1") quota(res, PER_MINUTE); else answer();
+        } else if (req.url?.startsWith("/mix")) {
+          // m1: per-minute limit once, then answers. m2: used up for the day.
+          if (body.model === "m2") quota(res, PER_DAY); else if (n === 1) quota(res, PER_MINUTE); else answer();
         } else if (req.url?.startsWith("/refuse")) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify([{ error: { code: 400, message: "Function call is missing a thought_signature in functionCall parts." } }]));
@@ -149,39 +182,62 @@ describe("coder AI fallback", () => {
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
   afterAll(() => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }));
-  beforeEach(() => { seen.length = 0; });
+  beforeEach(() => { seen.length = 0; calls.clear(); });
+  const groq = () => ({ GROQ_API_KEY: "gsk_x", GROQ_BASE_URL: `${base}/groq` });
+  const hi: ChatMessage[] = [{ role: "user", content: "hi" }];
 
   it("moves to Groq when Gemini's daily limit is used up, and stays there", async () => {
-    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/gemini`, GROQ_API_KEY: "gsk_x", GROQ_BASE_URL: `${base}/groq` });
-    const r = await chat({ messages: [{ role: "user", content: "hi" }], tools: [] });
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/gemini`, AGENT_MODEL: "m1", ...groq() });
+    const r = await chat({ messages: hi, tools: [] });
     expect(r).toMatchObject({ model: "openai/gpt-oss-120b", message: { content: "from openai/gpt-oss-120b" } });
-    expect(seen).toEqual(["/gemini/chat/completions", "/groq/chat/completions"]);
+    expect(seen).toEqual(["/gemini/chat/completions m1", "/groq/chat/completions openai/gpt-oss-120b"]);
     expect(currentEndpoint()?.id).toBe("groq:openai/gpt-oss-120b");
   });
 
   it("says why when every AI is used up", async () => {
-    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/gemini` });
-    await expect(chat({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow(/daily limits are used up/);
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/gemini`, AGENT_MODEL: "m1" });
+    await expect(chat({ messages: hi, tools: [] })).rejects.toThrow(/daily limits are used up/);
   });
 
+  it("hands a step to the next Gemini model at once when one hits its per-minute limit", async () => {
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/rpm`, AGENT_MODEL: "m1,m2", ...groq() });
+    const waits: number[] = [];
+    const started = Date.now();
+    const r = await chat({ messages: hi, tools: [], onWait: (s) => waits.push(s) });
+    expect(r.model).toBe("m2");
+    expect(waits).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(800);
+    expect(currentEndpoint()?.id).toBe("agent:m2"); // m1 rests until its minute is over
+  });
+
+  it("waits a moment for a resting Gemini model rather than handing the step to Groq", async () => {
+    // m1 hits its per-minute limit, m2 is used up for the day: m1 is back in a second.
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/mix`, AGENT_MODEL: "m1,m2", ...groq() });
+    const waits: string[] = [];
+    const r = await chat({ messages: hi, tools: [], onWait: (_s, why) => waits.push(why) });
+    expect(r.model).toBe("m1");
+    expect(waits).toEqual(["AI rate limit"]);
+    expect(seen.some((s) => s.startsWith("/groq"))).toBe(false);
+  }, 10_000);
+
   it("gives a request to Groq when the main AI is too slow, even with the owner's Stop signal passed", async () => {
-    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/slow`, AGENT_TIMEOUT_SECONDS: "0.3", GROQ_API_KEY: "gsk_x", GROQ_BASE_URL: `${base}/groq` });
-    const r = await chat({ messages: [{ role: "user", content: "hi" }], tools: [], signal: new AbortController().signal });
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/slow`, AGENT_MODEL: "m1", AGENT_TIMEOUT_SECONDS: "0.3", ...groq() });
+    const r = await chat({ messages: hi, tools: [], signal: new AbortController().signal });
     expect(r.model).toBe("openai/gpt-oss-120b");
     expect(currentEndpoint()?.id).toBe("groq:openai/gpt-oss-120b");
   });
 
   it("stops at the time limit when there's no other AI", async () => {
-    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/slow`, AGENT_TIMEOUT_SECONDS: "0.3" });
-    await expect(chat({ messages: [{ role: "user", content: "hi" }], tools: [] })).rejects.toThrow(/took longer than/);
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/slow`, AGENT_MODEL: "m1", AGENT_TIMEOUT_SECONDS: "0.3" });
+    await expect(chat({ messages: hi, tools: [] })).rejects.toThrow(/took longer than/);
   });
 
   it("gives a refused request to the next AI without skipping the main AI afterwards", async () => {
-    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/refuse`, GROQ_API_KEY: "gsk_x", GROQ_BASE_URL: `${base}/groq` });
-    const r = await chat({ messages: [{ role: "user", content: "hi" }], tools: [] });
+    Object.assign(process.env, { AGENT_API_KEY: "g", AGENT_BASE_URL: `${base}/refuse`, AGENT_MODEL: "m1", ...groq() });
+    const r = await chat({ messages: hi, tools: [] });
     expect(r.model).toBe("openai/gpt-oss-120b");
-    expect(seen).toEqual(["/refuse/chat/completions", "/groq/chat/completions"]);
-    expect(currentEndpoint()?.id).toBe("agent");
+    expect(seen).toEqual(["/refuse/chat/completions m1", "/groq/chat/completions openai/gpt-oss-120b"]);
+    expect(currentEndpoint()?.id).toBe("agent:m1");
   });
 });
 
