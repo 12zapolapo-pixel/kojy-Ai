@@ -63,6 +63,9 @@ interface Running {
 
 const ACTIVITY_KINDS = new Set(["chat", "whisper", "reply", "join", "leave", "tip", "emote"]);
 
+const KICKED_OUT = "Kicked out of the room: this bot's Highrise account logged in somewhere else — another copy of the bot "
+  + "(for example still running on Replit) or the same bot token in another bot. Stop the other copy, then start this bot again.";
+
 export class Supervisor {
   private procs = new Map<string, Running>();
   private restartTimers = new Map<string, NodeJS.Timeout>();
@@ -286,6 +289,26 @@ export class Supervisor {
     if (t) { clearTimeout(t); this.restartTimers.delete(uuid); }
   }
 
+  /**
+   * Highrise closed the connection because the bot's account logged in
+   * somewhere else ("Multilogin"). The SDK then waits forever without
+   * reconnecting, so the bot would look "running" while it's gone from the
+   * room. Stop it and tell the owner; restarting by itself would just kick
+   * the other copy out in turn.
+   */
+  private async kickedOut(uuid: string): Promise<void> {
+    const run = this.procs.get(uuid);
+    if (!run || run.stopping) return;
+    this.console(uuid, "system", "✖ Kicked out of the room: the bot's Highrise account logged in somewhere else");
+    this.clearRestart(uuid);
+    this.crashStreak.delete(uuid);
+    await this.kill(uuid);
+    await this.db.update(botProjects).set({ desiredState: "stopped" }).where(eq(botProjects.uuid, uuid));
+    await this.setStatus(uuid, "error", KICKED_OUT);
+    void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} was kicked out of the room`, KICKED_OUT, `/studio/p/${uuid}`);
+    void sendAlert(`⚠️ ${run.project.name}: ${KICKED_OUT}`);
+  }
+
   // ── python environment ─────────────────────────────────────────────────────
 
   /**
@@ -342,6 +365,8 @@ export class Supervisor {
     if (stream === "stdout" || stream === "stderr") {
       const t = this.tails.get(uuid);
       if (t) { t.push(line.slice(0, 500)); if (t.length > 80) t.shift(); }
+      // The SDK prints "ERROR: Multilogin closing connection with ID: …".
+      if (/Multilogin closing connection/i.test(line)) void this.kickedOut(uuid);
     }
     const file = path.join(LOG_DIR, `${uuid}.log`);
     try {
