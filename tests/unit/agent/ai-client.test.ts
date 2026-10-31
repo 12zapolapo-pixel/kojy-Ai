@@ -21,20 +21,20 @@ afterEach(() => {
 describe("coder AI endpoints", () => {
   it("uses Groq alone on its free-plan budgets, with AGENT_* as Groq's settings", () => {
     const list = endpoints({ GROQ_API_KEY: "gsk_x", AGENT_HISTORY_TOKENS: "5000" });
-    expect(list.map((e) => e.id)).toEqual(["groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b"]);
+    expect(list.map((e) => e.id)).toEqual(["groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b", "groq:qwen/qwen3.8-27b"]);
     expect(list[0]).toMatchObject({ baseUrl: "https://api.groq.com/openai/v1", historyTokens: 5000, maxOutputTokens: 1200, tokensPerMinute: 7500 });
   });
 
   it("puts several free Gemini models first when AGENT_API_KEY is set, with Groq as the backup on Groq's budgets", () => {
     const list = endpoints({ AGENT_API_KEY: "g", GROQ_API_KEY: "gsk_x", AGENT_HISTORY_TOKENS: "40000" });
     expect(list.map((e) => e.id)).toEqual([
-      "agent:gemini-3.6-flash", "agent:gemini-3-flash-preview", "agent:gemini-3.5-flash-lite", "agent:gemini-3.1-flash-lite",
-      "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b",
+      "agent:gemini-3.6-flash", "agent:gemini-3.5-flash", "agent:gemini-3-flash-preview", "agent:gemini-3.5-flash-lite", "agent:gemini-3.1-flash-lite",
+      "groq:openai/gpt-oss-120b", "groq:openai/gpt-oss-20b", "groq:qwen/qwen3.8-27b",
     ]);
     expect(list[0]).toMatchObject({
       group: "agent", kind: "gemini", model: "gemini-3.6-flash", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", historyTokens: 40000, maxOutputTokens: 8000,
     });
-    expect(list[4]).toMatchObject({ group: "groq", historyTokens: 3000, maxOutputTokens: 1200, tokensPerMinute: 7500 });
+    expect(list[5]).toMatchObject({ group: "groq", historyTokens: 3000, maxOutputTokens: 1200, tokensPerMinute: 7500 });
   });
 
   it("takes AGENT_MODEL as one model or a list; another service needs it", () => {

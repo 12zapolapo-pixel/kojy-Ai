@@ -5,12 +5,12 @@
  * Kojy uses these AIs, best first (see endpoints()):
  *   1. AGENT_API_KEY — a bigger free plan: several Google Gemini models by
  *      default, taking turns (AGENT_BASE_URL / AGENT_MODEL pick others)
- *   2. GROQ_API_KEY — Groq's free plan: gpt-oss-120b, then gpt-oss-20b
+ *   2. GROQ_API_KEY — Groq's free plan: gpt-oss-120b, gpt-oss-20b, qwen3.8-27b
  * Each has its own budgets: Groq's free plan (per model: ~8K tokens/minute,
  * ~200K/day) only fits a short history and answer; Gemini's fits whole files.
  *   - paces itself: waits before a request that would go over the minute budget
  *   - on 429 it waits for the retry time and tries again — or, for Gemini,
- *     hands the request to the next Gemini model at once (each has its own limits)
+ *     hands the request to the next model of the same AI at once (each has its own limits)
  *   - when an AI's daily budget is used up, its key is refused, it doesn't
  *     answer in time or keeps failing, it moves to the next AI for a while
  *   - a request one AI refuses (a 400) goes to the next AI
@@ -66,7 +66,11 @@ const GROQ_URL = "https://api.groq.com/openai/v1";
 // minute), counted per model, so Kojy takes turns with several. All of these
 // answered a real Kojy tool call in 1-2s (Oct 2026); gemini-3.8-flash took
 // minutes, so it's left out.
-const GEMINI_MODELS = "gemini-3.6-flash,gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite";
+// Checked with real tool-call requests (Oct 31): these answer in 1-6s. Not here:
+// 3.7/3.8 Flash (60-90s+, overloaded), 3.1 Pro (no free allowance), 2.5 (retired).
+const GEMINI_MODELS = "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite";
+// Groq's free plan (each: 1000 requests/day, 8K tokens/minute). It has no 70B model any more.
+const GROQ_MODELS = "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b"; // qwen last: weakest at finding bugs in a check
 
 /** A positive number setting, or the default. */
 const setting = (value: string | undefined, fallback: number) => {
@@ -101,8 +105,9 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
   if (groqKey && !groqKey.includes("placeholder")) {
     // Without AGENT_API_KEY the AGENT_* settings keep their old meaning: Kojy's Groq settings.
     const own: NodeJS.ProcessEnv = agentKey ? {} : env;
-    const smart = own.AGENT_MODEL ?? env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
-    const fast = env.AGENT_FALLBACK_MODEL ?? env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
+    // GROQ_MODELS: several, best first. The older single settings still win when set.
+    const single = [own.AGENT_MODEL ?? env.GROQ_MODEL_SMART, env.AGENT_FALLBACK_MODEL ?? env.GROQ_MODEL_FAST].filter(Boolean) as string[];
+    const groqModels = single.length ? single : (env.GROQ_MODELS ?? GROQ_MODELS).split(",").map((m) => m.trim()).filter(Boolean);
     const groq = (model: string): Endpoint => ({
       id: `groq:${model}`, group: "groq", baseUrl: trimSlash(env.GROQ_BASE_URL ?? GROQ_URL), key: groqKey, model, kind: "openai",
       tokensPerMinute: setting(own.AGENT_TOKENS_PER_MINUTE, 7500),
@@ -112,8 +117,7 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
       reasoningEffort: "medium",
       timeoutMs: 120_000,
     });
-    list.push(groq(smart));
-    if (fast !== smart) list.push(groq(fast));
+    for (const model of [...new Set(groqModels)]) list.push(groq(model));
   }
   return list;
 }
@@ -266,8 +270,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
     const hasNext = all.some((e) => e !== ep && usable(e));
     // Another Gemini model takes the request instead of waiting out a per-minute limit
-    // (each model has its own). Groq waits for gpt-oss-120b, the stronger of its two.
-    const sibling = ep.group === "agent" && all.some((e) => e !== ep && e.group === ep.group && usable(e));
+    // (each model has its own) — for Groq too, whose 8K tokens a minute fit only ~2 steps.
+    const sibling = all.some((e) => e !== ep && e.group === ep.group && usable(e));
     const maxTokens = opts.maxTokens ?? ep.maxOutputTokens;
     const body = requestBody(ep, opts.messages, opts.tools, maxTokens);
     const size = estimateTokens(JSON.stringify(body.messages)) + estimateTokens(JSON.stringify(body.tools ?? [])) + maxTokens;
