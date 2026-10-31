@@ -24,19 +24,27 @@ import { and, desc, eq, gt } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
 import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
-import { listFiles } from "@kojyai/shared/projects";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { listFiles, projectDir, readLogs, restoreSnapshot } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
 import { chat, estimateTokens, aiConfigured, currentEndpoint, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
-import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
+import { TOOL_SPECS, runTool, loadMemories, type Project, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt } from "./prompt.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
+import { projectMap, readSpec, KOJY_DIR } from "./codeQuality.js";
+import { changesSince } from "./review.js";
 
 const log = createLogger("agent");
 
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
+/** Kojy jobs at once (each runs Python tests and calls the AI; the server and the free AI plans are small). */
+const MAX_JOBS = Math.max(1, Number(process.env.AGENT_MAX_JOBS ?? 2));
+const WATCH_MS = Number(process.env.AGENT_WATCH_SECONDS ?? 120) * 1000;
+const WATCH_TICK_MS = Math.min(10_000, WATCH_MS / 4);
 const AUTOFIX_PER_DAY = 3;
 
 type Row = typeof projectMessages.$inferSelect;
@@ -50,6 +58,8 @@ interface Scope {
   runTool(name: string, args: Record<string, unknown>): Promise<ToolResult>;
   system(): Promise<string>;
   setState(state: "idle" | "working" | "waiting"): Promise<void>;
+  /** A Python bot's tool context (its checks, edits and snapshot), for the report and the watch. */
+  ctx?: ToolContext;
 }
 
 export const STUDIO_PREFIX = "studio-";
@@ -129,7 +139,7 @@ export class Agent {
     }
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, key)).limit(1);
     if (!project) return null;
-    const ctx: ToolContext = { db: this.db, supervisor: this.supervisor, project, snapshotted: false, changedFiles: new Set() };
+    const ctx: ToolContext = { db: this.db, supervisor: this.supervisor, project, snapshotted: false, changedFiles: new Set(), checks: [], edits: 0 };
     return {
       key, thread: `project:${project.id}`, projectId: project.id, tools: TOOL_SPECS,
       runTool: (name, args) => runTool(name, args, ctx),
@@ -141,9 +151,11 @@ export class Agent {
         return systemPrompt({
           projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status,
           secrets: secrets.map((x) => x.key), memories, fileCount: listFiles(project.uuid).filter((f) => !f.isDir).length,
+          map: projectMap(project.uuid), spec: readSpec(project.uuid).slice(0, 2500),
         });
       },
       setState: async (state) => { await this.db.update(botProjects).set({ agentState: state }).where(eq(botProjects.id, project.id)); },
+      ctx,
     };
   }
 
@@ -152,14 +164,45 @@ export class Agent {
     const abort = new AbortController();
     this.active.set(uuid, abort);
     try {
+      await this.takeSlot(uuid, abort.signal);
+      if (abort.signal.aborted) return;
       do {
         this.again.delete(uuid);
         await this.runOnce(uuid, abort.signal);
       } while (this.again.has(uuid) && !abort.signal.aborted);
     } finally {
+      this.giveSlot(uuid);
       this.active.delete(uuid);
       await this.progress(uuid, null);
     }
+  }
+
+  // ── job queue: a few Kojy jobs at once, the rest wait their turn ──
+  private running = new Set<string>();
+  private waiting: { uuid: string; go: () => void }[] = [];
+
+  private async takeSlot(uuid: string, signal: AbortSignal): Promise<void> {
+    if (this.running.size < MAX_JOBS) { this.running.add(uuid); return; }
+    // Shown as busy in the Studio while it waits (Python bots; other chats have no row).
+    await this.db.update(botProjects).set({ agentState: "working" }).where(eq(botProjects.uuid, uuid));
+    await this.progress(uuid, `Queued: waiting for ${this.running.size === 1 ? "another job" : `${this.running.size} other jobs`} to finish…`);
+    await new Promise<void>((resolve) => {
+      const entry = { uuid, go: resolve };
+      this.waiting.push(entry);
+      signal.addEventListener("abort", () => { this.waiting = this.waiting.filter((w) => w !== entry); resolve(); }, { once: true });
+    });
+    if (signal.aborted) await this.db.update(botProjects).set({ agentState: "idle" }).where(eq(botProjects.uuid, uuid));
+  }
+
+  private giveSlot(uuid: string): void {
+    if (!this.running.delete(uuid)) return;
+    const next = this.waiting.shift();
+    if (next) { this.running.add(next.uuid); next.go(); }
+  }
+
+  /** Jobs running and waiting, for the Studio's job list. */
+  jobs(): { running: string[]; queued: string[] } {
+    return { running: [...this.running], queued: this.waiting.map((w) => w.uuid) };
   }
 
   private async runOnce(uuid: string, signal: AbortSignal): Promise<void> {
@@ -167,6 +210,14 @@ export class Agent {
     if (!scope) return;
     await scope.setState("working");
     let finalState: "idle" | "waiting" = "idle";
+    const ctx = scope.ctx;
+    if (ctx) {
+      const [ask] = await this.db.select({ content: projectMessages.content }).from(projectMessages)
+        .where(and(eq(projectMessages.thread, scope.thread), eq(projectMessages.role, "user"))).orderBy(desc(projectMessages.id)).limit(1);
+      ctx.goal = ask?.content ?? "";
+      ctx.signal = signal;
+      ctx.onRestarted = () => this.watchAfterRestart(uuid, ctx);
+    }
 
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
@@ -179,10 +230,12 @@ export class Agent {
         for (let shrink = 1; !message; shrink *= 2) {
           const budget = Math.floor((currentEndpoint()?.historyTokens ?? 3000) / shrink);
           try {
-            ({ message } = await chat({
+            let model: string;
+            ({ message, model } = await chat({
               messages: await this.buildMessages(scope, budget), tools: scope.tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`),
             }));
+            if (ctx) ctx.mainModel = model;
           } catch (err) {
             if (!(err instanceof RequestTooLargeError) || shrink >= 8) throw err;
           }
@@ -212,8 +265,31 @@ export class Agent {
       if (!(err instanceof AiUnavailableError)) log.error({ err, uuid }, "Agent run failed");
       await this.add(scope, "assistant", text, "error");
     } finally {
+      if (ctx && (ctx.edits > 0 || ctx.checks.length)) await this.report(scope, ctx).catch((err) => log.warn({ err, uuid }, "Couldn't write the work report"));
       await scope.setState(finalState);
     }
+  }
+
+  /** The task's work report: files changed (with diffs), what was checked and tested, and what wasn't. */
+  private async report(scope: Scope, ctx: ToolContext): Promise<void> {
+    const files = ctx.snapshotId ? changesSince(ctx.project.uuid, ctx.snapshotId, ctx.changedFiles) : [];
+    const last = (name: RegExp) => [...ctx.checks].reverse().find((c) => name.test(c.name));
+    const notTested: string[] = [];
+    if (files.length) {
+      if (!last(/^Code check/)?.ok) notTested.push("The code check didn't pass after the last change.");
+      if (!last(/^(Test room|Saved tests)/)?.ok) notTested.push("No passing test in the test room after the change.");
+      if (!ctx.restarted) notTested.push("The real bot wasn't restarted, so the change isn't live yet.");
+    }
+    const card = {
+      snapshotId: ctx.snapshotId, files, checks: ctx.checks, notTested, live: !!ctx.restarted,
+      ...(ctx.reviewNotes ? { reviewNotes: ctx.reviewNotes } : {}),
+    };
+    const lines = [
+      files.length ? `Changed: ${files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join(", ")}` : "No code changes.",
+      ...ctx.checks.map((c) => `${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`),
+      ...notTested.map((n) => `Not done: ${n}`),
+    ];
+    await this.add(scope, "assistant", lines.join("\n"), "report", { card });
   }
 
   /**
@@ -226,7 +302,8 @@ export class Agent {
       this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(80),
       scope.system(),
     ]);
-    const rows = rowsDesc.reverse().filter((r) => r.kind !== "error");
+    // Errors and work reports are for the owner; the model has the steps themselves.
+    const rows = rowsDesc.reverse().filter((r) => r.kind !== "error" && r.kind !== "report");
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
 
     const toMsg = (r: Row, full: boolean): ChatMessage => {
@@ -268,6 +345,51 @@ export class Agent {
     const history = pairToolCalls(picked.slice(start));
 
     return [{ role: "system", content: system }, ...history];
+  }
+
+  // ── watch after a restart ──────────────────────────────────────────────────
+
+  private watches = new Map<string, NodeJS.Timeout>();
+  private rollbacks = new Map<string, number[]>();
+
+  /**
+   * For 2 minutes after a run restarts the real bot with new code: a crash, a
+   * stuck connection, or an error from a file the run changed puts the previous
+   * version back, and Kojy is told what happened so it can fix it properly.
+   */
+  private watchAfterRestart(uuid: string, ctx: ToolContext): void {
+    const snapshotId = ctx.snapshotId;
+    if (!snapshotId) return;
+    clearTimeout(this.watches.get(uuid));
+    const since = Date.now();
+    const changed = [...ctx.changedFiles];
+    const tick = async () => {
+      try {
+        const problem = await findProblem(this.db, uuid, since, changed);
+        if (problem) { this.watches.delete(uuid); return await this.rollback(uuid, ctx.project, snapshotId, problem); }
+        if (Date.now() - since >= WATCH_MS) { this.watches.delete(uuid); return; }
+      } catch (err) { log.warn({ err, uuid }, "Watch after restart failed"); }
+      this.watches.set(uuid, setTimeout(() => void tick(), WATCH_TICK_MS));
+    };
+    this.watches.set(uuid, setTimeout(() => void tick(), WATCH_TICK_MS));
+  }
+
+  private async rollback(uuid: string, project: Project, snapshotId: string, problem: string): Promise<void> {
+    const now = Date.now();
+    const recent = (this.rollbacks.get(uuid) ?? []).filter((t) => now - t < 3600_000);
+    this.rollbacks.set(uuid, [...recent, now]);
+    // Kojy's own notes (tests, spec, insights) stay as they are now.
+    const keep = readKojyFiles(uuid);
+    restoreSnapshot(uuid, snapshotId);
+    writeKojyFiles(uuid, keep);
+    await this.supervisor.handle(uuid, "restart");
+    log.warn({ uuid, snapshotId }, "Rolled back a change that broke the bot");
+    await this.add({ thread: `project:${project.id}`, projectId: project.id }, "user",
+      `The change you just made broke the bot after the restart, so the platform put the previous version back and restarted it (the bot is running the old code now; your edits are undone). What happened:\n${problem}\n\nFind the cause, then redo the change correctly: check_code, a test that reproduces this problem (save_test), run_tests, and restart again.`,
+      "rollback");
+    await notifyUser(this.db, project.ownerId, "bot_error", `${project.name}: a change was undone`, `The new version broke the bot, so the previous one is back. Kojy is fixing it.`, `/studio/p/${uuid}`);
+    // At most twice an hour, so a change that keeps breaking doesn't loop.
+    if (recent.length < 2) void this.run(uuid);
   }
 
   // ── stabilizer ─────────────────────────────────────────────────────────────
@@ -365,3 +487,42 @@ function describeCall(name: string, args: Record<string, unknown>): string {
   }
 }
 
+
+/** Kojy's own files (.kojy/), so a rollback of the code doesn't undo them. */
+function readKojyFiles(uuid: string): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  const root = projectDir(uuid);
+  for (const f of listFiles(uuid)) if (!f.isDir && f.path.startsWith(`${KOJY_DIR}/`)) out.set(f.path, readFileSync(path.join(root, f.path)));
+  return out;
+}
+
+function writeKojyFiles(uuid: string, files: Map<string, Buffer>): void {
+  const root = projectDir(uuid);
+  for (const [rel, data] of files) { mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); writeFileSync(path.join(root, rel), data); }
+}
+
+/**
+ * What went wrong since the restart, or null: the bot crashed or got stuck, or
+ * a traceback points into a file the run changed (errors elsewhere may be old).
+ */
+export async function findProblem(db: Database, uuid: string, since: number, changed: string[]): Promise<string | null> {
+  const lines = readLogs(uuid, undefined, 96 * 1024).lines.filter((l) => l.ts >= since);
+  const text = (from: number) => lines.slice(Math.max(0, from - 1), from + 30).map((l) => l.line).join("\n").slice(0, 3000);
+  const exited = lines.findIndex((l) => l.stream === "system" && /Bot exited/.test(l.line));
+  if (exited >= 0) {
+    const tb = lines.findIndex((l) => /Traceback \(most recent call last\)/.test(l.line));
+    return `The bot crashed:\n${text(tb >= 0 ? tb : Math.max(0, exited - 15))}`;
+  }
+  const stuck = lines.findIndex((l) => /\[kojy\] Nothing from Highrise/.test(l.line));
+  if (stuck >= 0) return `The bot got stuck and stopped talking to Highrise:\n${text(stuck)}`;
+  for (let i = 0; i < lines.length; i++) {
+    if (!/\[kojy\] Error in /.test(lines[i]!.line)) continue;
+    const trace = lines.slice(i, i + 40).map((l) => l.line);
+    const end = trace.findIndex((l, j) => j > 1 && !/^\s/.test(l) && !/^Traceback/.test(l));
+    const body = trace.slice(0, end > 0 ? end + 1 : 30);
+    if (changed.some((f) => body.some((l) => l.includes(`/${f}"`) || l.includes(`"${f}"`)))) return `A command failed in code this change touched:\n${body.join("\n")}`;
+  }
+  const [p] = await db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage }).from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+  if (p?.status === "error" && !/^Kicked out/.test(p.statusMessage ?? "")) return `The bot stopped with an error: ${p.statusMessage ?? ""}`;
+  return null;
+}

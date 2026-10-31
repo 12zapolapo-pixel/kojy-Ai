@@ -107,6 +107,60 @@ def install_error_guard(bot) -> None:
         setattr(bot, method, make(getattr(bot, method)))
 
 
+# Bot actions that count as answering someone.
+ANSWERS = ("chat", "send_whisper", "send_emote", "react", "send_message", "teleport", "walk_to", "moderate_room")
+
+
+def install_command_tracker(bot) -> None:
+    """Tell the runner which !commands people use and how they went.
+
+    For each chat or whisper starting with "!" or "/": the command word only
+    (no names, no other text), and whether the bot answered while handling it,
+    stayed silent (often a command that doesn't exist) or failed. Kojy uses
+    this to see what people want from the bot. Wraps the bot's own hook,
+    inside the error guard, so the guard still catches what fails.
+    """
+    if _reports is None:
+        return
+    from highrise import Highrise
+
+    answers = [0]
+    for name in ANSWERS:
+        original = getattr(Highrise, name, None)
+        if original is None:
+            continue
+
+        def make_count(original):
+            async def counted(self, *args, **kwargs):
+                answers[0] += 1
+                return await original(self, *args, **kwargs)
+            return counted
+
+        setattr(Highrise, name, make_count(original))
+
+    for method in ("on_chat", "on_whisper"):
+        if not implements(bot, method):
+            continue
+
+        def make(original):
+            async def tracked(user, message, *args, **kwargs):
+                text = message.strip() if isinstance(message, str) else ""
+                if not text[:1] in ("!", "/") or len(text) < 2:
+                    return await original(user, message, *args, **kwargs)
+                command = text.split()[0][:32].lower()
+                before = answers[0]
+                try:
+                    result = await original(user, message, *args, **kwargs)
+                except Exception:
+                    report({"k": "cmd", "c": command, "r": "error"})
+                    raise
+                report({"k": "cmd", "c": command, "r": "ok" if answers[0] > before else "silent"})
+                return result
+            return tracked
+
+        setattr(bot, method, make(getattr(bot, method)))
+
+
 def install_activity_reporter(bot) -> None:
     """Report room activity to the runner (one JSON line per event).
 
@@ -234,6 +288,7 @@ def main() -> None:
         _reports = os.fdopen(3, "w", buffering=1)
     except OSError:
         pass  # not started by the KojyAI runner (the test room, a terminal)
+    install_command_tracker(bot)
     install_error_guard(bot)
     install_activity_reporter(bot)
     install_watchdog()

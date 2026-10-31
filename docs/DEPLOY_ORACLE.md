@@ -148,7 +148,17 @@ reboot. An error in one command or event is logged and skipped, so the bot
 stays in the room; a bot whose connection gets stuck is restarted within two
 minutes. With **Auto-fix crashes** on, a bot that keeps crashing, or whose
 code keeps hitting errors, is repaired by Kojy automatically (at most 3 times
-a day); **Daily check-up**
+a day). Before any change goes live, Kojy's code check (undefined names and
+wrong Highrise SDK uses, found with pyflakes + mypy against the installed
+SDK), every saved test of that bot (`.kojy/tests.json`, run in a fake room
+with the owner, a moderator and visitors) and a second AI's review must pass;
+for two minutes after the restart a crash or a new error in the changed code
+brings the previous version back by itself. Each task ends with a work report
+(what changed, with a diff and an undo button per file, what was tested and
+what wasn't). Kojy keeps a spec sheet per bot (`.kojy/spec.md`) and learns
+from the room (`.kojy/insights.json`: which !commands people try and whether
+they work); the Studio's **Kojy jobs** tab shows its work on all bots (2 at a
+time, the rest queued). **Daily check-up**
 has Kojy look at each day's errors and suggest fixes (it asks before changing
 anything); **Undo AI changes** puts the code back to any earlier version; and
 **What Kojy knows** (Studio home) lists the lessons Kojy keeps — remove or add

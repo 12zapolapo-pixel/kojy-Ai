@@ -45,6 +45,8 @@ export const STUDIO_TOOL_SPECS: ToolSpec[] = [
     { name: str("short bot name"), description: str("what the bot should do, in the owner's words plus useful detail"),
       template: { type: "string", enum: BOT_TEMPLATES.map((t) => t.id), description: BOT_TEMPLATES.map((t) => `${t.id}: ${t.description}`).join(" · ") } },
     ["name", "description"]),
+  fn("give_task", "Hand a coding task to an existing Python bot: it goes into that bot's own chat as the owner's request and Kojy works on it there in the background (several bots can work at once; extra jobs wait in a queue). Use for 'fix X in bot A and add Y to bot B'.",
+    { bot: str("bot name"), task: str("the request, clear and complete, in the owner's words plus useful detail") }, ["bot", "task"]),
   fn("remember", "Save one short lesson that applies to all bots.", { note: str("one sentence") }, ["note"]),
 ];
 
@@ -174,6 +176,20 @@ export async function runStudioTool(name: string, args: Record<string, unknown>,
         return {
           ok: true, output: `Created ${name}. Kojy is building it now in its own chat; the owner has a button to open it.`,
           summary: `Created ${name}`, cardKind: "ui", card: { openBot: { kind: "python", id: uuid, name } },
+        };
+      }
+
+      case "give_task": {
+        const [b] = findBots(await allBots(ctx), String(args.bot ?? ""));
+        if (!b) return { ok: false, output: `No bot called "${args.bot}".`, summary: `No bot "${args.bot}"` };
+        if (b.kind !== "python") return { ok: false, output: `${b.name} is a JavaScript bot; open its chat with open_bot instead.`, summary: `${b.name} is a JS bot` };
+        const task = String(args.task ?? "").trim().slice(0, 4000);
+        if (!task) return { ok: false, output: "The task is empty.", summary: "Empty task" };
+        await ctx.db.insert(projectMessages).values({ thread: `project:${b.id}`, projectId: b.id, role: "user", kind: "text", content: `${task}\n\n(Sent from the Studio chat.)` });
+        ctx.startBotChat(b.uuid);
+        return {
+          ok: true, output: `${b.name} has the task; Kojy works on it in that bot's chat (the Studio's job list shows progress).`,
+          summary: `Gave ${b.name} a task`, cardKind: "ui", card: { openBot: { kind: "python", id: b.uuid, name: b.name } },
         };
       }
 

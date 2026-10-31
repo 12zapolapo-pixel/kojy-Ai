@@ -216,8 +216,8 @@ export function requestBody(ep: Endpoint, messages: ChatMessage[], tools: ToolSp
   return {
     model: ep.model,
     messages: msgs,
-    tools: specs,
-    tool_choice: "auto",
+    // No tools (the reviewer): leave them out; an empty list is refused.
+    ...(specs?.length ? { tools: specs, tool_choice: "auto" } : {}),
     max_tokens: maxTokens + ep.reasoningTokens,
     ...(ep.kind === "gemini" ? {} : { temperature: 0.2 }),
     ...(ep.reasoningEffort ? { reasoning_effort: ep.reasoningEffort } : {}),
@@ -231,10 +231,13 @@ export interface ChatOptions {
   /** Called while waiting on rate limits, so the chat can say so. */
   onWait?: (seconds: number, why: string) => void;
   signal?: AbortSignal;
+  /** Try other models first, e.g. for a second opinion on the main model's work (it's still used if nothing else answers). */
+  avoidModel?: string;
 }
 
 export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
-  const all = endpoints();
+  const listed = endpoints();
+  const all = opts.avoidModel ? [...listed.filter((e) => e.model !== opts.avoidModel), ...listed.filter((e) => e.model === opts.avoidModel)] : listed;
   if (!all.length) {
     throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY (a free Gemini key from aistudio.google.com/apikey) or GROQ_API_KEY (free at console.groq.com/keys) in the server's .env.");
   }
@@ -267,7 +270,7 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     const sibling = ep.group === "agent" && all.some((e) => e !== ep && e.group === ep.group && usable(e));
     const maxTokens = opts.maxTokens ?? ep.maxOutputTokens;
     const body = requestBody(ep, opts.messages, opts.tools, maxTokens);
-    const size = estimateTokens(JSON.stringify(body.messages)) + estimateTokens(JSON.stringify(body.tools)) + maxTokens;
+    const size = estimateTokens(JSON.stringify(body.messages)) + estimateTokens(JSON.stringify(body.tools ?? [])) + maxTokens;
 
     const used = usedLastMinute(ep.id);
     if (used > 0 && used + size > ep.tokensPerMinute) {

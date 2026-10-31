@@ -9,7 +9,7 @@
  */
 
 import { z } from "zod";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { router, permittedProc } from "../../trpc.js";
 import { schema } from "../../db/client.js";
@@ -60,6 +60,25 @@ export const studioRouter = router({
       ...py.map((p) => ({ kind: "python" as const, id: p.uuid, name: p.name, status: p.status, live: live(p.status), working: p.agentState === "working", updatedAt: p.updatedAt })),
       ...js.map((b) => ({ kind: "javascript" as const, id: b.uuid, name: b.name, status: b.status as string, live: live(b.status), working: false, updatedAt: b.updatedAt })),
     ].sort((a, b) => a.name.localeCompare(b.name));
+  }),
+
+  /** Kojy's jobs on Python bots: working or queued now, and the last finished ones. */
+  jobs: permittedProc("bots:read").query(async ({ ctx }) => {
+    const orgId = await resolveOrgId(ctx);
+    const projects = await ctx.db.select({ id: botProjects.id, uuid: botProjects.uuid, name: botProjects.name, agentState: botProjects.agentState })
+      .from(botProjects).where(eq(botProjects.orgId, orgId));
+    const byId = new Map(projects.map((p) => [p.id, p]));
+    const active = await Promise.all(projects.filter((p) => p.agentState !== "idle").map(async (p) => {
+      const progress = await agentProgress(p.uuid);
+      return { id: p.uuid, name: p.name, state: progress?.startsWith("Queued") ? "queued" : p.agentState as string, progress };
+    }));
+    const reports = projects.length ? await ctx.db.select({ projectId: projectMessages.projectId, content: projectMessages.content, createdAt: projectMessages.createdAt })
+      .from(projectMessages).where(and(inArray(projectMessages.projectId, projects.map((p) => p.id)), eq(projectMessages.kind, "report")))
+      .orderBy(desc(projectMessages.id)).limit(8) : [];
+    return {
+      active,
+      finished: reports.map((r) => ({ id: byId.get(r.projectId)?.uuid ?? "", name: byId.get(r.projectId)?.name ?? "", summary: r.content.split("\n").slice(0, 4).join(" · ").slice(0, 300), at: r.createdAt })),
+    };
   }),
 
   chatList: permittedProc("bots:read").input(z.object({ afterId: z.number().int().min(0).optional() })).query(async ({ ctx, input }) => {

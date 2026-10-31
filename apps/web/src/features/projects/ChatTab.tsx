@@ -363,6 +363,15 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
       </div>
     );
   }
+  if (m.kind === "rollback") {
+    return (
+      <div className="border border-rose-500/30 bg-rose-500/5 rounded-lg px-3 py-2 text-xs">
+        <button className="text-rose-200 text-left" onClick={() => setOpen((v) => !v)}>↩ The last change broke the bot, so the previous version came back automatically. Kojy is fixing it {open ? "▾" : "▸"}</button>
+        {open && <pre className="mt-2 whitespace-pre-wrap text-rose-100/70 font-mono">{m.content.replace(/\n\nFind the cause[\s\S]*$/, "")}</pre>}
+      </div>
+    );
+  }
+  if (m.kind === "report" && m.card) return <ReportCardView m={m} projectId={projectId} />;
   if (m.role === "user") {
     // App events ("secrets saved", "code restored"): shown small, without the AI-facing instructions.
     return <p className="text-center text-[11px] text-white/35">{m.content.replace(/ (Test them|Restart the bot).*$/, "")}</p>;
@@ -382,6 +391,54 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
   if (m.kind === "error") return <p className="text-sm text-red-300/90">⚠ {m.content}</p>;
   if (m.kind === "event") return <p className="text-xs text-white/40">{m.content}</p>;
   return <div className="max-w-[85%] text-sm text-white/85 leading-relaxed"><RichText text={m.content} /></div>;
+}
+
+function ReportCardView({ m, projectId }: { m: Msg; projectId: string | null }) {
+  const card = m.card!;
+  const [openFile, setOpenFile] = useState<string | null>(null);
+  const [undone, setUndone] = useState<string[]>(card.undone ?? []);
+  const revert = trpc.projects.revertFile.useMutation({ onSuccess: (_r, v) => setUndone((u) => [...u, v.path]) });
+  const files = card.files ?? [];
+  const checks = card.checks ?? [];
+  return (
+    <div className="max-w-2xl border border-white/10 bg-white/[0.02] rounded-xl p-3 space-y-2 text-xs">
+      <p className="text-white/70 font-medium">🧾 Work report{card.live ? " · live in the room" : ""}</p>
+      {checks.length > 0 && (
+        <ul className="space-y-0.5">
+          {checks.map((c, i) => (
+            <li key={i} className={c.ok ? "text-[#49dcb5]/90" : "text-amber-300/90"}>{c.ok ? "✓" : "✗"} {c.name}{c.detail ? <span className="text-white/40"> — {c.detail}</span> : null}</li>
+          ))}
+        </ul>
+      )}
+      {(card.notTested ?? []).map((n, i) => <p key={i} className="text-amber-200/80">⚠ {n}</p>)}
+      {card.reviewNotes && <pre className="whitespace-pre-wrap text-white/50 font-mono text-[11px]">{card.reviewNotes}</pre>}
+      {files.length > 0 && (
+        <div className="space-y-1">
+          {files.map((f) => (
+            <div key={f.path} className="border border-white/10 rounded-lg">
+              <div className="flex items-center gap-2 px-2 py-1">
+                <button className="flex-1 text-left font-mono text-white/75 hover:text-white truncate" onClick={() => setOpenFile((o) => (o === f.path ? null : f.path))}>
+                  {openFile === f.path ? "▾" : "▸"} {f.path} <span className="text-[#49dcb5]/80">+{f.added}</span> <span className="text-rose-300/80">-{f.removed}</span>{f.status !== "changed" ? <span className="text-white/40"> ({f.status})</span> : null}
+                </button>
+                {projectId && card.snapshotId && (undone.includes(f.path)
+                  ? <span className="text-white/40">undone</span>
+                  : <button disabled={revert.isPending} onClick={() => revert.mutate({ id: projectId, messageId: m.id, path: f.path })}
+                      className="px-2 py-0.5 rounded border border-white/15 text-white/60 hover:bg-white/5 disabled:opacity-40">Undo</button>)}
+              </div>
+              {openFile === f.path && (
+                <pre className="max-h-96 overflow-auto px-2 py-1 border-t border-white/10 font-mono text-[11px] leading-snug">
+                  {f.diff.split("\n").map((l, i) => (
+                    <div key={i} className={l.startsWith("+") ? "text-[#49dcb5] bg-[#49dcb5]/5" : l.startsWith("-") ? "text-rose-300 bg-rose-500/5" : l.startsWith("@@") ? "text-sky-300/70" : "text-white/45"}>{l || " "}</div>
+                  ))}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {revert.isError && <p className="text-red-400">{revert.error.message}</p>}
+    </div>
+  );
 }
 
 function PlanCardView({ m, projectId, onResolved }: { m: Msg; projectId: string; onResolved: (id: number, saved: string[]) => void }) {

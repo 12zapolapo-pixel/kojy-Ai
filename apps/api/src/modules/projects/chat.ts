@@ -15,6 +15,16 @@ export interface SecretCard { secrets: { name: string; description: string; alre
 export interface UiCard { panel?: string; openBot?: { kind: "python" | "javascript"; id: string; name: string } }
 /** "plan" cards: Kojy's plan before a bigger change, approved with a button. */
 export interface PlanCard { title?: string; steps?: string[] }
+/** "report" cards: what Kojy changed and checked in one task, with undo per file. */
+export interface ReportCard {
+  snapshotId?: string;
+  files?: { path: string; status: "added" | "changed" | "removed"; added: number; removed: number; diff: string }[];
+  checks?: { name: string; ok: boolean; detail?: string }[];
+  notTested?: string[];
+  live?: boolean;
+  reviewNotes?: string;
+  undone?: string[];
+}
 
 export async function listThread(db: any, thread: string, afterId: number | undefined) {
   type Row = typeof projectMessages.$inferSelect;
@@ -32,7 +42,7 @@ export async function listThread(db: any, thread: string, afterId: number | unde
           id: r.id, role: r.role, kind: r.kind, createdAt: r.createdAt,
           content: r.role === "tool" ? r.content.slice(0, 3000) : r.content,
           summary: d.summary ?? null, ok: d.ok ?? null, tool: d.name ?? null,
-          card: (d.card ?? null) as null | (SecretCard & UiCard & PlanCard),
+          card: (d.card ?? null) as null | (SecretCard & UiCard & PlanCard & ReportCard),
         };
       }),
   };

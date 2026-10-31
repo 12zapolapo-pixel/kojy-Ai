@@ -18,6 +18,7 @@ import { verifyBotControlMessage } from "@kojyai/shared/crypto";
 import { createLogger } from "./logger.js";
 import { Supervisor } from "./supervisor.js";
 import { Agent } from "./agent/agent.js";
+import { ensureCheckTools } from "./agent/codeQuality.js";
 
 const log = createLogger("runner-boot");
 const CONTROL_PREFIX = "project_control:";
@@ -81,6 +82,8 @@ async function main(): Promise<void> {
 
   await supervisor.restoreAll();
   log.info("Runner ready");
+  // Kojy's code checker (pyflakes + mypy) installs once into the venvs volume; do it now, not on the first check.
+  void ensureCheckTools().then((ok) => { if (!ok) log.warn("Kojy's code checker couldn't be installed; checks fall back to compile + import"); });
 
   // Heartbeat + host stats for the Infrastructure page (the runner sees the
   // bots' volume, so it reports disk space too). Expires if the runner dies.

@@ -274,6 +274,29 @@ export function restoreSnapshot(uuid: string, id: string): number {
   return Object.keys(files).length;
 }
 
+/** A snapshot's files (code only), without restoring anything. */
+export function snapshotFiles(uuid: string, id: string): Record<string, Uint8Array> {
+  if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
+  const file = path.join(SNAPSHOT_DIR, uuid, `${id}.zip`);
+  if (!existsSync(file)) throw new ProjectFileError("That snapshot no longer exists");
+  const files = unzipSync(readFileSync(file));
+  delete files[".kojy-snapshot.json"];
+  return files;
+}
+
+/** Puts one file back as it was in the snapshot (or removes it if it didn't exist then). */
+export function restoreSnapshotFile(uuid: string, id: string, rel: string): "restored" | "removed" {
+  const files = snapshotFiles(uuid, id);
+  const clean = cleanRelPath(rel);
+  if (isPersistentData(clean)) throw new ProjectFileError("Data files aren't part of snapshots");
+  const target = resolveInside(uuid, clean);
+  const data = files[clean];
+  if (!data) { rmSync(target, { force: true }); return "removed"; }
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, data);
+  return "restored";
+}
+
 export function removeSnapshots(uuid: string): void {
   rmSync(path.join(SNAPSHOT_DIR, uuid), { recursive: true, force: true });
 }

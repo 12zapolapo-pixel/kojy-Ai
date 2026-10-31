@@ -17,9 +17,12 @@ import { decryptApiKey } from "@kojyai/shared/crypto";
 import {
   listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
 } from "@kojyai/shared/projects";
-import type { Supervisor } from "../supervisor.js";
+import type { Supervisor, Insights } from "../supervisor.js";
 import { LAUNCHER } from "../supervisor.js";
 import { runRoomTest } from "./mockRoom.js";
+import { evaluate, formatChecks, formatRuns, loadTests, saveTests, toTest, runTest, runAll, parseRefusals, MAX_TESTS } from "./botTests.js";
+import { changesSince, reviewChanges, formatReview } from "./review.js";
+import { forgivingReplace, replaceLines, lintProject, formatIssues, sdkLookup, writeSpec } from "./codeQuality.js";
 import type { ToolSpec } from "./groq.js";
 
 export type Project = typeof botProjects.$inferSelect;
@@ -30,7 +33,29 @@ export interface ToolContext {
   project: Project;
   /** Set once the AI has snapshotted the code in this run (for "undo"). */
   snapshotted: boolean;
+  /** The snapshot taken before this run's first change (for the work report and rollback). */
+  snapshotId?: string;
   changedFiles: Set<string>;
+  /** Checks and tests run in this run, for the work report. */
+  checks: { name: string; ok: boolean; detail?: string }[];
+  /** Set when this run restarted the real bot with changed code. */
+  restarted?: boolean;
+  /** Code changes made in this run (each edit counts). */
+  edits: number;
+  /** changeStamp() when the saved tests last all passed in this run. */
+  testsPassedAt?: string;
+  /** changeStamp() when check_code last passed / the second AI last reviewed the code. */
+  checkedAt?: string;
+  reviewedAt?: string;
+  /** What the owner asked for (their last message), for the reviewer. */
+  goal?: string;
+  /** The model that wrote this run's code, so the review goes to another one. */
+  mainModel?: string;
+  /** Called after the real bot restarted with this run's changes (starts the watch). */
+  onRestarted?: () => void;
+  signal?: AbortSignal;
+  /** Minor review findings, for the report. */
+  reviewNotes?: string;
 }
 
 export interface ToolResult {
@@ -57,17 +82,35 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("read_file", "Read a text file with line numbers. Read big files in parts (max 200 lines per call).",
     { path: str("file path"), start_line: { type: "integer" }, end_line: { type: "integer" } }, ["path"]),
   fn("search_code", "Search all text files for a regular expression; returns file:line matches.", { pattern: str("regex, e.g. def on_chat|os.environ") , folder: str("optional folder") }, ["pattern"]),
-  fn("edit_file", "Replace an exact piece of text in a file (must match exactly once, including indentation). Best way to change code.",
-    { path: str("file path"), old_text: str("exact current text"), new_text: str("replacement") }, ["path", "old_text", "new_text"]),
+  fn("edit_file", "Replace a piece of text in a file (must match one place; indentation differences are tolerated and fixed). Best way to change code. On a miss it shows the closest lines.",
+    { path: str("file path"), old_text: str("current text"), new_text: str("replacement") }, ["path", "old_text", "new_text"]),
+  fn("replace_lines", "Replace lines start_line..end_line (inclusive, from read_file's numbers) with new_text. Empty new_text deletes them.",
+    { path: str("file path"), start_line: { type: "integer" }, end_line: { type: "integer" }, new_text: str("replacement lines") }, ["path", "start_line", "end_line", "new_text"]),
   fn("write_file", "Create a file or replace a whole file. Use edit_file for small changes to existing files.",
     { path: str("file path"), content: str("full file content") }, ["path", "content"]),
   fn("delete_file", "Delete a file.", { path: str("file path") }, ["path"]),
-  fn("check_code", "Compile every .py file and import the bot's entrypoint in the bot's Python environment (installs requirements.txt changes first). Shows errors with tracebacks."),
-  fn("test_in_room", "Run a copy of the bot for up to 60 seconds in a fake Highrise room (real room and data are untouched). User 'tester' joins (optional) and says the chat lines. Returns what the bot did and any errors. To test a timer, make its interval a setting and shorten it with env.",
+  fn("check_code", "Check the code: compiles every .py file, imports the entrypoint, then finds undefined names and wrong uses of the Highrise SDK (methods/attributes that don't exist, wrong arguments) with pyflakes + a type check. Run after every change; fix all errors."),
+  fn("sdk_lookup", "Look up the installed Highrise SDK exactly: methods on self.highrise / self.webapi with arguments and return types, bot hooks, and model classes with their fields. Use before calling anything you're not sure about.",
+    { query: str("words to find, e.g. 'privilege', 'room users', 'tip', 'RoomPermissions'") }, ["query"]),
+  fn("update_spec", "Rewrite the bot's spec sheet (.kojy/spec.md): what the bot does, every command with who can use it, settings it reads, known limits/issues. Keep it current after every feature or fix; it's shown to you at the start of every task.",
+    { content: str("the whole spec in short markdown") }, ["content"]),
+  fn("test_in_room", "Run a copy of the bot for up to 60 seconds in a fake Highrise room (real room and data are untouched). Steps play ~2s apart: \"owner: !mod tester\" (chat as the room owner), \"mod: …\" (a moderator), \"visitor: hi\" or any name (visitors), a line without a name is 'tester', \"whisper owner: …\", \"join visitor\", \"leave visitor\", \"tip visitor 10\", \"wait 5\". expect = checks that pass or fail: \"says: <regex>\", \"not says: <regex>\", \"whispers: <regex>\", \"does: emote|TeleportRequest…\", \"count says: <regex> = 2\", \"no errors\". refuse = make Highrise refuse a request, e.g. \"ChangeRoomPrivilegeRequest=You can't edit this room.\". To test a timer, make its interval a setting and shorten it with env.",
     {
-      chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" }, join: { type: "boolean" }, seconds: { type: "integer" },
+      steps: { type: "array", items: { type: "string" }, description: "what happens, in order" },
+      expect: { type: "array", items: { type: "string" }, description: "checks, e.g. [\"says: added\", \"no errors\"]" },
       env: { type: "array", items: { type: "string" }, description: "NAME=value settings for this test only, e.g. [\"ANNOUNCE_SECONDS=5\"]" },
-    }, ["chat"]),
+      refuse: { type: "array", items: { type: "string" }, description: "RequestType=error message" },
+      seconds: { type: "integer" },
+    }, ["steps"]),
+  fn("save_test", "Save a test (same arguments as test_in_room, plus a name) so it runs after every future change. It runs once now and is only saved if it passes. Same name = replace.",
+    {
+      name: str("what it proves, e.g. '!request adds a song'"),
+      steps: { type: "array", items: { type: "string" } }, expect: { type: "array", items: { type: "string" } },
+      env: { type: "array", items: { type: "string" } }, refuse: { type: "array", items: { type: "string" } },
+    }, ["name", "steps", "expect"]),
+  fn("run_tests", "Run all of the bot's saved tests and say which pass. All must pass before a restart."),
+  fn("room_insights", "What people in the real room try: every !command they used, how often, and whether the bot answered, stayed silent (often: the command doesn't exist) or failed. Use it for ideas and to find broken commands."),
+  fn("remove_test", "Delete a saved test that no longer fits the bot (say why in your reply).", { name: str("test name") }, ["name"]),
   fn("find_env_vars", "Find the environment variables (secrets/settings) the code reads, and which are already set."),
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
@@ -115,9 +158,59 @@ function runCapture(cmd: string, args: string[], cwd: string, env: NodeJS.Proces
   });
 }
 
+/** What every test-room run needs: the bot's Python, settings and entrypoint. */
+async function testBase(ctx: ToolContext) {
+  const dir = projectDir(ctx.project.uuid);
+  const python = await ctx.supervisor.ensureVenv(ctx.project.uuid, dir);
+  const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
+  return { projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint!, env };
+}
+
+/**
+ * Before changed code goes live: the code check, every saved test and a second
+ * AI's review must pass. Returns why not, or null to go ahead. Each runs once
+ * per version of the code (a review that blocked is not repeated: restarting
+ * again without changes goes ahead, and the report shows it).
+ */
+async function beforeGoingLive(ctx: ToolContext): Promise<ToolResult | null> {
+  const stamp = changeStamp(ctx);
+  const uuid = ctx.project.uuid;
+  if (ctx.checkedAt !== stamp) {
+    const check = await runTool("check_code", {}, ctx);
+    if (!check.ok) return { ok: false, output: `Not restarted: the code check fails.\n${check.output}`, summary: "Restart blocked: code check fails" };
+  }
+  const tests = loadTests(uuid);
+  if (tests.length && ctx.testsPassedAt !== stamp) {
+    const runs = await runAll(await testBase(ctx), tests);
+    const failed = runs.filter((r) => !r.ok).length;
+    ctx.checks.push({ name: "Saved tests", ok: failed === 0, detail: `${runs.length - failed}/${runs.length} pass` });
+    if (failed) return { ok: false, output: `Not restarted: ${failed} saved test${failed > 1 ? "s" : ""} fail with this change.\n${formatRuns(runs)}\nFix the code (or remove_test if the bot's behaviour changed on purpose), then restart again.`, summary: `Restart blocked: ${failed} saved test${failed > 1 ? "s" : ""} fail` };
+    ctx.testsPassedAt = stamp;
+  }
+  if (ctx.reviewedAt !== stamp && ctx.snapshotId) {
+    ctx.reviewedAt = stamp;
+    const changes = changesSince(uuid, ctx.snapshotId, ctx.changedFiles);
+    if (changes.length) {
+      try {
+        const review = await reviewChanges(changes, ctx.goal ?? "", ctx.mainModel, ctx.signal);
+        const high = review.problems.filter((p) => p.severity === "high").length;
+        ctx.checks.push({ name: `Review (${review.model})`, ok: high === 0, detail: review.problems.length ? `${high} serious, ${review.problems.length - high} minor` : "no problems" });
+        if (high) return { ok: false, output: `Not restarted: a second AI reviewed the change and found serious problems.\n${formatReview(review)}\nFix them (then check and test again). If a finding is wrong, say why in your reply and restart again.`, summary: `Restart blocked: review found ${high} serious problem${high > 1 ? "s" : ""}` };
+        if (review.problems.length) ctx.reviewNotes = formatReview(review);
+      } catch (err) {
+        ctx.checks.push({ name: "Review", ok: true, detail: `skipped: ${(err as Error).message.slice(0, 120)}` });
+      }
+    }
+  }
+  return null;
+}
+
+/** Changes the code has had in this run; tests that passed at this stamp still hold. */
+export const changeStamp = (ctx: ToolContext) => `${ctx.edits}`;
+
 function ensureSnapshot(ctx: ToolContext): void {
   if (ctx.snapshotted) return;
-  snapshotProject(ctx.project.uuid, "Before the coder AI's changes");
+  ctx.snapshotId = snapshotProject(ctx.project.uuid, "Before the coder AI's changes").id;
   ctx.snapshotted = true;
 }
 
@@ -205,15 +298,39 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         if (!existsSync(file)) return { ok: false, output: `No such file: ${rel}`, summary: `Couldn't find ${rel}` };
         const text = readFileSync(file, "utf8");
         const oldText = s(args.old_text);
-        const count = oldText ? text.split(oldText).length - 1 : 0;
-        if (count !== 1) {
-          return { ok: false, output: count === 0 ? "old_text was not found. Read the file again and copy the exact text (indentation matters)." : `old_text matches ${count} places; include more surrounding lines so it is unique.`, summary: `Edit to ${rel} didn't apply` };
-        }
+        const r = forgivingReplace(text, oldText, s(args.new_text));
+        if (!r.ok) return { ok: false, output: r.message, summary: `Edit of ${rel} didn't match` };
         ensureSnapshot(ctx);
-        writeFileSync(file, text.replace(oldText, () => s(args.new_text)));
-        ctx.changedFiles.add(rel);
+        writeFileSync(file, r.text);
+        ctx.changedFiles.add(rel); ctx.edits++;
         const delta = s(args.new_text).split("\n").length - oldText.split("\n").length;
-        return { ok: true, output: "Edited.", summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}` };
+        return { ok: true, output: `Edited${r.note}.`, summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}` };
+      }
+
+      case "replace_lines": {
+        const rel = cleanRelPath(s(args.path));
+        const file = resolveInside(uuid, rel);
+        if (!existsSync(file)) return { ok: false, output: `No such file: ${rel}`, summary: `Couldn't find ${rel}` };
+        const start = Number(args.start_line), end = Number(args.end_line);
+        const r = replaceLines(readFileSync(file, "utf8"), start, end, s(args.new_text));
+        if (!r.ok) return { ok: false, output: r.message, summary: `Line edit of ${rel} failed` };
+        ensureSnapshot(ctx);
+        writeFileSync(file, r.text);
+        ctx.changedFiles.add(rel); ctx.edits++;
+        return { ok: true, output: `Replaced lines ${start}-${end}. Line numbers below them have shifted; read the file again before another line edit.`, summary: `Edited ${rel} (lines ${start}-${end})` };
+      }
+
+      case "sdk_lookup": {
+        const python = await ctx.supervisor.ensureVenv(uuid, dir);
+        const out = await sdkLookup(python, s(args.query), { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: dir }, dir);
+        return { ok: !out.startsWith("SDK lookup failed"), output: clip(out, 8000), summary: `Looked up “${s(args.query).slice(0, 40)}” in the Highrise SDK` };
+      }
+
+      case "update_spec": {
+        const content = s(args.content).slice(0, 8000);
+        if (!content.trim()) return { ok: false, output: "Empty spec.", summary: "Spec not updated" };
+        writeSpec(uuid, content);
+        return { ok: true, output: "Spec saved.", summary: "Updated the bot's spec sheet" };
       }
 
       case "write_file": {
@@ -225,7 +342,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         ensureSnapshot(ctx);
         mkdirSync(path.dirname(file), { recursive: true });
         writeFileSync(file, content);
-        ctx.changedFiles.add(rel);
+        ctx.changedFiles.add(rel); ctx.edits++;
         return { ok: true, output: existed ? "File replaced." : "File created.", summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)` };
       }
 
@@ -234,7 +351,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         if (rel === "data" || rel.startsWith("data/")) return { ok: false, output: "The bot's data/ folder can't be deleted by the AI.", summary: `Refused to delete ${rel}` };
         ensureSnapshot(ctx);
         rmSync(resolveInside(uuid, rel), { force: true });
-        ctx.changedFiles.add(rel);
+        ctx.changedFiles.add(rel); ctx.edits++;
         return { ok: true, output: "Deleted.", summary: `Deleted ${rel}` };
       }
 
@@ -251,8 +368,28 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           const [mod, cls] = entry.split(":");
           const probe = `import sys; sys.path.insert(0, "."); import importlib; m = importlib.import_module(${JSON.stringify(mod)}); c = getattr(m, ${JSON.stringify(cls)}); from highrise import BaseBot; assert issubclass(c, BaseBot), "${cls} is not a BaseBot"; c(); print("IMPORT_OK")`;
           const imp = await runCapture(python, ["-c", probe], work, env, 60_000);
-          const ok = imp.out.includes("IMPORT_OK");
-          return { ok, output: clip(ok ? `All files compile and ${entry} loads.` : `Importing ${entry} failed:\n${imp.out}`), summary: ok ? "Code check passed" : "Code check: the bot fails to load" };
+          if (!imp.out.includes("IMPORT_OK")) {
+            ctx.checks.push({ name: "Code check", ok: false });
+            return { ok: false, output: clip(`Importing ${entry} failed:\n${imp.out}`), summary: "Code check: the bot fails to load" };
+          }
+          const { issues, note } = await lintProject(work, python, entry);
+          // Once this task changed files, only errors in those block it; older ones are listed to fix when there's time.
+          const touched = ctx.changedFiles.size ? (i: { file: string }) => ctx.changedFiles.has(i.file) : () => true;
+          const errors = issues.filter((i) => i.severity === "error" && touched(i));
+          const older = issues.filter((i) => i.severity === "error" && !touched(i));
+          const warnings = issues.filter((i) => i.severity === "warning" && touched(i));
+          ctx.checks.push({ name: "Code check", ok: errors.length === 0, detail: `${errors.length} errors, ${warnings.length} warnings${older.length ? `, ${older.length} older errors elsewhere` : ""}` });
+          if (errors.length === 0) ctx.checkedAt = changeStamp(ctx);
+          return {
+            ok: errors.length === 0,
+            output: clip([
+              `All files compile and ${entry} loads.`,
+              formatIssues([...errors, ...warnings]) || "No undefined names or wrong SDK uses found in the changed code.",
+              older.length ? `Older errors in files this task didn't change (they were there before; fix them when you can):\n${older.slice(0, 15).map((i) => `${i.file}:${i.line}: ${i.message}`).join("\n")}` : "",
+              note,
+            ].filter(Boolean).join("\n\n")),
+            summary: errors.length ? `Code check: ${errors.length} error${errors.length > 1 ? "s" : ""} to fix` : `Code check passed${warnings.length ? ` (${warnings.length} warning${warnings.length > 1 ? "s" : ""})` : ""}`,
+          };
         } finally {
           rmSync(work, { recursive: true, force: true });
         }
@@ -260,28 +397,81 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 
       case "test_in_room": {
         if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
-        const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
+        const steps = [...(Array.isArray(args.chat) ? args.chat.map(String) : []), ...(Array.isArray(args.steps) ? args.steps.map(String) : [])].slice(0, 25);
+        const expect = (Array.isArray(args.expect) ? args.expect : []).map(String).slice(0, 20);
         const extraEnv = testSettings(args.env);
-        const python = await ctx.supervisor.ensureVenv(uuid, dir);
-        const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
-        const r = await runRoomTest({
-          projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat, extraEnv,
-          join: args.join === true, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
-        });
+        const refuse = parseRefusals(args.refuse);
+        const base = await testBase(ctx);
+        const r = await runRoomTest({ ...base, steps, extraEnv, refuse, join: args.join === true, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}) });
+        const checks = evaluate(expect, r);
+        const failed = checks.filter((c) => !c.ok).length;
         const verdict = !r.connected ? "The bot never connected to the test room."
           : r.exitedEarly ? `The bot crashed during the test (exit code ${r.exitCode}).`
           : r.errors.length ? "The bot ran, but errors were printed." : "The bot ran without errors.";
         const settings = Object.entries(extraEnv).map(([k, v]) => `${k}=${v}`);
         const output = [
           verdict,
+          checks.length ? `Checks (${checks.length - failed}/${checks.length} pass):\n${formatChecks(checks)}` : "No checks given: add expect so the test can pass or fail.",
           settings.length ? `Test-only settings: ${settings.join(", ")}` : "",
+          Object.keys(refuse).length ? `Highrise refused: ${Object.keys(refuse).join(", ")}` : "",
           `What happened:\n${r.actions.join("\n") || "(nothing)"}`,
           r.errors.length ? `Errors:\n${r.errors.join("\n")}` : "",
           `Console (last lines):\n${r.output.slice(-40).join("\n")}`,
         ].filter(Boolean).join("\n\n");
         const replies = r.actions.filter((a) => !a.startsWith("(")).length;
-        const ok = r.connected && !r.exitedEarly && r.errors.length === 0;
-        return { ok, output: clip(output, 8000), summary: `Tested in a fake room: ${ok ? "no errors" : r.exitedEarly ? "crashed" : r.connected ? "errors" : "didn't connect"}, ${replies} bot actions` };
+        const ok = r.connected && !r.exitedEarly && r.errors.length === 0 && failed === 0;
+        ctx.checks.push({ name: "Test room", ok, detail: checks.length ? `${checks.length - failed}/${checks.length} checks` : "no checks" });
+        return { ok, output: clip(output, 9000), summary: `Tested in a fake room: ${ok ? "passed" : r.exitedEarly ? "crashed" : !r.connected ? "didn't connect" : failed ? `${failed} check${failed > 1 ? "s" : ""} failed` : "errors"}, ${replies} bot actions` };
+      }
+
+      case "save_test": {
+        if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
+        const test = toTest(args, testSettings);
+        if (typeof test === "string") return { ok: false, output: test, summary: "Test not saved" };
+        const tests = loadTests(uuid).filter((t) => t.name !== test.name);
+        if (tests.length >= MAX_TESTS) return { ok: false, output: `This bot already has ${MAX_TESTS} tests; remove one that overlaps first.`, summary: "Test not saved (limit)" };
+        const run = await runTest(await testBase(ctx), test);
+        if (!run.ok) return { ok: false, output: `Not saved: the test fails now.\n${formatRuns([run])}\nFix the bot or the test, then save again.`, summary: `Test “${test.name}” fails, not saved` };
+        saveTests(uuid, [...tests, test]);
+        return { ok: true, output: `Saved. The bot now has ${tests.length + 1} tests; they all run after every change.`, summary: `Saved test “${test.name}” (passes)` };
+      }
+
+      case "run_tests": {
+        const tests = loadTests(uuid);
+        if (!tests.length) return { ok: true, output: "No saved tests yet. Save one with save_test for each feature.", summary: "No saved tests" };
+        if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
+        const runs = await runAll(await testBase(ctx), tests);
+        const failed = runs.filter((r) => !r.ok).length;
+        ctx.checks.push({ name: "Saved tests", ok: failed === 0, detail: `${runs.length - failed}/${runs.length} pass` });
+        if (failed === 0) ctx.testsPassedAt = changeStamp(ctx);
+        return { ok: failed === 0, output: `${runs.length - failed} of ${runs.length} saved tests pass.\n${formatRuns(runs)}`, summary: failed ? `Saved tests: ${failed} of ${runs.length} fail` : `Saved tests: all ${runs.length} pass` };
+      }
+
+      case "room_insights": {
+        const file = path.join(dir, ".kojy", "insights.json");
+        if (!existsSync(file)) return { ok: true, output: "No room data yet: it builds up as people use !commands in the real room.", summary: "No room insights yet" };
+        const data = JSON.parse(readFileSync(file, "utf8")) as Insights;
+        const rows = Object.entries(data.commands);
+        const pct = (n: number, d: number) => `${Math.round((100 * n) / Math.max(d, 1))}%`;
+        const silent = rows.filter(([, c]) => c.silent / c.tried >= 0.8).sort((a, b) => b[1].tried - a[1].tried).slice(0, 15);
+        const failing = rows.filter(([, c]) => c.errors > 0).sort((a, b) => b[1].errors - a[1].errors).slice(0, 15);
+        const top = rows.sort((a, b) => b[1].tried - a[1].tried).slice(0, 20);
+        const out = [
+          `Since ${new Date(data.since).toISOString().slice(0, 10)}: ${rows.length} different commands, ${rows.reduce((n, [, c]) => n + c.tried, 0)} uses.`,
+          silent.length ? `Tried but never answered (the bot may not have them):\n${silent.map(([k, c]) => `${k} × ${c.tried}`).join("\n")}` : "",
+          failing.length ? `Failing (errors):\n${failing.map(([k, c]) => `${k}: ${c.errors} of ${c.tried} failed`).join("\n")}` : "",
+          `Most used:\n${top.map(([k, c]) => `${k} × ${c.tried} (answered ${pct(c.tried - c.silent - c.errors, c.tried)})`).join("\n")}`,
+        ].filter(Boolean).join("\n\n");
+        return { ok: true, output: out, summary: `Read room insights (${rows.length} commands)` };
+      }
+
+      case "remove_test": {
+        const name = s(args.name).trim();
+        const tests = loadTests(uuid);
+        const left = tests.filter((t) => t.name !== name);
+        if (left.length === tests.length) return { ok: false, output: `No test named “${name}”. Tests: ${tests.map((t) => t.name).join(", ") || "none"}`, summary: "No such test" };
+        saveTests(uuid, left);
+        return { ok: true, output: "Removed.", summary: `Removed test “${name}”` };
       }
 
       case "find_env_vars": {
@@ -372,6 +562,10 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         const action = s(args.action);
         if (!["start", "stop", "restart"].includes(action)) return { ok: false, output: "action must be start, stop or restart", summary: "Invalid bot action" };
         if (action !== "stop" && !ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first.", summary: "Can't start: no entrypoint" };
+        if (action !== "stop" && ctx.edits > 0) {
+          const refusal = await beforeGoingLive(ctx);
+          if (refusal) return refusal;
+        }
         await ctx.db.update(botProjects).set({ desiredState: action === "stop" ? "stopped" : "running", ...(action !== "stop" ? { restartCount: 0 } : {}) })
           .where(eq(botProjects.id, ctx.project.id));
         await ctx.supervisor.handle(uuid, action);
@@ -379,7 +573,13 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         if (action !== "stop") await new Promise((r) => setTimeout(r, 8000));
         const [p] = await ctx.db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage }).from(botProjects).where(eq(botProjects.id, ctx.project.id));
         const label = { start: "Started", stop: "Stopped", restart: "Restarted" }[action];
-        return { ok: true, output: `${label}. Status now: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}. Check get_logs to confirm it connected.`, summary: `${label} the bot (${p?.status})` };
+        const watched = action !== "stop" && ctx.edits > 0 && !!ctx.snapshotId;
+        if (watched) { ctx.restarted = true; ctx.onRestarted?.(); }
+        return {
+          ok: true,
+          output: `${label}. Status now: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}. Check get_logs to confirm it connected.${watched ? " The platform watches it for 2 minutes: if it crashes or hits errors, the previous version comes back and you'll be told why." : ""}`,
+          summary: `${label} the bot (${p?.status})`,
+        };
       }
 
       case "get_logs": {

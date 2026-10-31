@@ -22,7 +22,7 @@ import { emitAuditLog } from "../../events/audit.js";
 import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
 import {
   ProjectFileError, MAX_UPLOAD_BYTES, ensureProjectDir, removeProjectDir, listFiles, readProjectFile,
-  writeProjectFile, deleteProjectPath, extractZip, zipProject, detectEntrypoint, readLogs, cleanRelPath, removeSnapshots, listSnapshots, restoreSnapshot, BOT_TEMPLATES,
+  writeProjectFile, deleteProjectPath, extractZip, zipProject, detectEntrypoint, readLogs, cleanRelPath, removeSnapshots, listSnapshots, restoreSnapshot, restoreSnapshotFile, BOT_TEMPLATES,
 } from "@kojyai/shared/projects";
 import { listDatabases, describeDatabase, readTable } from "./data.js";
 import { listThread, addToThread, agentProgress } from "./chat.js";
@@ -341,6 +341,25 @@ export const projectsRouter = router({
         content: `The owner undid code changes: the code is back to how it was at ${when} UTC (${count} files). Restart the bot to use it.`,
       });
       return { success: true, files: count };
+    }),
+
+  /** Undo one file of a Kojy task (from the task's report card). */
+  revertFile: permittedProc("bots:update").input(projectId.extend({ messageId: z.number().int().positive(), path: z.string().min(1).max(500) }))
+    .mutation(async ({ ctx, input }) => {
+      const project = await loadProject(ctx, input.id);
+      if (project.agentState === "working") throw new TRPCError({ code: "CONFLICT", message: "Stop the AI first." });
+      const [row] = await ctx.db.select().from(projectMessages)
+        .where(and(eq(projectMessages.id, input.messageId), eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.kind, "report"))).limit(1);
+      const data = (row?.data ?? {}) as { card?: { snapshotId?: string; files?: { path: string }[]; undone?: string[] } };
+      const card = data.card;
+      if (!card?.snapshotId || !card.files?.some((f) => f.path === input.path)) throw new TRPCError({ code: "NOT_FOUND", message: "That change isn't in this report." });
+      const how = files(() => restoreSnapshotFile(project.uuid, card.snapshotId!, input.path));
+      await ctx.db.update(projectMessages).set({ data: { ...data, card: { ...card, undone: [...new Set([...(card.undone ?? []), input.path])] } } }).where(eq(projectMessages.id, row!.id));
+      await ctx.db.insert(projectMessages).values({
+        thread: `project:${project.id}`, projectId: project.id, role: "user", kind: "event",
+        content: `The owner undid Kojy's change to ${input.path} (${how === "removed" ? "the new file was removed" : "it's back to how it was before that task"}). Restart the bot to use it.`,
+      });
+      return { success: true };
     }),
 
   // ── run control ────────────────────────────────────────────────────────────

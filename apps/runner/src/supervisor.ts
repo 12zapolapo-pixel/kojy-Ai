@@ -63,6 +63,9 @@ interface Running {
   project: { id: number; orgId: number; ownerId: number; name: string };
 }
 
+export interface CommandCounts { tried: number; silent: number; errors: number; last: number }
+export interface Insights { since: number; commands: Record<string, CommandCounts> }
+
 const ACTIVITY_KINDS = new Set(["chat", "whisper", "reply", "join", "leave", "tip", "emote"]);
 
 const KICKED_OUT = "Kicked out of the room: this bot's Highrise account logged in somewhere else — another copy of the bot "
@@ -76,6 +79,8 @@ export class Supervisor {
   private tails = new Map<string, string[]>();
   private hookErrors = new Map<string, number[]>();
   private hookErrorsReported = new Map<string, number>();
+  private pendingCommands = new Map<string, Map<string, CommandCounts>>();
+  private insightsTimer: NodeJS.Timeout | null = null;
   /**
    * Set by the coder AI: called when a bot crashes on its own (not stopped),
    * or when its code keeps failing while it stays in the room (how: "error").
@@ -117,6 +122,7 @@ export class Supervisor {
     const uuids = [...this.procs.keys()];
     await Promise.all(uuids.map((uuid) => this.kill(uuid)));
     await Promise.allSettled(uuids.map((uuid) => this.setStatus(uuid, "stopped", "Runner restarting — the bot starts again when it's back")));
+    this.flushInsights();
     await this.activity.stop();
   }
 
@@ -206,6 +212,7 @@ export class Supervisor {
         try {
           const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null; trace?: string };
           if (e.k === "error") this.hookError(uuid, String(e.trace ?? ""));
+          else if (e.k === "cmd") this.commandSeen(uuid, String((e as { c?: unknown }).c ?? ""), String((e as { r?: unknown }).r ?? ""));
           else if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n);
         } catch { /* not ours */ }
       }
@@ -225,6 +232,41 @@ export class Supervisor {
     if (recent.length < 2 || now - (this.hookErrorsReported.get(uuid) ?? 0) < HOOK_ERROR_WINDOW_MS) return;
     this.hookErrorsReported.set(uuid, now);
     this.onCrash?.(uuid, recent.length, trace.split("\n"), "error");
+  }
+
+  /**
+   * Which !commands people use and how they went, per bot, kept in
+   * .kojy/insights.json (command word only). Saved once a minute.
+   */
+  private commandSeen(uuid: string, command: string, result: string): void {
+    if (!/^[!/][^\s]{1,31}$/.test(command) || !["ok", "silent", "error"].includes(result)) return;
+    const counts = this.pendingCommands.get(uuid) ?? new Map<string, CommandCounts>();
+    const c = counts.get(command) ?? { tried: 0, silent: 0, errors: 0, last: 0 };
+    c.tried++; if (result === "silent") c.silent++; if (result === "error") c.errors++; c.last = Date.now();
+    counts.set(command, c);
+    this.pendingCommands.set(uuid, counts);
+    this.insightsTimer ??= setTimeout(() => { this.insightsTimer = null; this.flushInsights(); }, 60_000);
+    this.insightsTimer.unref?.();
+  }
+
+  flushInsights(): void {
+    for (const [uuid, counts] of this.pendingCommands) {
+      const file = path.join(PROJECTS_DIR, uuid, ".kojy", "insights.json");
+      try {
+        const saved = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) as Insights : { since: Date.now(), commands: {} };
+        for (const [cmd, c] of counts) {
+          const old = saved.commands[cmd] ?? { tried: 0, silent: 0, errors: 0, last: 0 };
+          saved.commands[cmd] = { tried: old.tried + c.tried, silent: old.silent + c.silent, errors: old.errors + c.errors, last: Math.max(old.last, c.last) };
+        }
+        // Keep the 300 most recent commands.
+        const kept = Object.entries(saved.commands).sort((a, b) => b[1].last - a[1].last).slice(0, 300);
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, JSON.stringify({ since: saved.since, commands: Object.fromEntries(kept) }, null, 1) + "\n");
+      } catch (err) {
+        log.warn({ err, uuid }, "Could not save room insights");
+      }
+    }
+    this.pendingCommands.clear();
   }
 
   /** The last ~80 console lines of the bot's current/last run. */

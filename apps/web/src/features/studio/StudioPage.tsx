@@ -215,7 +215,7 @@ function JsScripts({ botId, onOpenClassic }: { botId: string; onOpenClassic: () 
 
 function StudioHome({ bots }: { bots: BotItem[] }) {
   const navigate = useNavigate();
-  const [tab, setTab] = useState<"overview" | "memory">("overview");
+  const [tab, setTab] = useState<"overview" | "jobs" | "memory">("overview");
   const status = trpc.system.status.useQuery(undefined, { refetchInterval: 30_000, retry: false });
   const live = bots.filter((b) => b.live).length;
   const broken = bots.filter((b) => b.status === "crashed" || b.status === "error");
@@ -225,13 +225,13 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
       chat={<ChatTab project={null} />}
       panelTabs={
         <div className="flex gap-1 px-3 border-b border-white/5">
-          {([["overview", "Overview"], ["memory", "What Kojy knows"]] as const).map(([id, label]) => (
+          {([["overview", "Overview"], ["jobs", "Kojy jobs"], ["memory", "What Kojy knows"]] as const).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)}
               className={clsx("px-3 py-2 text-sm border-b-2 -mb-px", tab === id ? "border-[#49dcb5] text-white" : "border-transparent text-white/40 hover:text-white/70")}>{label}</button>
           ))}
         </div>
       }
-      panel={tab === "memory" ? <KojyMemory /> : (
+      panel={tab === "memory" ? <KojyMemory /> : tab === "jobs" ? <KojyJobs /> : (
         <div className="h-full overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-3 gap-2 text-center">
             {[["Bots", bots.length], ["Running", live], ["Need attention", broken.length]].map(([label, n]) => (
@@ -263,6 +263,46 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
         </div>
       )}
     />
+  );
+}
+
+/** What Kojy is doing on every bot: working, queued, and the last finished jobs. */
+function KojyJobs() {
+  const navigate = useNavigate();
+  const jobs = trpc.studio.jobs.useQuery(undefined, { refetchInterval: 4000 });
+  const stop = trpc.projects.chatStop.useMutation({ onSuccess: () => void jobs.refetch() });
+  const active = jobs.data?.active ?? [];
+  return (
+    <div className="h-full overflow-y-auto p-4 space-y-4">
+      <p className="text-xs text-white/45">Kojy works on up to 2 bots at once; more wait in a queue. Ask the Studio chat to work on several bots ("fix the DJ bot's queue and add !dice to Japalo") and follow them here.</p>
+      <div className="space-y-2">
+        <p className="text-xs text-white/60 font-medium">Now</p>
+        {active.length === 0 && <p className="text-sm text-white/40">No jobs running.</p>}
+        {active.map((j) => (
+          <div key={j.id} className="flex items-center gap-2 border border-white/10 rounded-xl px-3 py-2">
+            <span className={clsx("w-2 h-2 rounded-full", j.state === "queued" ? "bg-white/30" : j.state === "waiting" ? "bg-amber-300" : "bg-[#49dcb5] animate-pulse")} />
+            <button onClick={() => navigate(`/studio/p/${j.id}`)} className="flex-1 text-left min-w-0">
+              <span className="text-sm text-white">{j.name}</span>
+              <span className="block text-[11px] text-white/45 truncate">{j.state === "waiting" ? "Waiting for your answer" : j.progress ?? "Working…"}</span>
+            </button>
+            {j.state !== "waiting" && (
+              <button disabled={stop.isPending} onClick={() => stop.mutate({ id: j.id })} className="px-2 py-1 text-[11px] rounded border border-white/15 text-white/60 hover:bg-white/5">Stop</button>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="space-y-2">
+        <p className="text-xs text-white/60 font-medium">Finished</p>
+        {(jobs.data?.finished ?? []).length === 0 && <p className="text-sm text-white/40">Work reports show up here.</p>}
+        {jobs.data?.finished.map((f, i) => (
+          <button key={i} onClick={() => navigate(`/studio/p/${f.id}`)} className="w-full text-left border border-white/8 rounded-xl px-3 py-2 hover:border-[#49dcb5]/40">
+            <span className="text-sm text-white/85">{f.name}</span>
+            <span className="text-[10px] text-white/30"> · {new Date(f.at).toLocaleString()}</span>
+            <span className="block text-[11px] text-white/45 line-clamp-2">{f.summary}</span>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

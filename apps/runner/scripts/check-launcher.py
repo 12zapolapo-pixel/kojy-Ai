@@ -168,7 +168,8 @@ async def run(project, entry, script, observe, env=None, fd3=True):
         reports = [json.loads(line) for line in f.read().splitlines() if line.startswith("{")]
     await runner.cleanup()
     return {"code": code, "exited_after": exited_after, "output": output, "connections": room.connections,
-            "said": room.said, "errors": sorted(e["hook"] for e in reports if e.get("k") == "error")}
+            "said": room.said, "errors": sorted(e["hook"] for e in reports if e.get("k") == "error"),
+            "commands": [(e["c"], e["r"]) for e in reports if e.get("k") == "cmd"]}
 
 
 def said(res, text, conn=None):
@@ -181,6 +182,10 @@ SCENARIOS = {
                            script={1: [(1, chat("!mod")), (1.5, chat("!hi")), (1, joined("visitor")), (1, chat("!hi", "visitor"))]}),
                       lambda r: r["code"] is None and r["connections"] == 1 and said(r, "hello tester")
                       and said(r, "hello visitor") and r["errors"] == ["on_chat", "on_user_join"]),
+    # Which !commands people use and how they went (for Kojy's room insights).
+    "command tracking": (dict(entry="testbots:CommandBot", observe=6,
+                              script={1: [(1, chat("!hi")), (1, chat("!dance")), (1, chat("!mod")), (0.5, chat("hello"))]}),
+                         lambda r: r["commands"] == [("!hi", "ok"), ("!dance", "silent"), ("!mod", "error")] and said(r, "hello tester")),
     # The same in Kojy's test room, which has no fd 3.
     "command error, test room": (dict(entry="testbots:CommandBot", observe=6, fd3=False,
                                       script={1: [(1, chat("!mod")), (1.5, chat("!hi"))]}),
