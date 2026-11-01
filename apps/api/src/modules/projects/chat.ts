@@ -14,7 +14,7 @@ export interface SecretCard { secrets: { name: string; description: string; alre
 /** "ui" cards: open a panel, or a button into a bot's chat. */
 export interface UiCard { panel?: string; openBot?: { kind: "python" | "javascript"; id: string; name: string } }
 /** "plan" cards: Kojy's plan before a bigger change, approved with a button. */
-export interface PlanCard { title?: string; steps?: string[] }
+export interface PlanCard { title?: string; steps?: string[]; /** Kojy went straight on with it (no Approve needed). */ auto?: boolean }
 /** "report" cards: what Kojy changed and checked in one task, with undo per file. */
 export interface ReportCard {
   snapshotId?: string;

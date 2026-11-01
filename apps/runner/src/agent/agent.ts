@@ -11,8 +11,8 @@
  *
  * The API stores the owner's message and sends "agent" on
  * project_control:<key>; this loop answers: model → tool calls → tool
- * results → model … until it replies without tools, asks for secrets, or hits
- * the step limit. Every step is written to project_messages, which is both
+ * results → model … until it replies without tools or asks for secrets (only
+ * a runaway job hits the step/time cap). Every step is written to project_messages, which is both
  * the chat the page shows and the model's history.
  *
  * Stabilizer: when a bot crashes repeatedly with a Python traceback, the
@@ -40,7 +40,9 @@ import { changesSince } from "./review.js";
 
 const log = createLogger("agent");
 
-const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
+// Kojy keeps going until the task is done; these only stop a job that has lost its way.
+const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 200);
+const MAX_JOB_MS = Number(process.env.AGENT_MAX_MINUTES ?? 45) * 60_000;
 /** Kojy jobs at once (each runs Python tests and calls the AI; the server and the free AI plans are small). */
 const MAX_JOBS = Math.max(1, Number(process.env.AGENT_MAX_JOBS ?? 2));
 const WATCH_MS = Number(process.env.AGENT_WATCH_SECONDS ?? 120) * 1000;
@@ -220,6 +222,7 @@ export class Agent {
     }
 
     try {
+      const began = Date.now();
       for (let step = 0; step < MAX_STEPS; step++) {
         if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); break; }
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
@@ -256,8 +259,9 @@ export class Agent {
           if (result.pause) pause = true;
         }
         if (pause) { finalState = "waiting"; break; }
-        if (step === MAX_STEPS - 1) {
-          await this.add(scope, "assistant", "I've used my step limit for this task. Send “continue” and I'll pick up where I left off.", "event");
+        if (step === MAX_STEPS - 1 || Date.now() - began > MAX_JOB_MS) {
+          await this.add(scope, "assistant", `I've been working on this for ${step + 1} steps (${Math.round((Date.now() - began) / 60_000)} min) without finishing, so I stopped to keep from going in circles. Send “continue” to let me carry on, or tell me what to focus on.`, "event");
+          break;
         }
       }
     } catch (err) {
@@ -304,6 +308,13 @@ export class Agent {
     ]);
     // Errors and work reports are for the owner; the model has the steps themselves.
     const rows = rowsDesc.reverse().filter((r) => r.kind !== "error" && r.kind !== "report");
+    // A long task can push the owner's request out of the 80-row window: keep it first,
+    // so the model still knows the task (and the history starts at a user message).
+    if (!rows.some((r) => r.role === "user")) {
+      const [ask] = await this.db.select().from(projectMessages)
+        .where(and(eq(projectMessages.thread, scope.thread), eq(projectMessages.role, "user"))).orderBy(desc(projectMessages.id)).limit(1);
+      if (ask) rows.unshift(ask);
+    }
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
 
     const toMsg = (r: Row, full: boolean): ChatMessage => {

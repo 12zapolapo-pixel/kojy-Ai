@@ -450,7 +450,9 @@ function PlanCardView({ m, projectId, onResolved }: { m: Msg; projectId: string;
       <ol className="list-decimal list-inside space-y-1 text-sm text-white/70">
         {(card.steps ?? []).map((s, i) => <li key={i}>{s}</li>)}
       </ol>
-      {card.resolved ? (
+      {card.auto ? (
+        <p className="text-xs text-white/45">Kojy is working on this now. Type below to change anything, or press Stop.</p>
+      ) : card.resolved ? (
         <p className="text-xs text-[#49dcb5]">✓ Approved</p>
       ) : (
         <div className="flex flex-wrap items-center gap-2">

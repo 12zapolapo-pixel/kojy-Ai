@@ -35,3 +35,20 @@ describe("coder AI history", () => {
     expect(messages.map((m) => m.role)).toEqual(["system", "user"]);
   });
 });
+
+describe("coder AI history on a long task", () => {
+  it("keeps the owner's request first when 80 rows of steps pushed it out", async () => {
+    const steps: Record<string, unknown>[] = [];
+    for (let i = 0; i < 40; i++) {
+      steps.push({ role: "assistant", kind: "text", content: "", data: { toolCalls: [{ id: `c${i}`, type: "function", function: { name: "list_files", arguments: "{}" } }] } });
+      steps.push({ role: "tool", kind: "tool", content: "ok", data: { toolCallId: `c${i}`, summary: "Listed" } });
+    }
+    const ask = { role: "user", kind: "text", content: "add !dice", data: null };
+    const answers = [[...steps].reverse(), [ask]];
+    const db = { select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => answers.shift() ?? [] }) }) }) }) };
+    const agent = new Agent(db as any, {} as any, null);
+    const messages: ChatMessage[] = await (agent as any).buildMessages({ thread: "project:1", projectId: 1, system: async () => "SYS" }, 200_000);
+    expect(messages.slice(0, 3).map((m) => [m.role, m.content])).toEqual([["system", "SYS"], ["user", "add !dice"], ["assistant", null]]);
+    expect(messages.filter((m) => m.role === "tool")).toHaveLength(40);
+  });
+});

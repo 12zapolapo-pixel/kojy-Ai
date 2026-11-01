@@ -123,7 +123,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("set_entrypoint", "Set which class starts the bot, as module.path:ClassName (a class based on BaseBot).", { entrypoint: str("e.g. bot:MyBot") }, ["entrypoint"]),
   fn("bot_control", "Start, stop or restart the real bot (restart makes code changes live).", { action: { type: "string", enum: ["start", "stop", "restart"] } }, ["action"]),
   fn("get_logs", "The real bot's latest console output (status, errors, tracebacks).", { lines: { type: "integer" } }),
-  fn("propose_plan", "Before a bigger change (a new feature, several files, a rewrite), show the owner a short plan with Approve/Change buttons, then stop and wait. Not for small fixes or questions.",
+  fn("propose_plan", "Before a bigger change (a new feature, several files, a rewrite), show the owner a short plan, then carry on with it right away (they can type changes while you work). Not for small fixes or questions.",
     { title: str("what you'll build, a few words"), steps: { type: "array", items: { type: "string" }, description: "3-7 short steps in plain words" } }, ["title", "steps"]),
   fn("find_emotes", "Search the list of emote ids that work in Highrise (checked in a real room) by name or id, e.g. 'dance', 'wave'. Use these ids in code; never guess emote ids.",
     { query: str("word to search, or empty for a sample") }),
@@ -620,8 +620,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         if (!steps.length) return { ok: false, output: "A plan needs steps.", summary: "Empty plan" };
         const title = s(args.title).slice(0, 120) || "Plan";
         return {
-          ok: true, output: "The owner sees the plan with Approve/Change buttons. Stop now and wait for their answer.",
-          summary: `Plan: ${title}`, cardKind: "plan", card: { title, steps, resolved: false }, pause: true,
+          ok: true, output: "The owner sees the plan. Start on it now; don't wait for an answer. If they write something while you work, follow that.",
+          summary: `Plan: ${title}`, cardKind: "plan", card: { title, steps, resolved: true, auto: true },
         };
       }
 
