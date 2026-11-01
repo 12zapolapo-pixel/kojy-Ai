@@ -208,11 +208,9 @@ async function handleAuthFailure(ws: WebSocket, client: AuthedClient): Promise<v
 // SECURITY FIX (H-04): Cross-Site WebSocket Hijacking defense. WS upgrade
 // requests are not subject to the same-origin restrictions a browser
 // enforces on fetch()/XHR — any site a victim visits can open a connection
-// here and have the browser silently attach cookies. tryCookieAuth() below
-// is dormant today (auth.login never sets a cookie — see H-05/auth
-// router.ts), so this cannot be exploited *yet*, but fixing it now rather
-// than "whenever the cookie work lands" means it can never be forgotten as
-// a joint change, and it costs nothing to have active early. Built from
+// here and have the browser silently attach cookies. Cookie auth on this
+// socket was removed entirely (V-10), so this Origin check is now defence
+// in depth — keep it for the day cookies come back. Built from
 // FRONTEND_URL (same source of truth as the CORS config in boot.ts) plus an
 // explicit allowlist for additional trusted origins if ever needed.
 const ALLOWED_WS_ORIGINS = new Set(
@@ -282,8 +280,9 @@ export function initWebSocketGateway(server: HttpServer): void {
       }
     }, LIMITS.AUTH_TIMEOUT_MS);
 
-    // Attempt cookie-based auth immediately
-    void tryCookieAuth(ws, client, req);
+    // V-10: no cookie auth. A cookie would let any website open this socket
+    // as a signed-in visitor (cross-site WebSocket hijacking); clients
+    // authenticate with an explicit auth message carrying their token.
 
     ws.on("message", (raw) => handleMessage(ws, client, raw));
     ws.on("close", () => handleClose(ws, client));
@@ -307,25 +306,6 @@ export function initWebSocketGateway(server: HttpServer): void {
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
-
-async function tryCookieAuth(
-  ws: WebSocket,
-  client: AuthedClient,
-  req: IncomingMessage,
-): Promise<void> {
-  const cookie = req.headers["cookie"] ?? "";
-  const sessionId = extractSessionCookie(cookie);
-  if (!sessionId) return; // no cookie -> wait for message-based auth, nothing to count
-
-  try {
-    if (await isAuthBlocked(client.ip)) return; // refused before any DB lookup
-    const userId = await verifySession(sessionId);
-    completeAuth(ws, client, userId, sessionId);
-  } catch {
-    // Cookie auth failed — count it, then wait for message-based auth
-    await handleAuthFailure(ws, client);
-  }
-}
 
 /**
  * Verifies a session id against the DB and returns its user id. Throws if the
@@ -830,10 +810,6 @@ function sendEvent(ws: WebSocket, event: ServerEvent): void {
   }
 }
 
-function extractSessionCookie(cookieStr: string): string | null {
-  const match = cookieStr.match(/(?:^|;\s*)session=([^;]+)/);
-  return match?.[1] ?? null;
-}
 
 function addToLogBuffer(event: ServerEvent): void {
   if (event.type !== "bot_log") return;
