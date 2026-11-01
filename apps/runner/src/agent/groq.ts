@@ -261,10 +261,12 @@ export interface ChatOptions {
   signal?: AbortSignal;
   /** Try other models first, e.g. for a second opinion on the main model's work (it's still used if nothing else answers). */
   avoidModel?: string;
+  /** Only this AI's models (e.g. "groq" for the code scout, so Gemini's daily requests are kept for the real work). */
+  group?: Endpoint["group"];
 }
 
 export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
-  const listed = endpoints();
+  const listed = endpoints().filter((e) => !opts.group || e.group === opts.group);
   const all = opts.avoidModel ? [...listed.filter((e) => e.model !== opts.avoidModel), ...listed.filter((e) => e.model === opts.avoidModel)] : listed;
   if (!all.length) {
     throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY (a free Gemini key from aistudio.google.com/apikey) or GROQ_API_KEY (free at console.groq.com/keys) in the server's .env.");

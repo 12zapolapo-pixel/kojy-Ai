@@ -22,6 +22,7 @@ import { LAUNCHER } from "../supervisor.js";
 import { runRoomTest } from "./mockRoom.js";
 import { evaluate, formatChecks, formatRuns, loadTests, saveTests, toTest, runTest, runAll, parseRefusals, MAX_TESTS } from "./botTests.js";
 import { webSearch, fetchPage, WebError } from "./web.js";
+import { exploreTool } from "./scout.js";
 import { changesSince, reviewChanges, formatReview } from "./review.js";
 import { forgivingReplace, replaceLines, lintProject, formatIssues, sdkLookup, writeSpec } from "./codeQuality.js";
 import type { ToolSpec } from "./groq.js";
@@ -79,6 +80,8 @@ const fn = (name: string, description: string, properties: Record<string, unknow
 const str = (description: string) => ({ type: "string", description });
 
 export const TOOL_SPECS: ToolSpec[] = [
+  fn("explore", "Ask a helper AI to read the project for you and answer one question (it searches and reads files, the SDK and the logs, then reports findings with file:line and the exact code). One explore replaces many read steps and saves your own requests. Use it first to understand code.",
+    { question: str("precise, e.g. 'Where is !request handled, what does it store, and what calls play_next?'") }, ["question"]),
   fn("list_files", "List the project's files (path and size). Optionally only under a folder.", { folder: str("e.g. highrise_bot") }),
   fn("read_file", "Read a text file with line numbers. Read big files in parts (max 200 lines per call).",
     { path: str("file path"), start_line: { type: "integer" }, end_line: { type: "integer" } }, ["path"]),
@@ -451,6 +454,9 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         if (failed === 0) ctx.testsPassedAt = changeStamp(ctx);
         return { ok: failed === 0, output: `${runs.length - failed} of ${runs.length} saved tests pass.\n${formatRuns(runs)}`, summary: failed ? `Saved tests: ${failed} of ${runs.length} fail` : `Saved tests: all ${runs.length} pass` };
       }
+
+      case "explore":
+        return exploreTool(s(args.question), ctx, TOOL_SPECS, (n, a) => runTool(n, a, ctx));
 
       case "web_search": {
         const hits = await webSearch(s(args.query));
