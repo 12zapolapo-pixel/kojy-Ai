@@ -470,6 +470,8 @@ function describeCall(name: string, args: Record<string, unknown>): string {
     case "read_file": return `Reading${p}…`;
     case "edit_file": case "write_file": return `Editing${p}…`;
     case "search_code": return "Searching the code…";
+    case "web_search": return "Searching the web…";
+    case "fetch_url": return "Reading a web page…";
     case "check_code": return "Checking the code (may install packages)…";
     case "test_in_room": return "Testing in a fake room…";
     case "test_secrets": return "Testing secrets…";
