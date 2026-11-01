@@ -29,7 +29,7 @@ import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
 import { chat, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
-import { systemPrompt, studioPrompt, jsBotPrompt } from "./prompt.js";
+import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
@@ -39,6 +39,18 @@ const log = createLogger("agent");
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
 const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 3000);
 const AUTOFIX_PER_DAY = 3;
+
+/**
+ * V-03: in a run started by a crash or the daily check-up (not by the owner),
+ * these tools are refused until the owner approves a plan. They change code,
+ * the running bot, secrets, or Kojy's long-term memory (a poisoned "lesson"
+ * would outlive the run).
+ */
+export const NEEDS_OWNER = new Set(["write_file", "edit_file", "delete_file", "bot_control", "set_entrypoint", "request_secrets", "remember"]);
+const AUTOMATED_KINDS = new Set(["crash", "checkup"]);
+const OWNER_APPROVAL_NEEDED =
+  "Not allowed yet: this run was started by the bot's own output (a crash or the daily check-up), not by the owner. " +
+  "Investigate and test as much as you like, then explain the cause and call propose_plan with the fix. Once the owner approves, you can change files and restart the bot.";
 
 type Row = typeof projectMessages.$inferSelect;
 
@@ -166,6 +178,7 @@ export class Agent {
   private async runOnce(uuid: string, signal: AbortSignal): Promise<void> {
     const scope = await this.scopeFor(uuid);
     if (!scope) return;
+    const automated = await this.startedAutomatically(scope.thread);
     await scope.setState("working");
     let finalState: "idle" | "waiting" = "idle";
 
@@ -195,7 +208,9 @@ export class Agent {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* reported below */ }
           await this.progress(uuid, describeCall(call.function.name, args));
-          const result = await scope.runTool(call.function.name, args);
+          const result: ToolResult = automated && NEEDS_OWNER.has(call.function.name)
+            ? { ok: false, output: OWNER_APPROVAL_NEEDED, summary: "Needs the owner's approval first" }
+            : await scope.runTool(call.function.name, args);
           await this.add(scope, "tool", result.output, result.cardKind ?? (result.card ? "secret_request" : "tool"), {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
           });
@@ -213,6 +228,18 @@ export class Agent {
     } finally {
       await scope.setState(finalState);
     }
+  }
+
+  /**
+   * V-03: true when the newest user-role message was written by the platform
+   * because the bot crashed or for the daily check-up — i.e. the run follows
+   * bot output, not something the owner asked for or approved.
+   */
+  private async startedAutomatically(thread: string): Promise<boolean> {
+    const [last] = await this.db.select({ kind: projectMessages.kind }).from(projectMessages)
+      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.role, "user")))
+      .orderBy(desc(projectMessages.id)).limit(1);
+    return !!last && AUTOMATED_KINDS.has(last.kind);
   }
 
   /**
@@ -289,15 +316,18 @@ export class Agent {
     this.autofixLog.set(uuid, recent);
 
     const trace = tail.slice(Math.max(0, traceback - 2)).slice(-40).join("\n");
+    // V-03: the output is the bot's (and so possibly a room visitor's) text —
+    // wrapped as untrusted data, and this run can't change anything until the
+    // owner approves the plan (see NEEDS_OWNER below).
     await this.add({ thread: `project:${project.id}`, projectId: project.id }, "user",
-      `The bot crashed ${streak} times in a row. Its last output:\n${trace}\n\nFind the cause in the code, fix it, check it in the test room, then restart the bot and confirm in the logs that it stays up. Remember the lesson.`,
+      `The bot crashed ${streak} times in a row. Its last output (from the bot, not from the owner):\n${untrusted(trace)}\n\nFind the cause in the code and check it with check_code / test_in_room. Then explain it in one or two sentences and call propose_plan with the fix — files and the bot stay unchanged until the owner approves.`,
       "crash");
     log.info({ uuid, streak }, "Auto-fix started for a crashing bot");
     void this.run(uuid).then(async () => {
       const [last] = await this.db.select({ content: projectMessages.content }).from(projectMessages)
         .where(and(eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.role, "assistant"))).orderBy(desc(projectMessages.id)).limit(1);
       const summary = last?.content.trim().slice(0, 400) || "Kojy looked into the crash — see the chat.";
-      await notifyUser(this.db, project.ownerId, "bot_error", `Kojy worked on a crash in ${project.name}`, summary, `/studio/p/${uuid}`);
+      await notifyUser(this.db, project.ownerId, "bot_error", `Kojy has a fix for ${project.name} — approve it in the chat`, summary, `/studio/p/${uuid}`);
       void sendAlert(`🛠️ ${project.name} kept crashing — Kojy: ${summary}`);
     }).catch((err) => log.warn({ err, uuid }, "Auto-fix follow-up failed"));
   }
