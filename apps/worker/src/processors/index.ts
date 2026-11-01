@@ -16,7 +16,7 @@ import { db, schema }        from "../db/client.js";
 import { getRedis, getRedisPublisher, publishBotEvent, publishBotControl } from "../services/redis.js";
 import { notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger }      from "../services/logger.js";
-import { eq, and, lt, gte }  from "drizzle-orm"; // FIX-20: gte added for analytics lower bound
+import { eq, and, lt, gte, inArray } from "drizzle-orm"; // FIX-20: gte added for analytics lower bound
 import { compressBatch, groupMemoriesForCompression } from "@kojyai/engine/memory";
 import { scoreSentiment }    from "@kojyai/engine/intelligence";
 
@@ -24,14 +24,26 @@ const log       = createLogger("processors");
 // ─── Memory Compression ───────────────────────────────────────────────────────
 
 export async function processMemoryCompression(job: Job): Promise<void> {
-  const { botId, type } = job.data as { botId?: string; type: string };
+  const { botId, orgId, type } = job.data as { botId?: string; orgId?: number; type: string };
   log.info({ botId, type }, "Memory compression starting");
 
   const conditions: any[] = [eq(schema.botMemories.compressionState, "raw")];
+  // SECURITY FIX (V-05): only the scheduled sweep may work across all bots. A
+  // job for one bot whose botId is missing or unknown used to fall through to
+  // "every org's raw memories".
   if (botId) {
     const [bot] = await db.select({ id: schema.bots.id, orgId: schema.bots.orgId })
       .from(schema.bots).where(eq(schema.bots.uuid, botId)).limit(1);
-    if (bot) conditions.push(eq(schema.botMemories.botId, bot.id));
+    if (!bot) { log.warn({ botId, type }, "Memory compression for an unknown bot — skipped"); return; }
+    conditions.push(eq(schema.botMemories.botId, bot.id));
+  } else if (typeof orgId === "number" && Number.isInteger(orgId)) {
+    // One organisation's bots (the API checked the caller belongs to it).
+    const orgBots = await db.select({ id: schema.bots.id }).from(schema.bots).where(eq(schema.bots.orgId, orgId));
+    if (!orgBots.length) return;
+    conditions.push(inArray(schema.botMemories.botId, orgBots.map((b) => b.id)));
+  } else if (type !== "sweep_all_orgs") {
+    log.warn({ type }, "Memory compression job without a bot — skipped (only the scheduled sweep covers all bots)");
+    return;
   }
 
   const rawMemories = await db.select().from(schema.botMemories)

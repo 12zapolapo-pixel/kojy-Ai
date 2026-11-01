@@ -112,7 +112,7 @@ function IntelOverview({ data, navigate }: { data: any; navigate: any }) {
 function MemorySystemPanel() {
   const qc = useQueryClient();
   const compress = useMutation({
-    mutationFn: () => trpcClient.intelligence.triggerMemoryCompression.mutate({ botId: "" }),
+    mutationFn: () => trpcClient.intelligence.triggerMemoryCompression.mutate({}), // your organisation's bots
     onSuccess: () => qc.invalidateQueries({ queryKey: getQueryKey(trpc.intelligence.getOrgIntelligence) }),
   });
 

@@ -180,9 +180,21 @@ export const intelligenceRouter = router({
     }),
 
   triggerMemoryCompression: permittedProc("intelligence:configure")
-    .input(z.object({ botId: z.string() }))
+    .input(z.object({ botId: z.string().min(1).max(64).optional() }))
     .mutation(async ({ input, ctx }) => {
-      await enqueue(QUEUE_NAMES.MEMORY_COMPRESSION, { botId: input.botId, type: "manual" });
+      // SECURITY FIX (V-05): this was the one procedure here without the org
+      // check — any org admin could compress another org's bot memories, and
+      // an empty or unknown botId made the worker compress across ALL orgs.
+      const orgId = await resolveOrgId(ctx);
+      if (!input.botId) {
+        // No bot given: the caller's own organisation only.
+        await enqueue(QUEUE_NAMES.MEMORY_COMPRESSION, { orgId, type: "manual_org" });
+        return { success: true, message: "Memory compression queued" };
+      }
+      const [bot] = await ctx.db.select({ uuid: schema.bots.uuid }).from(schema.bots)
+        .where(and(eq(schema.bots.uuid, input.botId), eq(schema.bots.orgId, orgId))).limit(1);
+      if (!bot) throw new TRPCError({ code: "NOT_FOUND", message: "Bot not found" });
+      await enqueue(QUEUE_NAMES.MEMORY_COMPRESSION, { botId: bot.uuid, type: "manual" });
       return { success: true, message: "Memory compression queued" };
     }),
 
