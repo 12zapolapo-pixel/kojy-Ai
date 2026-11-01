@@ -285,7 +285,7 @@ function AiUsage() {
           {models.filter((m) => m.group === g).map((m) => (
             <div key={m.id} className="flex items-center gap-2 border border-white/8 rounded-lg px-3 py-1.5 text-xs">
               <span className={clsx("w-2 h-2 rounded-full shrink-0", m.available ? "bg-[#49dcb5]" : "bg-amber-300")} />
-              <span className="flex-1 min-w-0 truncate text-white/80 font-mono">{m.model}</span>
+              <span className="flex-1 min-w-0 truncate text-white/80 font-mono">{m.model}{/#(\d+)$/.exec(m.id) ? <span className="text-white/35"> · key {/#(\d+)$/.exec(m.id)![1]}</span> : null}</span>
               <span className="text-white/45 whitespace-nowrap">{m.usage ? `${m.usage.requests} req · ${Math.round((m.usage.tokensIn + m.usage.tokensOut) / 1000)}k tok${m.usage.limited ? ` · ${m.usage.limited} limited` : ""}` : "unused today"}</span>
               <span className={clsx("whitespace-nowrap w-28 text-right", m.available ? "text-white/40" : "text-amber-200/80")} title={m.why ?? ""}>
                 {m.available ? (m.usage?.lastUsed ? ago(m.usage.lastUsed) : "ready") : `resting ${until(m.restingUntil!)}`}

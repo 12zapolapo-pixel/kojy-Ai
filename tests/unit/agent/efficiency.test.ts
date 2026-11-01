@@ -56,6 +56,15 @@ describe("batch tools", () => {
   });
 });
 
+describe("several Gemini keys", () => {
+  it("tries each model on every key before the next model", () => {
+    const list = endpoints({ AGENT_API_KEY: "k1", AGENT_API_KEYS: "k2, k3,k1", AGENT_MODEL: "best,next" });
+    expect(list.map((e) => [e.id, e.key])).toEqual([
+      ["agent:best", "k1"], ["agent:best#2", "k2"], ["agent:best#3", "k3"], ["agent:next", "k1"], ["agent:next#2", "k2"], ["agent:next#3", "k3"],
+    ]);
+  });
+});
+
 describe("more free AI providers", () => {
   it("adds a provider between Gemini and Groq once its key and models are set", () => {
     const ids = endpoints({ AGENT_API_KEY: "g", GROQ_API_KEY: "gsk_x", CEREBRAS_API_KEY: "c", CEREBRAS_MODELS: "m-a,m-b", MISTRAL_API_KEY: "m" }).map((e) => e.id);

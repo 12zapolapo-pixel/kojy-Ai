@@ -95,9 +95,12 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
     const effort = env.AGENT_REASONING_EFFORT ?? (gemini ? "medium" : undefined);
     // AGENT_MODEL: one model, or several separated by commas, best first.
     const models = (env.AGENT_MODEL ?? (gemini ? GEMINI_MODELS : "")).split(",").map((m) => m.trim()).filter(Boolean);
-    for (const model of models) {
+    // AGENT_API_KEYS: more keys of the same service, comma-separated. Each Google account
+    // has its own free allowance, so every model is tried on each key before the next model.
+    const keys = [...new Set([agentKey, ...(env.AGENT_API_KEYS ?? "").split(",")].map((k) => k.trim()).filter(Boolean))];
+    for (const model of models) for (const [i, key] of keys.entries()) {
       list.push({
-        id: `agent:${model}`, group: "agent", baseUrl, key: agentKey, model, kind: gemini ? "gemini" : "openai",
+        id: i === 0 ? `agent:${model}` : `agent:${model}#${i + 1}`, group: "agent", baseUrl, key, model, kind: gemini ? "gemini" : "openai",
         tokensPerMinute: setting(env.AGENT_TOKENS_PER_MINUTE, 200_000),
         historyTokens: setting(env.AGENT_HISTORY_TOKENS, 30_000),
         maxOutputTokens: setting(env.AGENT_MAX_OUTPUT_TOKENS, 8000),
