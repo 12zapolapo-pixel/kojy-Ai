@@ -178,6 +178,9 @@ importers:
       ioredis:
         specifier: ^5.4.1
         version: 5.11.1
+      isolated-vm:
+        specifier: ^7.0.0
+        version: 7.0.0
       pg:
         specifier: ^8.13.0
         version: 8.21.0
