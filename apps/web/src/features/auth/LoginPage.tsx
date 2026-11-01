@@ -20,7 +20,10 @@ export default function LoginPage() {
   const params   = new URLSearchParams(location.search);
   const fromResetLink = location.pathname === "/auth/reset-password";
   const [view, setView] = useState<View>(
-    fromResetLink ? "reset" : params.get("verify") ? "verify" : "login",
+    fromResetLink ? "reset"
+      : params.get("verify") ? "verify"
+      : params.get("mode") === "register" ? "register"
+      : "login",
   );
   const [pendingEmail, setPendingEmail] = useState(params.get("verify") ?? params.get("email") ?? "");
   const [notice, setNotice] = useState<string | null>(null);
