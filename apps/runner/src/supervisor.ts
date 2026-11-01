@@ -13,7 +13,7 @@
  * own main.py used on Replit.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, renameSync, appendFileSync, rmSync } from "node:fs";
 import path from "node:path";
@@ -23,11 +23,12 @@ import { botProjects, projectSecrets } from "@kojyai/db/schema";
 import { decryptApiKey } from "@kojyai/shared/crypto";
 import { ActivityRecorder, notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger } from "./logger.js";
+import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./sandbox.js";
 
 const log = createLogger("supervisor");
 
 export const PROJECTS_DIR = process.env.PROJECTS_DIR ?? "/app/projects";
-const VENVS_DIR   = process.env.VENVS_DIR ?? "/app/venvs";
+export const VENVS_DIR = process.env.VENVS_DIR ?? "/app/venvs";
 const PYTHON_BIN  = process.env.PYTHON_BIN ?? "python3";
 export const LAUNCHER = path.join(path.dirname(new URL(import.meta.url).pathname), "launcher.py");
 const LOG_DIR     = path.join(PROJECTS_DIR, ".logs");
@@ -56,6 +57,8 @@ function baseEnv(): NodeJS.ProcessEnv {
 
 interface Running {
   child: ChildProcess;
+  /** Signals the bot (works when it runs as its own sandbox user). */
+  signal: Sandboxed["kill"];
   startedAt: number;
   stopping: boolean;
   project: { id: number; orgId: number; ownerId: number; name: string };
@@ -124,15 +127,16 @@ export class Supervisor {
       if (!project.entrypoint) return this.setStatus(uuid, "error", "No bot entrypoint set (module.path:BotClass).");
 
       await this.setStatus(uuid, "installing", "Installing Python packages…");
-      const python = await this.ensureVenv(uuid, dir);
+      const python = await this.ensureVenv(uuid, dir, project.id);
 
       const env = await this.botEnv(project, python, dir);
+      const uid = sandboxUid(project.id); // ensureVenv already granted it the folders
 
       await this.setStatus(uuid, "starting", "Starting…");
       this.console(uuid, "system", `▶ Starting ${project.entrypoint}`);
       // fd 3: the launcher's activity reports (chat, join, tip… as JSON lines).
-      const child = spawn(python, [LAUNCHER], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] });
-      const run: Running = { child, startedAt: Date.now(), stopping: false, project: { id: project.id, orgId: project.orgId, ownerId: project.ownerId, name: project.name } };
+      const { child, kill: signal } = spawnAs(uid, python, [LAUNCHER], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] });
+      const run: Running = { child, signal, startedAt: Date.now(), stopping: false, project: { id: project.id, orgId: project.orgId, ownerId: project.ownerId, name: project.name } };
       this.readActivity(run);
       this.tails.set(uuid, []);
       this.procs.set(uuid, run);
@@ -230,7 +234,21 @@ export class Supervisor {
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
     await this.kill(uuid);
-    rmSync(path.join(VENVS_DIR, uuid), { recursive: true, force: true });
+    const venv = path.join(VENVS_DIR, uuid);
+    try {
+      rmSync(venv, { recursive: true, force: true });
+    } catch (err) {
+      // Files the bot's own user made unwritable: remove them as that user.
+      const marker = path.join(venv, ".kojy-sandbox-uid");
+      const uid = existsSync(marker) ? Number(readFileSync(marker, "utf8").trim()) : NaN;
+      if (!Number.isInteger(uid)) { log.warn({ err, uuid }, "Could not remove the Python environment"); return; }
+      await new Promise<void>((resolve) => {
+        const { child } = spawnAs(uid, "rm", ["-rf", "--", venv], { stdio: "ignore", env: baseEnv() });
+        child.once("exit", () => resolve());
+        child.once("error", () => resolve());
+      });
+      rmSync(venv, { recursive: true, force: true });
+    }
   }
 
   private kill(uuid: string): Promise<void> {
@@ -238,9 +256,9 @@ export class Supervisor {
     if (!run) return Promise.resolve();
     run.stopping = true;
     return new Promise((resolve) => {
-      const force = setTimeout(() => run.child.kill("SIGKILL"), STOP_GRACE_MS);
+      const force = setTimeout(() => run.signal("SIGKILL"), STOP_GRACE_MS);
       run.child.once("exit", () => { clearTimeout(force); resolve(); });
-      run.child.kill("SIGTERM");
+      run.signal("SIGTERM");
     });
   }
 
@@ -292,12 +310,18 @@ export class Supervisor {
    * One venv per project. Packages are reinstalled only when requirements.txt
    * changes (its hash is stored in the venv).
    */
-  async ensureVenv(uuid: string, dir: string): Promise<string> {
+  async ensureVenv(uuid: string, dir: string, projectId: number): Promise<string> {
     const venv = path.join(VENVS_DIR, uuid);
     const python = path.join(venv, "bin", "python");
+    // The project's own user creates the venv and runs pip (setup.py scripts
+    // run there), so it needs its folder; requirements.txt lives in `dir`.
+    const uid = sandboxUid(projectId);
+    mkdirSync(venv, { recursive: true });
+    grantDirOnce(venv, uid);
+    grantDir(dir, uid);
     if (!existsSync(python)) {
       this.console(uuid, "system", "Creating Python environment…");
-      await this.exec(uuid, PYTHON_BIN, ["-m", "venv", venv], dir);
+      await this.exec(uuid, uid, PYTHON_BIN, ["-m", "venv", venv], dir);
     }
     const reqFile = path.join(dir, "requirements.txt");
     const reqText = existsSync(reqFile) ? readFileSync(reqFile, "utf8") : "";
@@ -308,14 +332,17 @@ export class Supervisor {
     this.console(uuid, "system", "Installing packages (first run or requirements.txt changed)…");
     const args = ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", ...BASE_REQUIREMENTS];
     if (reqText.trim()) args.push("-r", reqFile);
-    await this.exec(uuid, python, args, dir);
+    await this.exec(uuid, uid, python, args, dir);
     writeFileSync(marker, hash);
     return python;
   }
 
-  private exec(uuid: string, cmd: string, args: string[], cwd: string): Promise<void> {
+  private exec(uuid: string, uid: number, cmd: string, args: string[], cwd: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(cmd, args, { cwd, env: { ...baseEnv(), HOME: cwd, PIP_CACHE_DIR: path.join(VENVS_DIR, ".pip-cache") }, stdio: ["ignore", "pipe", "pipe"] });
+      // Per-project pip cache: a shared one would let one project's install
+      // plant files another project's install picks up.
+      const venv = path.join(VENVS_DIR, uuid);
+      const { child } = spawnAs(uid, cmd, args, { cwd, env: { ...baseEnv(), HOME: cwd, PIP_CACHE_DIR: path.join(venv, ".pip-cache") }, stdio: ["ignore", "pipe", "pipe"] });
       this.pipe(uuid, child);
       child.once("error", reject);
       child.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${path.basename(cmd)} ${args.slice(0, 3).join(" ")} failed (exit ${code})`))));

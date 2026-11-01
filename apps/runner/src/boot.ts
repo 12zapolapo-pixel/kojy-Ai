@@ -16,7 +16,8 @@ import { createDb, runMigrations } from "@kojyai/db";
 import { resolveRedisTls } from "@kojyai/shared/redis";
 import { verifyBotControlMessage } from "@kojyai/shared/crypto";
 import { createLogger } from "./logger.js";
-import { Supervisor } from "./supervisor.js";
+import { Supervisor, PROJECTS_DIR, VENVS_DIR } from "./supervisor.js";
+import { initSandbox } from "./sandbox.js";
 import { Agent } from "./agent/agent.js";
 
 const log = createLogger("runner-boot");
@@ -36,6 +37,8 @@ async function main(): Promise<void> {
   if (process.env.DB_AUTO_MIGRATE !== "false") await runMigrations(db);
 
   const supervisor = new Supervisor(db);
+  // V-01: per-project users for Python code; closes the shared folders to other users.
+  initSandbox([PROJECTS_DIR, VENVS_DIR]);
 
   const url = process.env.REDIS_URL ?? "redis://localhost:6379";
   const redisOptions = {

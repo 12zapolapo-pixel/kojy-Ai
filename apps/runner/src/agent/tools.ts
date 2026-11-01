@@ -5,7 +5,6 @@
  * OWNERSHIP: apps/runner/src/agent
  */
 
-import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, mkdtempSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -20,6 +19,7 @@ import {
 import type { Supervisor } from "../supervisor.js";
 import { LAUNCHER } from "../supervisor.js";
 import { runRoomTest } from "./mockRoom.js";
+import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
 
 export type Project = typeof botProjects.$inferSelect;
@@ -85,14 +85,17 @@ export const TOOL_SPECS: ToolSpec[] = [
 const TEXT_EXT = /\.(py|txt|md|json|ya?ml|toml|ini|cfg|env|example|js|ts|html|css|sh)$|(^|\/)(Dockerfile|Procfile|requirements[^/]*)$/i;
 const clip = (s: string, max = 6000) => (s.length > max ? `${s.slice(0, max)}\n… (${s.length - max} more characters)` : s);
 
-function runCapture(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; out: string }> {
+function runCapture(uid: number, cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    let started: ReturnType<typeof spawnAs>;
+    try { started = spawnAs(uid, cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] }); }
+    catch (e) { resolve({ code: -1, out: (e as Error).message }); return; }
+    const { child, kill } = started;
     let out = "";
     const add = (d: Buffer) => { if (out.length < 20_000) out += d.toString("utf8"); };
-    child.stdout.on("data", add);
-    child.stderr.on("data", add);
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    child.stdout?.on("data", add);
+    child.stderr?.on("data", add);
+    const timer = setTimeout(() => kill("SIGKILL"), timeoutMs);
     child.once("error", (e) => { clearTimeout(timer); resolve({ code: -1, out: e.message }); });
     child.once("exit", (code) => { clearTimeout(timer); resolve({ code, out }); });
   });
@@ -222,18 +225,20 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       case "check_code": {
-        const python = await ctx.supervisor.ensureVenv(uuid, dir);
+        const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
         const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
+        const uid = sandboxUid(ctx.project.id);
         const work = mkdtempSync(path.join(tmpdir(), "kojy-check-"));
         try {
           cpSync(dir, work, { recursive: true, filter: (src) => !/[/\\](\.git|node_modules|__pycache__|data)$/.test(src) });
-          const compile = await runCapture(python, ["-m", "compileall", "-q", "-x", "(^|/)(\\.|venv|node_modules)", "."], work, env, 60_000);
+          grantDir(work, uid);
+          const compile = await runCapture(uid, python, ["-m", "compileall", "-q", "-x", "(^|/)(\\.|venv|node_modules)", "."], work, env, 60_000);
           if (compile.code !== 0) return { ok: false, output: clip(`Syntax errors:\n${compile.out}`), summary: "Code check: syntax errors" };
           const entry = ctx.project.entrypoint;
           if (!entry) return { ok: true, output: "All files compile. No entrypoint set yet (use set_entrypoint).", summary: "Code check: compiles (no entrypoint yet)" };
           const [mod, cls] = entry.split(":");
           const probe = `import sys; sys.path.insert(0, "."); import importlib; m = importlib.import_module(${JSON.stringify(mod)}); c = getattr(m, ${JSON.stringify(cls)}); from highrise import BaseBot; assert issubclass(c, BaseBot), "${cls} is not a BaseBot"; c(); print("IMPORT_OK")`;
-          const imp = await runCapture(python, ["-c", probe], work, env, 60_000);
+          const imp = await runCapture(uid, python, ["-c", probe], work, env, 60_000);
           const ok = imp.out.includes("IMPORT_OK");
           return { ok, output: clip(ok ? `All files compile and ${entry} loads.` : `Importing ${entry} failed:\n${imp.out}`), summary: ok ? "Code check passed" : "Code check: the bot fails to load" };
         } finally {
@@ -244,10 +249,10 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       case "test_in_room": {
         if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
-        const python = await ctx.supervisor.ensureVenv(uuid, dir);
+        const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
         const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
         const r = await runRoomTest({
-          projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat,
+          uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat,
           join: args.join === true, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
         });
         const verdict = !r.connected ? "The bot never connected to the test room."
