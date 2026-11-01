@@ -102,21 +102,19 @@ describe("steps without a thought signature (made by Groq) for Gemini", () => {
   it("become plain text, with the results as app messages so a request never ends on Gemini's turn", () => {
     const out = unsignedStepsAsText([{ role: "user", content: "hi" }, step("g1"), result("g1"), step("g2"), result("g2", "ok"), { role: "assistant", content: "Done." }]);
     expect(out).toEqual([
-      { role: "user", content: "hi" },
-      { role: "assistant", content: "I ran list_files({})." },
-      { role: "user", content: "[app] Result of list_files: bot.py" },
-      { role: "assistant", content: "I ran list_files({})." },
-      { role: "user", content: "[app] Result of list_files: ok" },
+      { role: "user", content: "hi\n[app] Earlier step by the backup AI: list_files({})\n[app] Result of list_files: bot.py\n[app] Earlier step by the backup AI: list_files({})\n[app] Result of list_files: ok" },
       { role: "assistant", content: "Done." },
     ]);
+    // Never written as the model's own words, so it can't copy them as an answer.
+    expect(out.some((m) => m.role === "assistant" && /I ran|Earlier step/.test(m.content ?? ""))).toBe(false);
   });
 
   it("put the results of one step with several calls in one app message", () => {
     const two: ChatMessage = { role: "assistant", content: "Looking.", tool_calls: [step("a").tool_calls![0]!, { ...step("b").tool_calls![0]!, function: { name: "get_logs", arguments: "{\"lines\":20}" } }] };
     expect(unsignedStepsAsText([{ role: "user", content: "hi" }, two, result("a"), result("b", "started")])).toEqual([
       { role: "user", content: "hi" },
-      { role: "assistant", content: "Looking.\nI ran list_files({}).\nI ran get_logs({\"lines\":20})." },
-      { role: "user", content: "[app] Result of list_files: bot.py\n[app] Result of get_logs: started" },
+      { role: "assistant", content: "Looking." },
+      { role: "user", content: "[app] Earlier step by the backup AI: list_files({})\n[app] Earlier step by the backup AI: get_logs({\"lines\":20})\n[app] Result of list_files: bot.py\n[app] Result of get_logs: started" },
     ]);
   });
 
@@ -130,7 +128,7 @@ describe("steps without a thought signature (made by Groq) for Gemini", () => {
     const msgs = [{ role: "user", content: "hi" } as ChatMessage, step("g1"), result("g1")];
     const [gemini] = endpoints({ AGENT_API_KEY: "g" });
     const [groq] = endpoints({ GROQ_API_KEY: "gsk_x" });
-    expect((requestBody(gemini!, msgs, [], 10) as any).messages.map((m: ChatMessage) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect((requestBody(gemini!, msgs, [], 10) as any).messages.map((m: ChatMessage) => m.role)).toEqual(["user"]) // the request and the backup AI's step with its result, as app notes;
     expect((requestBody(groq!, msgs, [], 10) as any).messages.map((m: ChatMessage) => m.role)).toEqual(["user", "assistant", "tool"]);
   });
 });

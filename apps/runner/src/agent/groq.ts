@@ -178,8 +178,8 @@ const shortArgs = (args: string) => (args.length > 200 ? `${args.slice(0, 200)}â
 /**
  * Gemini 3 refuses a tool call without its thought signature, and the steps
  * Groq made (every chat from before Gemini, too) have none. Gemini gets those
- * steps as plain text instead: "I ran list_files({})." then an app message
- * with the result (Gemini refuses a request that ends on its own turn). A
+ * steps as app notes instead: "[app] Earlier step by the backup AI:
+ * list_files({})" and the result (Gemini refuses a request that ends on its own turn). A
  * step is Gemini's own when any call is signed (parallel calls carry the
  * signature on the first one only); those go as they are.
  */
@@ -194,7 +194,10 @@ export function unsignedStepsAsText(messages: ChatMessage[]): ChatMessage[] {
   };
   for (const m of messages) {
     if (m.role === "assistant" && m.tool_calls?.length && !m.tool_calls.some((c) => c.extra_content)) {
-      add("assistant", [m.content, ...m.tool_calls.map((c) => `I ran ${c.function.name}(${shortArgs(c.function.arguments)}).`)].filter(Boolean).join("\n"));
+      // As an app note, not as the model's own words: a model shown "I ran x()." as
+      // its earlier reply tends to answer with that text instead of calling tools.
+      if (m.content) add("assistant", m.content);
+      add("user", m.tool_calls.map((c) => `[app] Earlier step by the backup AI: ${c.function.name}(${shortArgs(c.function.arguments)})`).join("\n"));
       for (const c of m.tool_calls) names.set(c.id, c.function.name);
     } else if (m.role === "tool" && m.tool_call_id && names.has(m.tool_call_id)) {
       add("user", `[app] Result of ${names.get(m.tool_call_id)}: ${m.content ?? ""}`);

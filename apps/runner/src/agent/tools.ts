@@ -56,6 +56,8 @@ export interface ToolContext {
   /** Called after the real bot restarted with this run's changes (starts the watch). */
   onRestarted?: () => void;
   signal?: AbortSignal;
+  /** read_file ranges read in this task → the file's mtime then. */
+  reads?: Map<string, string>;
   /** Minor review findings, for the report. */
   reviewNotes?: string;
 }
@@ -282,6 +284,11 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         const start = Math.max(1, Number(args.start_line) || 1);
         const end = Math.min(lines.length, Number(args.end_line) || start + 199, start + 199);
         const body = lines.slice(start - 1, end).map((l, i) => `${start + i}| ${l}`).join("\n");
+        // The same unchanged lines again: say so, so the model uses what it has and moves on.
+        const key = `${rel}:${start}-${end}`, stamp = `${statSync(file).mtimeMs}`;
+        const again = ctx.reads?.get(key) === stamp;
+        (ctx.reads ??= new Map()).set(key, stamp);
+        if (again) return { ok: true, output: clip(`You already read exactly these lines in this task and the file hasn't changed since. Use them and move on (edit, test, or read other lines).\n${rel} — lines ${start}-${end} of ${lines.length}\n${body}`, 12_000), summary: `Read ${rel} (lines ${start}-${end}) again` };
         return { ok: true, output: clip(`${rel} — lines ${start}-${end} of ${lines.length}\n${body}`, 12_000), summary: `Read ${rel} (lines ${start}-${end})` };
       }
 
