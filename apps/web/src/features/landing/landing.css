@@ -34,6 +34,7 @@
   --body:    "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono:    "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --gutter: clamp(1rem, 4vw, 3rem);
   --max: 76rem;
 
@@ -137,7 +138,8 @@
 .kj-btn--ghost { border-color: var(--ink); color: var(--ink); }
 .kj-btn--ghost:hover { background: var(--ink); color: var(--paper); }
 .kj-btn--small { min-height: 2.5rem; padding: 0 1.1rem; font-size: 0.9375rem; }
-.kj-btn svg { width: 1.1em; height: 1.1em; flex: none; }
+.kj-btn svg { width: 1.1em; height: 1.1em; flex: none; transition: transform 200ms var(--ease); }
+.kj-btn:hover svg { transform: translateX(3px); }
 
 .kj-textlink {
   font-weight: 600;
@@ -201,12 +203,19 @@
 }
 .kj-hero h1 em {
   font-style: normal;
-  background: var(--signal);
+  position: relative;
+  z-index: 0;
   padding: 0 0.12em;
   margin-inline: -0.04em;
+}
+.kj-hero h1 em::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--signal);
   border-radius: 0.12em;
-  box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
+  transform-origin: left center;
 }
 .kj-hero-actions {
   display: flex;
@@ -244,9 +253,10 @@
 .kj-win-bar b { font-weight: 500; color: var(--win-text); }
 .kj-live { display: inline-flex; align-items: center; gap: 0.5rem; color: var(--win-text); }
 .kj-live i {
+  position: relative;
   width: 0.5rem; height: 0.5rem; border-radius: 50%;
   background: var(--win-live);
-  animation: kj-live-in 1ms linear 3.6s backwards;
+  animation: kj-live-in 1ms linear var(--live, 3700ms) backwards;
 }
 .kj-win-body { display: grid; }
 @media (min-width: 40rem) {
@@ -319,8 +329,8 @@
   to   { opacity: 1; transform: none; }
 }
 @keyframes kj-live-in { from { background: var(--win-dim); } to { background: var(--win-live); } }
-.kj-play {
-  animation: kj-rise 520ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+.kj--motion .kj-play {
+  animation: kj-rise 520ms var(--ease) backwards;
   animation-delay: var(--d, 0ms);
 }
 
@@ -335,12 +345,20 @@
   .kj-split-sticky { position: sticky; top: 6rem; }
 }
 
-.kj-rows { border-top: 2px solid var(--ink); }
+.kj-rows { position: relative; }
+.kj-rows::before, .kj-bots::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--ink); transform-origin: left center;
+}
 .kj-row {
   display: grid;
   gap: 0.5rem 2rem;
   padding-block: clamp(1.25rem, 2.5vw, 2rem);
-  border-bottom: 1px solid var(--rule);
+  position: relative;
+}
+.kj-row::after, .kj-bots li::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+  background: var(--rule); transform-origin: left center;
 }
 @media (min-width: 40rem) {
   .kj-row { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: baseline; }
@@ -368,7 +386,11 @@
 }
 @media (min-width: 40rem) { .kj-loop { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (min-width: 64rem) { .kj-loop { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-.kj-loop li { border-top: 2px solid var(--signal); padding-top: 1rem; }
+.kj-loop li { position: relative; padding-top: 1rem; }
+.kj-loop li::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--signal); transform-origin: left center;
+}
 .kj-loop h3 {
   font-family: var(--display);
   font-weight: 800;
@@ -398,12 +420,12 @@
 
 /* ── Nine bots ────────────────────────────────────────────────────────────── */
 
-.kj-bots { border-top: 2px solid var(--ink); }
+.kj-bots { position: relative; }
 .kj-bots li {
   display: grid;
   gap: 0.15rem 2rem;
   padding-block: 1rem;
-  border-bottom: 1px solid var(--rule);
+  position: relative;
 }
 @media (min-width: 40rem) {
   .kj-bots li { grid-template-columns: 11rem minmax(0, 1fr); align-items: baseline; }
@@ -438,8 +460,128 @@
 .kj-foot nav a { color: var(--ink-2); font-weight: 500; }
 .kj-foot nav a:hover { color: var(--ink); }
 
+/* ── Motion layer ─────────────────────────────────────────────────────────────
+ * Every hidden starting state lives under .kj--motion, which is only set when
+ * the visitor has not asked for reduced motion. Without it the page is the
+ * finished, static design. Only transform, opacity and clip-path move.
+ */
+
+.kj-replay {
+  margin-left: 0.75rem;
+  padding: 0.25rem 0;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.25em;
+  text-decoration-color: var(--signal);
+  cursor: pointer;
+}
+.kj-replay:hover { text-decoration-color: currentColor; }
+
+/* Word masks (hero headline, closing headline) */
+.kj-w {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: top;
+  padding: 0.06em 0 0.16em;
+  margin: -0.06em 0 -0.16em;
+}
+.kj-w > span { display: inline-block; }
+
+/* Typed message: ghost text holds the final size so nothing reflows */
+.kj-typed { position: relative; display: block; }
+.kj-typed-ghost { visibility: hidden; }
+.kj-typed-live { position: absolute; inset: 0; }
+.kj-caret {
+  display: inline-block; width: 0.5ch; height: 1em; margin-left: 1px;
+  vertical-align: -0.15em; background: var(--signal);
+}
+
+@keyframes kj-write { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes kj-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes kj-ring {
+  from { transform: scale(1); opacity: 0.85; }
+  to   { transform: scale(3.4); opacity: 0; }
+}
+
+/* Hero session */
+.kj--motion .kj-code .kj-play { animation-name: kj-write; animation-duration: 420ms; }
+.kj--motion .kj-steps svg path {
+  stroke-dasharray: 1;
+  animation: kj-draw 420ms var(--ease) calc(var(--d, 0ms) + 120ms) both;
+}
+.kj--motion .kj-live i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--win-live);
+  animation: kj-ring 1300ms ease-out var(--live, 3700ms) 3 backwards;
+}
+
+/* Scroll reveals: one observer, a few different gestures */
+.kj--motion [data-reveal="rise"] {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 700ms var(--ease), transform 800ms var(--ease);
+  transition-delay: calc(var(--i, 0) * 80ms);
+}
+.kj--motion .kj-hero-window[data-reveal="rise"] {
+  transform: translateY(40px);
+  transition-delay: 150ms;
+}
+.kj--motion [data-reveal="rise"].is-in,
+.kj--motion .kj-hero-window[data-reveal="rise"].is-in { opacity: 1; transform: none; }
+
+.kj--motion [data-reveal="words"] .kj-w > span {
+  transform: translateY(118%);
+  transition: transform 900ms var(--ease);
+  transition-delay: calc(var(--i, 0) * 70ms);
+}
+.kj--motion [data-reveal="words"].is-in .kj-w > span { transform: none; }
+.kj--motion .kj-hero h1 em::before { transform: scaleX(0); transition: transform 800ms var(--ease) 520ms; }
+.kj--motion .kj-hero h1.is-in em::before { transform: none; }
+
+/* Rules draw across, rows rise in behind them */
+.kj--motion [data-reveal="topline"]::before {
+  transform: scaleX(0);
+  transition: transform 1100ms var(--ease);
+}
+.kj--motion [data-reveal="topline"].is-in::before { transform: none; }
+.kj--motion .kj-row[data-reveal]::after,
+.kj--motion .kj-bots li[data-reveal]::after {
+  transform: scaleX(0);
+  transition: transform 900ms var(--ease) calc(var(--i, 0) * 80ms + 150ms);
+}
+.kj--motion .kj-row[data-reveal].is-in::after,
+.kj--motion .kj-bots li[data-reveal].is-in::after { transform: none; }
+
+/* The loop plays in order: rule draws, word wipes in, line rises */
+.kj--motion .kj-loop li::before {
+  transform: scaleX(0);
+  transition: transform 700ms var(--ease) calc(var(--i, 0) * 170ms);
+}
+.kj--motion .kj-loop li h3 {
+  clip-path: inset(-0.1em 100% -0.1em -0.05em);
+  transition: clip-path 800ms var(--ease) calc(var(--i, 0) * 170ms + 200ms);
+}
+.kj--motion .kj-loop li p {
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 600ms var(--ease) calc(var(--i, 0) * 170ms + 550ms),
+              transform 700ms var(--ease) calc(var(--i, 0) * 170ms + 550ms);
+}
+.kj--motion .kj-loop li.is-in::before { transform: none; }
+.kj--motion .kj-loop li.is-in h3 { clip-path: inset(-0.1em -0.1em -0.1em -0.05em); }
+.kj--motion .kj-loop li.is-in p { opacity: 1; transform: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .kj { scroll-behavior: auto; }
-  .kj-play, .kj-live i { animation: none; }
-  .kj-btn { transition: none; }
+  .kj-play, .kj-live i, .kj-live i::after { animation: none; }
+  .kj-btn, .kj-btn svg { transition: none; }
 }
