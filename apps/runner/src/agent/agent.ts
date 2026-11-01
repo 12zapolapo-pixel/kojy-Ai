@@ -29,7 +29,7 @@ import path from "node:path";
 import { listFiles, projectDir, readLogs, restoreSnapshot } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
-import { chat, estimateTokens, aiConfigured, currentEndpoint, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
+import { chat, estimateTokens, aiConfigured, currentEndpoint, AiUnavailableError, RequestTooLargeError, ResizeError, type Endpoint, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type Project, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt } from "./prompt.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
@@ -58,7 +58,8 @@ interface Scope {
   projectId: number;
   tools: ToolSpec[];
   runTool(name: string, args: Record<string, unknown>): Promise<ToolResult>;
-  system(): Promise<string>;
+  /** compact: for a small plan (Groq), a shorter prompt. */
+  system(compact?: boolean): Promise<string>;
   setState(state: "idle" | "working" | "waiting"): Promise<void>;
   /** A Python bot's tool context (its checks, edits and snapshot), for the report and the watch. */
   ctx?: ToolContext;
@@ -145,15 +146,15 @@ export class Agent {
     return {
       key, thread: `project:${project.id}`, projectId: project.id, tools: TOOL_SPECS,
       runTool: (name, args) => runTool(name, args, ctx),
-      system: async () => {
+      system: async (compact = false) => {
         const [secrets, memories] = await Promise.all([
           this.db.select({ key: projectSecrets.key }).from(projectSecrets).where(eq(projectSecrets.projectId, project.id)),
           loadMemories(this.db, project),
         ]);
         return systemPrompt({
           projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status,
-          secrets: secrets.map((x) => x.key), memories, fileCount: listFiles(project.uuid).filter((f) => !f.isDir).length,
-          map: projectMap(project.uuid), spec: readSpec(project.uuid).slice(0, 2500),
+          secrets: secrets.map((x) => x.key), memories: compact ? memories.slice(-3) : memories, fileCount: listFiles(project.uuid).filter((f) => !f.isDir).length,
+          map: projectMap(project.uuid, compact ? 700 : 2500), spec: readSpec(project.uuid).slice(0, compact ? 500 : 2500),
         });
       },
       setState: async (state) => { await this.db.update(botProjects).set({ agentState: state }).where(eq(botProjects.id, project.id)); },
@@ -228,19 +229,24 @@ export class Agent {
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
 
         let message: ChatMessage | undefined;
-        // History sized for the AI that takes the request (Gemini's plan fits far
-        // more than Groq's). Too big for the plan → try again with less (3 times).
-        for (let shrink = 1; !message; shrink *= 2) {
-          const budget = Math.floor((currentEndpoint()?.historyTokens ?? 3000) / shrink);
+        // History sized for the AI that takes the request (Gemini's plan fits far more
+        // than Groq's). When Gemini rests and Groq takes over, the request is built again
+        // in Groq's size; still too big for the plan → try again with less (3 times).
+        let target: Endpoint | undefined;
+        for (let shrink = 1; !message;) {
+          const ep = target ?? currentEndpoint();
+          const budget = Math.floor((ep?.historyTokens ?? 3000) / shrink);
           try {
             let model: string;
             ({ message, model } = await chat({
-              messages: await this.buildMessages(scope, budget), tools: scope.tools, signal,
+              messages: await this.buildMessages(scope, budget, !!ep?.compact), tools: scope.tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`),
             }));
             if (ctx) ctx.mainModel = model;
           } catch (err) {
+            if (err instanceof ResizeError && target?.id !== err.ep.id) { target = err.ep; continue; }
             if (!(err instanceof RequestTooLargeError) || shrink >= 8) throw err;
+            shrink *= 2;
           }
         }
         const calls = message.tool_calls ?? [];
@@ -301,10 +307,10 @@ export class Agent {
    * results are shrunk to their one-line summary; the history always starts at
    * a user message so tool calls and their results stay paired.
    */
-  private async buildMessages(scope: Scope, historyTokens: number): Promise<ChatMessage[]> {
+  private async buildMessages(scope: Scope, historyTokens: number, compact = false): Promise<ChatMessage[]> {
     const [rowsDesc, system] = await Promise.all([
       this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(80),
-      scope.system(),
+      scope.system(compact),
     ]);
     // Errors and work reports are for the owner; the model has the steps themselves.
     const rows = rowsDesc.reverse().filter((r) => r.kind !== "error" && r.kind !== "report");

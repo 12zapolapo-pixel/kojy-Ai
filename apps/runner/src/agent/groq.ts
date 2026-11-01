@@ -37,9 +37,15 @@ export interface ToolSpec { type: "function"; function: { name: string; descript
 export class AiUnavailableError extends Error {}
 /** The request is over the plan's per-request size; retry with less history. */
 export class RequestTooLargeError extends AiUnavailableError {}
+/** The request was sized for a bigger plan than the AI that's free now (Gemini resting → Groq): build it again for `ep`. */
+export class ResizeError extends RequestTooLargeError {
+  constructor(readonly ep: Endpoint) { super(`The request is too big for ${ep.id}; rebuilding it smaller.`); }
+}
 
 /** One AI Kojy can use, with the budgets its plan allows. */
 export interface Endpoint {
+  /** Small plan (Groq): send short tool descriptions and a shorter prompt so a request fits its per-minute budget. */
+  compact?: boolean;
   /** For logs, and the key for pacing and skipping. */
   id: string;
   /** Models of one service; on a per-minute limit the next one in the group answers at once. */
@@ -111,10 +117,13 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
     const groq = (model: string): Endpoint => ({
       id: `groq:${model}`, group: "groq", baseUrl: trimSlash(env.GROQ_BASE_URL ?? GROQ_URL), key: groqKey, model, kind: "openai",
       tokensPerMinute: setting(own.AGENT_TOKENS_PER_MINUTE, 7500),
-      historyTokens: setting(own.AGENT_HISTORY_TOKENS, 3000),
-      maxOutputTokens: setting(own.AGENT_MAX_OUTPUT_TOKENS, 1200),
-      reasoningTokens: 800, // headroom for gpt-oss reasoning tokens
-      reasoningEffort: "medium",
+      historyTokens: setting(own.AGENT_HISTORY_TOKENS, 1200),
+      compact: true,
+      // gpt-oss reasons first (headroom for those tokens). Qwen may write only ~1000
+      // tokens a minute on the free plan, and asking it to reason goes over that.
+      ...(model.startsWith("qwen/")
+        ? { maxOutputTokens: Math.min(setting(own.AGENT_MAX_OUTPUT_TOKENS, 900), 900), reasoningTokens: 0 }
+        : { maxOutputTokens: setting(own.AGENT_MAX_OUTPUT_TOKENS, 1200), reasoningTokens: 800, reasoningEffort: "medium" }),
       timeoutMs: 120_000,
     });
     for (const model of [...new Set(groqModels)]) list.push(groq(model));
@@ -204,7 +213,22 @@ export function unsignedStepsAsText(messages: ChatMessage[]): ChatMessage[] {
  * make it loop); other AIs get standard tool calls only, since extra fields
  * can be refused.
  */
+/** Tools with one-sentence descriptions and no parameter descriptions (for small plans). */
+export function compactTools(tools: ToolSpec[]): ToolSpec[] {
+  const short = (d: unknown) => typeof d === "string" ? (d.split(/(?<=\.)\s/)[0] ?? d).slice(0, 90) : d;
+  return tools.map((t) => {
+    const params = t.function.parameters as { properties?: Record<string, Record<string, unknown>> } | undefined;
+    const properties = params?.properties ? Object.fromEntries(Object.entries(params.properties).map(([k, v]) => {
+      const { description: _d, ...rest } = v;
+      if (rest.items && typeof rest.items === "object") { const { description: _i, ...items } = rest.items as Record<string, unknown>; rest.items = items; }
+      return [k, rest];
+    })) : undefined;
+    return { ...t, function: { ...t.function, description: short(t.function.description) as string, ...(params ? { parameters: { ...params, ...(properties ? { properties } : {}) } } : {}) } };
+  });
+}
+
 export function requestBody(ep: Endpoint, messages: ChatMessage[], tools: ToolSpec[], maxTokens: number): Record<string, unknown> {
+  if (ep.compact && tools) tools = compactTools(tools);
   const msgs = ep.kind === "gemini" ? unsignedStepsAsText(messages) : messages.map((m) => (m.tool_calls?.length
     ? { ...m, tool_calls: m.tool_calls.map(({ id, type, function: f }) => ({ id, type, function: f })) }
     : m));
@@ -254,10 +278,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
   for (let attempt = 0; attempt < 8 + 2 * all.length; attempt++) {
     if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
     const ep = all.find(usable);
-    // A better model resting for a moment (a per-minute limit) is worth the short wait,
-    // rather than moving to a later service (Groq's budget can't hold Gemini's history).
-    const resting = all.filter((e) => !refused.has(e.id) && !available(e) && skipped.get(e.id)!.until - Date.now() <= 70_000
-      && (!ep || (all.indexOf(e) < all.indexOf(ep) && e.group !== ep.group)));
+    // Only when nothing else can take the step: wait for a model resting a moment (a per-minute limit).
+    const resting = ep ? [] : all.filter((e) => !refused.has(e.id) && !available(e) && skipped.get(e.id)!.until - Date.now() <= 70_000);
     if (resting.length) {
       const ms = Math.max(0, Math.min(...resting.map((e) => skipped.get(e.id)!.until)) - Date.now());
       opts.onWait?.(Math.max(1, Math.ceil(ms / 1000)), "AI rate limit");
@@ -276,11 +298,15 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     const body = requestBody(ep, opts.messages, opts.tools, maxTokens);
     const size = estimateTokens(JSON.stringify(body.messages)) + estimateTokens(JSON.stringify(body.tools ?? [])) + maxTokens;
 
+    // Sized for a bigger plan (Gemini's) than this AI's: the caller builds it again smaller.
+    if (size > ep.tokensPerMinute) throw new ResizeError(ep);
+
     const used = usedLastMinute(ep.id);
     if (used > 0 && used + size > ep.tokensPerMinute) {
       const oldest = recent.get(ep.id)![0]!;
       const wait = Math.max(1, Math.ceil((60_000 - (Date.now() - oldest.at)) / 1000));
-      if (sibling) { skip(ep, wait * 1000, "The AI's per-minute budget is used up."); continue; }
+      // Another model (the same AI's, or Groq) takes the step instead of waiting.
+      if (sibling || hasNext) { skip(ep, wait * 1000, "The AI's per-minute budget is used up."); continue; }
       opts.onWait?.(wait, "pacing for the free AI plan");
       await sleep(wait * 1000);
       continue;
