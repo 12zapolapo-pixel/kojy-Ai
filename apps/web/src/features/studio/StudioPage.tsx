@@ -215,7 +215,7 @@ function JsScripts({ botId, onOpenClassic }: { botId: string; onOpenClassic: () 
 
 function StudioHome({ bots }: { bots: BotItem[] }) {
   const navigate = useNavigate();
-  const [tab, setTab] = useState<"overview" | "jobs" | "memory">("overview");
+  const [tab, setTab] = useState<"overview" | "jobs" | "usage" | "memory">("overview");
   const status = trpc.system.status.useQuery(undefined, { refetchInterval: 30_000, retry: false });
   const live = bots.filter((b) => b.live).length;
   const broken = bots.filter((b) => b.status === "crashed" || b.status === "error");
@@ -225,13 +225,13 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
       chat={<ChatTab project={null} />}
       panelTabs={
         <div className="flex gap-1 px-3 border-b border-white/5">
-          {([["overview", "Overview"], ["jobs", "Kojy jobs"], ["memory", "What Kojy knows"]] as const).map(([id, label]) => (
+          {([["overview", "Overview"], ["jobs", "Kojy jobs"], ["usage", "AI usage"], ["memory", "What Kojy knows"]] as const).map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)}
               className={clsx("px-3 py-2 text-sm border-b-2 -mb-px", tab === id ? "border-[#49dcb5] text-white" : "border-transparent text-white/40 hover:text-white/70")}>{label}</button>
           ))}
         </div>
       }
-      panel={tab === "memory" ? <KojyMemory /> : tab === "jobs" ? <KojyJobs /> : (
+      panel={tab === "memory" ? <KojyMemory /> : tab === "jobs" ? <KojyJobs /> : tab === "usage" ? <AiUsage /> : (
         <div className="h-full overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-3 gap-2 text-center">
             {[["Bots", bots.length], ["Running", live], ["Need attention", broken.length]].map(([label, n]) => (
@@ -263,6 +263,50 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
         </div>
       )}
     />
+  );
+}
+
+const PROVIDER: Record<string, string> = { agent: "Gemini", groq: "Groq", cerebras: "Cerebras", openrouter: "OpenRouter", mistral: "Mistral", github: "GitHub Models" };
+
+/** Every AI model Kojy can use: requests and tokens today, limits hit, resting or ready; then the last jobs. */
+function AiUsage() {
+  const q = trpc.studio.aiUsage.useQuery(undefined, { refetchInterval: 15_000 });
+  const models = q.data?.models ?? [];
+  const groups = [...new Set(models.map((m) => m.group))];
+  const ago = (t: number) => { const m = Math.round((Date.now() - t) / 60_000); return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
+  const until = (t: number) => { const m = Math.max(1, Math.round((t - Date.now()) / 60_000)); return m < 60 ? `${m} min` : `${Math.round(m / 6) / 10} h`; };
+  return (
+    <div className="h-full overflow-y-auto p-4 space-y-4">
+      <p className="text-xs text-white/45">The free AI plans Kojy uses, best first. Free Gemini allows about 20 requests a day per model (reset 07:00 UTC); Groq about 8,000 tokens a minute per model. Numbers count since the runner last started, per UTC day.</p>
+      {!q.data?.updatedAt && <p className="text-sm text-white/40">{q.isLoading ? "Loading…" : "The runner hasn't reported yet (it does every 15 s)."}</p>}
+      {groups.map((g) => (
+        <div key={g} className="space-y-1">
+          <p className="text-xs text-white/60 font-medium">{PROVIDER[g] ?? g}</p>
+          {models.filter((m) => m.group === g).map((m) => (
+            <div key={m.id} className="flex items-center gap-2 border border-white/8 rounded-lg px-3 py-1.5 text-xs">
+              <span className={clsx("w-2 h-2 rounded-full shrink-0", m.available ? "bg-[#49dcb5]" : "bg-amber-300")} />
+              <span className="flex-1 min-w-0 truncate text-white/80 font-mono">{m.model}</span>
+              <span className="text-white/45 whitespace-nowrap">{m.usage ? `${m.usage.requests} req · ${Math.round((m.usage.tokensIn + m.usage.tokensOut) / 1000)}k tok${m.usage.limited ? ` · ${m.usage.limited} limited` : ""}` : "unused today"}</span>
+              <span className={clsx("whitespace-nowrap w-28 text-right", m.available ? "text-white/40" : "text-amber-200/80")} title={m.why ?? ""}>
+                {m.available ? (m.usage?.lastUsed ? ago(m.usage.lastUsed) : "ready") : `resting ${until(m.restingUntil!)}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+      <div className="space-y-1">
+        <p className="text-xs text-white/60 font-medium">Last jobs</p>
+        {(q.data?.jobs ?? []).length === 0 && <p className="text-sm text-white/40">Work reports show up here.</p>}
+        {q.data?.jobs.map((j, i) => (
+          <div key={i} className="flex items-center gap-2 text-xs border border-white/8 rounded-lg px-3 py-1.5">
+            <span className="text-white/80 w-28 truncate">{j.bot}</span>
+            <span className="text-white/45 flex-1">{j.steps != null ? `${j.steps} steps · ${j.minutes} min` : "—"}{j.files ? ` · ${j.files} file${j.files > 1 ? "s" : ""}` : ""}</span>
+            <span className="text-white/35 truncate max-w-[40%]">{j.models.map((m) => m.split("/").pop()).join(", ")}</span>
+            <span className="text-white/30 whitespace-nowrap">{new Date(j.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

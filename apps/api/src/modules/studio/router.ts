@@ -43,6 +43,11 @@ async function stateOf(key: string): Promise<string> {
   try { return (await getRedis()?.get(`agent_state:${key}`)) ?? "idle"; } catch { return "idle"; }
 }
 
+export interface AiModelUsage {
+  id: string; group: string; model: string; available: boolean; restingUntil: number | null; why: string | null;
+  usage: { requests: number; tokensIn: number; tokensOut: number; limited: number; failed: number; lastUsed: number } | null;
+}
+
 const jsId = z.object({ id: z.string().min(1).max(128) });
 
 export const studioRouter = router({
@@ -60,6 +65,26 @@ export const studioRouter = router({
       ...py.map((p) => ({ kind: "python" as const, id: p.uuid, name: p.name, status: p.status, live: live(p.status), working: p.agentState === "working", updatedAt: p.updatedAt })),
       ...js.map((b) => ({ kind: "javascript" as const, id: b.uuid, name: b.name, status: b.status as string, live: live(b.status), working: false, updatedAt: b.updatedAt })),
     ].sort((a, b) => a.name.localeCompare(b.name));
+  }),
+
+  /** Every AI model's numbers today and whether it's resting, plus the last jobs' steps, time and models. */
+  aiUsage: permittedProc("bots:read").query(async ({ ctx }) => {
+    const orgId = await resolveOrgId(ctx);
+    let live: { at: number; models: AiModelUsage[] } | null = null;
+    try { const raw = await getRedis()?.get("ai_usage"); live = raw ? JSON.parse(raw) : null; } catch { /* runner not reporting */ }
+    const projects = await ctx.db.select({ id: botProjects.id, name: botProjects.name }).from(botProjects).where(eq(botProjects.orgId, orgId));
+    const names = new Map(projects.map((p) => [p.id, p.name]));
+    const reports = projects.length ? await ctx.db.select({ projectId: projectMessages.projectId, data: projectMessages.data, createdAt: projectMessages.createdAt })
+      .from(projectMessages).where(and(inArray(projectMessages.projectId, projects.map((p) => p.id)), eq(projectMessages.kind, "report")))
+      .orderBy(desc(projectMessages.id)).limit(15) : [];
+    return {
+      updatedAt: live?.at ?? null,
+      models: live?.models ?? [],
+      jobs: reports.map((r) => {
+        const c = ((r.data ?? {}) as { card?: { steps?: number; minutes?: number; models?: string[]; files?: unknown[] } }).card ?? {};
+        return { bot: names.get(r.projectId) ?? "", at: r.createdAt, steps: c.steps ?? null, minutes: c.minutes ?? null, models: c.models ?? [], files: c.files?.length ?? 0 };
+      }),
+    };
   }),
 
   /** Kojy's jobs on Python bots: working or queued now, and the last finished ones. */

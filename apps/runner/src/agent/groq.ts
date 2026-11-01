@@ -49,7 +49,7 @@ export interface Endpoint {
   /** For logs, and the key for pacing and skipping. */
   id: string;
   /** Models of one service; on a per-minute limit the next one in the group answers at once. */
-  group: "agent" | "groq";
+  group: string;
   baseUrl: string;
   key: string;
   model: string;
@@ -117,7 +117,7 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
     const groq = (model: string): Endpoint => ({
       id: `groq:${model}`, group: "groq", baseUrl: trimSlash(env.GROQ_BASE_URL ?? GROQ_URL), key: groqKey, model, kind: "openai",
       tokensPerMinute: setting(own.AGENT_TOKENS_PER_MINUTE, 7500),
-      historyTokens: setting(own.AGENT_HISTORY_TOKENS, 1200),
+      historyTokens: setting(own.AGENT_HISTORY_TOKENS, 1000),
       compact: true,
       // gpt-oss reasons first (headroom for those tokens). Qwen may write only ~1000
       // tokens a minute on the free plan, and asking it to reason goes over that.
@@ -128,7 +128,59 @@ export function endpoints(env: NodeJS.ProcessEnv = process.env): Endpoint[] {
     });
     for (const model of [...new Set(groqModels)]) list.push(groq(model));
   }
+  // More free plans, between Gemini and Groq: each switches on with its key plus
+  // <ID>_MODELS (models are checked by hand first, so there's no default list).
+  const extra: Endpoint[] = [];
+  for (const p of EXTRA_PROVIDERS) {
+    const key = env[p.keyEnv];
+    const models = (env[`${p.id.toUpperCase()}_MODELS`] ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+    if (!key || !models.length) continue;
+    const up = p.id.toUpperCase();
+    const historyTokens = setting(env[`${up}_HISTORY_TOKENS`], p.historyTokens);
+    for (const model of [...new Set(models)]) {
+      extra.push({
+        id: `${p.id}:${model}`, group: p.id, baseUrl: trimSlash(env[`${up}_BASE_URL`] ?? p.baseUrl), key, model, kind: "openai",
+        tokensPerMinute: setting(env[`${up}_TOKENS_PER_MINUTE`], p.tokensPerMinute), historyTokens,
+        maxOutputTokens: setting(env[`${up}_MAX_OUTPUT_TOKENS`], 3000), reasoningTokens: 1000,
+        ...(historyTokens < 4000 ? { compact: true } : {}), timeoutMs: 90_000,
+      });
+    }
+  }
+  const firstGroq = list.findIndex((e) => e.group === "groq");
+  list.splice(firstGroq < 0 ? list.length : firstGroq, 0, ...extra);
   return list;
+}
+
+/** Other free OpenAI-compatible plans Kojy can use (keys in the server's .env). */
+export const EXTRA_PROVIDERS = [
+  { id: "cerebras", keyEnv: "CEREBRAS_API_KEY", baseUrl: "https://api.cerebras.ai/v1", tokensPerMinute: 60_000, historyTokens: 8000 },
+  { id: "openrouter", keyEnv: "OPENROUTER_API_KEY", baseUrl: "https://openrouter.ai/api/v1", tokensPerMinute: 100_000, historyTokens: 8000 },
+  { id: "mistral", keyEnv: "MISTRAL_API_KEY", baseUrl: "https://api.mistral.ai/v1", tokensPerMinute: 100_000, historyTokens: 8000 },
+  { id: "github", keyEnv: "GITHUB_MODELS_TOKEN", baseUrl: "https://models.github.ai/inference", tokensPerMinute: 20_000, historyTokens: 3000 },
+] as const;
+
+// ── usage, for the AI usage page ─────────────────────────────────────────────
+
+interface Usage { day: string; requests: number; tokensIn: number; tokensOut: number; limited: number; failed: number; lastUsed: number }
+const usage = new Map<string, Usage>();
+const today = () => new Date().toISOString().slice(0, 10);
+
+function count(id: string, change: Partial<Omit<Usage, "day" | "lastUsed">>): void {
+  let u = usage.get(id);
+  if (!u || u.day !== today()) { u = { day: today(), requests: 0, tokensIn: 0, tokensOut: 0, limited: 0, failed: 0, lastUsed: 0 }; usage.set(id, u); }
+  const counters = u as unknown as Record<string, number>;
+  for (const [k, v] of Object.entries(change)) counters[k] = (counters[k] ?? 0) + (v ?? 0);
+  u.lastUsed = Date.now();
+}
+
+/** Every AI with today's numbers (UTC day, since the runner started) and whether it's resting now. */
+export function aiUsage(): { id: string; group: string; model: string; available: boolean; restingUntil: number | null; why: string | null; usage: Usage | null }[] {
+  return endpoints().map((e) => {
+    const s = skipped.get(e.id);
+    const resting = s !== undefined && s.until > Date.now();
+    const u = usage.get(e.id);
+    return { id: e.id, group: e.group, model: e.model, available: !resting, restingUntil: resting ? s!.until : null, why: resting ? s!.why : null, usage: u && u.day === today() ? u : null };
+  });
 }
 
 export const aiConfigured = () => endpoints().length > 0;
@@ -218,7 +270,7 @@ export function unsignedStepsAsText(messages: ChatMessage[]): ChatMessage[] {
  */
 /** Tools with one-sentence descriptions and no parameter descriptions (for small plans). */
 export function compactTools(tools: ToolSpec[]): ToolSpec[] {
-  const short = (d: unknown) => typeof d === "string" ? (d.split(/(?<=\.)\s/)[0] ?? d).slice(0, 90) : d;
+  const short = (d: unknown) => typeof d === "string" ? (d.split(/(?<=\.)\s/)[0] ?? d).slice(0, 70) : d;
   return tools.map((t) => {
     const params = t.function.parameters as { properties?: Record<string, Record<string, unknown>> } | undefined;
     const properties = params?.properties ? Object.fromEntries(Object.entries(params.properties).map(([k, v]) => {
@@ -340,13 +392,16 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     recent.get(ep.id)!.push({ at: Date.now(), tokens: size });
 
     if (res.ok) {
-      let data: { choices?: { message: ChatMessage }[] } = {};
+      let data: { choices?: { message: ChatMessage }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } } = {};
       try { data = JSON.parse(text) as typeof data; } catch { /* reported as empty below */ }
+      count(ep.id, { requests: 1, tokensIn: data.usage?.prompt_tokens ?? size, tokensOut: data.usage?.completion_tokens ?? 0 });
       const message = data.choices?.[0]?.message;
       if (!message) throw new AiUnavailableError("The AI returned an empty answer.");
       return { message: { role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}) }, model: ep.model };
     }
 
+    if (res.status === 429) count(ep.id, { limited: 1 });
+    else count(ep.id, { failed: 1 });
     if (res.status === 429) {
       if (/Request too large/i.test(text)) throw new RequestTooLargeError("The conversation got too big for the free AI plan.");
       // Groq says "tokens per day (TPD)"; Gemini "requests per day", with "retry in 5h38m24s".

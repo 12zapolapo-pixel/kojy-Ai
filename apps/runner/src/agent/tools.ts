@@ -56,6 +56,8 @@ export interface ToolContext {
   /** Called after the real bot restarted with this run's changes (starts the watch). */
   onRestarted?: () => void;
   signal?: AbortSignal;
+  /** Steps, start and models of the current task, for the work report. */
+  stats?: { began: number; steps: number; models: Set<string> };
   /** read_file ranges read in this task → the file's mtime then. */
   reads?: Map<string, string>;
   /** Minor review findings, for the report. */
@@ -90,6 +92,10 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("search_code", "Search all text files for a regular expression; returns file:line matches.", { pattern: str("regex, e.g. def on_chat|os.environ") , folder: str("optional folder") }, ["pattern"]),
   fn("edit_file", "Replace a piece of text in a file (must match one place; indentation differences are tolerated and fixed). Best way to change code. On a miss it shows the closest lines.",
     { path: str("file path"), old_text: str("current text"), new_text: str("replacement") }, ["path", "old_text", "new_text"]),
+  fn("edit_files", "Several edit_file changes in one step (up to 10, across files), applied in order. Use it when a change touches several places.",
+    { edits: { type: "array", items: { type: "object", properties: { path: str("file path"), old_text: str("current text"), new_text: str("replacement") }, required: ["path", "old_text", "new_text"] } } }, ["edits"]),
+  fn("read_files", "Read up to 5 files or line ranges in one step (same as read_file each).",
+    { reads: { type: "array", items: { type: "object", properties: { path: str("file path"), start_line: { type: "integer" }, end_line: { type: "integer" } }, required: ["path"] } } }, ["reads"]),
   fn("replace_lines", "Replace lines start_line..end_line (inclusive, from read_file's numbers) with new_text. Empty new_text deletes them.",
     { path: str("file path"), start_line: { type: "integer" }, end_line: { type: "integer" }, new_text: str("replacement lines") }, ["path", "start_line", "end_line", "new_text"]),
   fn("write_file", "Create a file or replace a whole file. Use edit_file for small changes to existing files.",
@@ -320,6 +326,28 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         ctx.changedFiles.add(rel); ctx.edits++;
         const delta = s(args.new_text).split("\n").length - oldText.split("\n").length;
         return { ok: true, output: `Edited${r.note}.`, summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}` };
+      }
+
+      case "edit_files": {
+        const edits = (Array.isArray(args.edits) ? args.edits : []).slice(0, 10) as Args[];
+        if (!edits.length) return { ok: false, output: "No edits given.", summary: "No edits" };
+        const done: string[] = [];
+        for (const [i, e] of edits.entries()) {
+          const r = await runTool("edit_file", e, ctx);
+          if (!r.ok) {
+            return { ok: false, output: `Edit ${i + 1} of ${edits.length} (${s(e.path)}) failed: ${r.output}${done.length ? `\nThe ${done.length} edit(s) before it were applied: ${done.join(", ")}.` : ""}`, summary: `Edits: ${done.length} of ${edits.length} applied` };
+          }
+          done.push(r.summary.replace(/^Edited /, ""));
+        }
+        return { ok: true, output: `All ${edits.length} edits applied.`, summary: `Edited ${done.join(", ")}`.slice(0, 160) };
+      }
+
+      case "read_files": {
+        const reads = (Array.isArray(args.reads) ? args.reads : []).slice(0, 5) as Args[];
+        if (!reads.length) return { ok: false, output: "No files given.", summary: "Nothing to read" };
+        const parts = [];
+        for (const r of reads) parts.push((await runTool("read_file", r, ctx)).output);
+        return { ok: true, output: clip(parts.join("\n\n"), 24_000), summary: `Read ${reads.map((r) => s(r.path)).join(", ")}`.slice(0, 160) };
       }
 
       case "replace_lines": {

@@ -34,7 +34,7 @@ describe("coder AI endpoints", () => {
     expect(list[0]).toMatchObject({
       group: "agent", kind: "gemini", model: "gemini-3.6-flash", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", historyTokens: 40000, maxOutputTokens: 8000,
     });
-    expect(list[5]).toMatchObject({ group: "groq", historyTokens: 1200, maxOutputTokens: 1200, tokensPerMinute: 7500, compact: true });
+    expect(list[5]).toMatchObject({ group: "groq", historyTokens: 1000, maxOutputTokens: 1200, tokensPerMinute: 7500, compact: true });
   });
 
   it("takes AGENT_MODEL as one model or a list; another service needs it", () => {
@@ -87,7 +87,7 @@ describe("coder AI requests", () => {
     expect(body.temperature).toBe(0.2);
     // Groq's small plan gets one-sentence tool descriptions without parameter descriptions.
     expect(body.tools).toEqual(compactTools(tools));
-    expect(JSON.stringify(body.tools)).not.toMatch(/"description":"[^"]{91,}"/);
+    expect(JSON.stringify(body.tools)).not.toMatch(/"description":"[^"]{71,}"/);
     expect(body.max_tokens).toBe(900);
   });
 });

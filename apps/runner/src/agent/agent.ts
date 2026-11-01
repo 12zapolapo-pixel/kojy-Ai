@@ -23,13 +23,13 @@
 import { and, desc, eq, gt } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
-import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
+import { agentMemories, botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { listFiles, projectDir, readLogs, restoreSnapshot } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
-import { chat, estimateTokens, aiConfigured, currentEndpoint, AiUnavailableError, RequestTooLargeError, ResizeError, type Endpoint, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
+import { chat, aiUsage, estimateTokens, aiConfigured, currentEndpoint, AiUnavailableError, RequestTooLargeError, ResizeError, type Endpoint, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type Project, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt } from "./prompt.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
@@ -80,6 +80,9 @@ export class Agent {
     const tick = () => void runCheckups(this.db, (uuid) => void this.run(uuid)).catch((err) => log.warn({ err }, "Check-ups failed"));
     setTimeout(tick, 60_000).unref();
     setInterval(tick, 3600_000).unref();
+    // The AI usage page: every model's numbers and state, and the job queue.
+    const publish = () => void this.redis?.set("ai_usage", JSON.stringify({ at: Date.now(), models: aiUsage(), jobs: this.jobs() }), "EX", 120).catch(() => undefined);
+    setInterval(publish, 15_000).unref();
   }
 
   /** Control messages from the API: "agent" (new message) and "agent_stop". */
@@ -224,6 +227,9 @@ export class Agent {
 
     try {
       const began = Date.now();
+      const watch = new StuckWatch();
+      const meta: { model?: string } = {};
+      const stats = ctx ? (ctx.stats = { began, steps: 0, models: new Set<string>() }) : undefined;
       for (let step = 0; step < MAX_STEPS; step++) {
         if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); break; }
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
@@ -243,6 +249,7 @@ export class Agent {
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`),
             }));
             if (ctx) ctx.mainModel = model;
+            meta.model = model;
           } catch (err) {
             if (err instanceof ResizeError && target?.id !== err.ep.id) { target = err.ep; continue; }
             if (!(err instanceof RequestTooLargeError) || shrink >= 8) throw err;
@@ -263,8 +270,19 @@ export class Agent {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
           });
           if (result.pause) pause = true;
+          const verdict = watch.see(call.function.name, call.function.arguments, result);
+          if (verdict === "nudge") {
+            await this.add(scope, "user", `You've run ${call.function.name} with the same arguments ${STUCK_REPEATS} times now. Don't repeat it: try a different approach, or stop and tell the owner exactly what's blocking you.`, "event");
+          }
         }
+        if (stats) { stats.steps = step + 1; if (meta.model) stats.models.add(meta.model); }
         if (pause) { finalState = "waiting"; break; }
+        if (watch.stuck()) {
+          const problems = watch.lastFailures();
+          await this.add(scope, "assistant", `I'm stuck: most of my last ${STUCK_WINDOW} steps failed, so I stopped instead of using up the AI allowance on the same problem. The latest problems:\n${problems.map((p) => `- ${p}`).join("\n")}\nTell me how you'd like to go on, or give me more detail about what you want.`, "event");
+          if (ctx) await this.learn(ctx.project, `Got stuck on ${ctx.project.name}: ${problems.join("; ")}`.slice(0, 300));
+          break;
+        }
         if (step === MAX_STEPS - 1 || Date.now() - began > MAX_JOB_MS) {
           await this.add(scope, "assistant", `I've been working on this for ${step + 1} steps (${Math.round((Date.now() - began) / 60_000)} min) without finishing, so I stopped to keep from going in circles. Send “continue” to let me carry on, or tell me what to focus on.`, "event");
           break;
@@ -290,8 +308,10 @@ export class Agent {
       if (!last(/^(Test room|Saved tests)/)?.ok) notTested.push("No passing test in the test room after the change.");
       if (!ctx.restarted) notTested.push("The real bot wasn't restarted, so the change isn't live yet.");
     }
+    const st = ctx.stats;
     const card = {
       snapshotId: ctx.snapshotId, files, checks: ctx.checks, notTested, live: !!ctx.restarted,
+      ...(st ? { steps: st.steps, minutes: Math.round((Date.now() - st.began) / 6000) / 10, models: [...st.models] } : {}),
       ...(ctx.reviewNotes ? { reviewNotes: ctx.reviewNotes } : {}),
     };
     const lines = [
@@ -367,6 +387,12 @@ export class Agent {
     return [{ role: "system", content: system }, ...history];
   }
 
+  /** A lesson saved by the platform (stuck loops, rolled-back changes), so Kojy doesn't repeat it. */
+  private async learn(project: Pick<Project, "id" | "orgId">, note: string): Promise<void> {
+    try { await this.db.insert(agentMemories).values({ orgId: project.orgId, projectId: project.id, content: note }); }
+    catch (err) { log.warn({ err }, "Couldn't save a lesson"); }
+  }
+
   // ── watch after a restart ──────────────────────────────────────────────────
 
   private watches = new Map<string, NodeJS.Timeout>();
@@ -404,6 +430,7 @@ export class Agent {
     writeKojyFiles(uuid, keep);
     await this.supervisor.handle(uuid, "restart");
     log.warn({ uuid, snapshotId }, "Rolled back a change that broke the bot");
+    await this.learn(project, `A change to ${project.name} broke it after the restart and was rolled back: ${problem.split("\n").slice(0, 3).join(" ").slice(0, 220)}`);
     await this.add({ thread: `project:${project.id}`, projectId: project.id }, "user",
       `The change you just made broke the bot after the restart, so the platform put the previous version back and restarted it (the bot is running the old code now; your edits are undone). What happened:\n${problem}\n\nFind the cause, then redo the change correctly: check_code, a test that reproduces this problem (save_test), run_tests, and restart again.`,
       "rollback");
@@ -548,4 +575,36 @@ export async function findProblem(db: Database, uuid: string, since: number, cha
   const [p] = await db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage }).from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
   if (p?.status === "error" && !/^Kicked out/.test(p.statusMessage ?? "")) return `The bot stopped with an error: ${p.statusMessage ?? ""}`;
   return null;
+}
+
+const STUCK_REPEATS = 3;
+const STUCK_WINDOW = 15;
+const STUCK_FAILED = 11;
+
+/**
+ * Notices a task going in circles: the same call with the same arguments again
+ * and again (a nudge at the third time), or most recent steps failing (stop).
+ */
+export class StuckWatch {
+  private calls = new Map<string, number>();
+  private results: { ok: boolean; summary: string }[] = [];
+
+  see(name: string, args: string, result: { ok: boolean; summary: string }): "nudge" | null {
+    // Reading the same lines again is often fine; repeating an edit, check or test with no change between isn't.
+    const key = `${name}:${args}`;
+    const n = (this.calls.get(key) ?? 0) + 1;
+    this.calls.set(key, n);
+    if (!result.ok || !/^(read_file|list_files|get_logs)$/.test(name)) this.results.push({ ok: result.ok, summary: result.summary });
+    if (result.ok && /^(edit_file|write_file|replace_lines|delete_file)$/.test(name)) this.calls.clear(); // the code changed: checks may give new answers
+    return n === STUCK_REPEATS ? "nudge" : null;
+  }
+
+  stuck(): boolean {
+    const last = this.results.slice(-STUCK_WINDOW);
+    return last.length >= STUCK_WINDOW && last.filter((r) => !r.ok).length >= STUCK_FAILED;
+  }
+
+  lastFailures(): string[] {
+    return [...new Set(this.results.filter((r) => !r.ok).slice(-4).map((r) => r.summary))];
+  }
 }
