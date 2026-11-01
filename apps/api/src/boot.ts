@@ -141,6 +141,16 @@ if (process.env.ENCRYPTION_KEY && process.env.ENCRYPTION_KEY.length < 64) {
 // anonymous user resolves to the LB's IP and shares ONE rate-limit bucket
 // (legit users lock each other out; a credential-stuffer hides in the crowd).
 // That failure is completely silent, so surface it loudly at startup.
+// V-08: without email, verification and password-reset codes can't reach
+// anyone (they're no longer written to the log in production).
+if (process.env.NODE_ENV === "production" && !process.env.RESEND_API_KEY) {
+  log.warn(
+    process.env.LOG_EMAIL_CODES === "true"
+      ? "RESEND_API_KEY is not set and LOG_EMAIL_CODES=true — verification and password-reset codes are written to this log. Anyone who can read it can reset any password. Set RESEND_API_KEY and remove LOG_EMAIL_CODES."
+      : "RESEND_API_KEY is not set — email verification and password reset won't work (codes are not sent or logged). Set RESEND_API_KEY.",
+  );
+}
+
 if (process.env.NODE_ENV === "production" && !process.env.TRUSTED_PROXY_IPS) {
   log.warn(
     { defaultTrusted: [...getTrustedProxies()] },

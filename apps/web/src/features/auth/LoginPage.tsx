@@ -244,8 +244,7 @@ function VerifyScreen({ email, onDone }: { email: string; onDone: (message: stri
         {resend.isPending ? "Sending…" : "Send a new code"}
       </button>
       <p className="text-[11px] text-white/25 text-center">
-        No email arriving? If the server has no email set up yet, the code is in the server log
-        (<code>docker compose logs api</code>).
+        No email arriving? Check your spam folder, or ask the site's administrator.
       </p>
       <button onClick={() => onDone("")} className="w-full text-xs text-white/30 hover:text-white/50 transition-colors">
         ← Back to login
@@ -297,7 +296,7 @@ function ResetScreen({ initialEmail, initialCode, onDone }: {
             {reset.isPending ? "Saving…" : "Set new password"}
           </button>
           <p className="text-[11px] text-white/25 text-center">
-            No email set up on this server yet? The code is in the server log (<code>docker compose logs api</code>).
+            No email arriving? Check your spam folder, or ask the site's administrator.
           </p>
         </>
       )}

@@ -112,8 +112,11 @@ is fetched automatically on first visit (give it a minute).
 **Create your account:** click *Register*. The first account on a new
 server becomes the **owner** and can sign in right away, with no email needed.
 After that, sign-ups are closed (set `SIGNUPS=open` in `.env` to allow others).
-Codes for other people's sign-ups and password resets appear in
-`docker compose logs api` until you add a Resend key.
+Email verification for other people's sign-ups and password resets need a
+Resend key (`RESEND_API_KEY`). For safety the codes are not written to the
+logs. In an emergency, such as a server without email where you're locked out
+of a password, set `LOG_EMAIL_CODES=true` for a moment, read the code with
+`docker compose logs api`, then remove it.
 
 ## Your bots: Bot Studio
 
