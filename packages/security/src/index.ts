@@ -145,6 +145,8 @@ export const RATE_LIMITS = {
   API_SIMULATION: { windowMs: 3_600_000,   maxHits: 20,    keyPrefix: "rl:api:sim" },
   BOT_MESSAGE:    { windowMs: 1_000,       maxHits: 5,     keyPrefix: "rl:bot:msg" },
   WS_CONNECT:     { windowMs: 60_000,      maxHits: 10,    keyPrefix: "rl:ws:connect" },
+  // V-04: zip upload/download/restore unpack or pack up to 200 MB each.
+  PROJECT_ZIP:    { windowMs: 60_000,      maxHits: 6,     keyPrefix: "rl:project:zip" },
 } as const;
 
 // ─── SKILL #79: Toxicity Filter ──────────────────────────────────────────────

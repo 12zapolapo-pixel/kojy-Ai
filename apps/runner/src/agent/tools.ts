@@ -7,6 +7,7 @@
 
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, mkdtempSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { Worker } from "node:worker_threads";
 import path from "node:path";
 import { asc, eq } from "drizzle-orm";
 import WebSocket from "ws";
@@ -101,6 +102,40 @@ function runCapture(uid: number, cmd: string, args: string[], cwd: string, env: 
   });
 }
 
+/**
+ * SECURITY FIX (V-04): search_code compiles a regex the AI chose (and the AI
+ * can be steered by file contents) and ran it over up to 5,000 files on the
+ * runner's main thread — a backtracking pattern froze every bot's
+ * supervisor. It now runs in a worker thread that is killed after a few
+ * seconds; the main thread stays free.
+ */
+const SEARCH_TIMEOUT_MS = 4000;
+const MAX_SEARCH_PATTERN = 300;
+const SEARCH_WORKER = `
+const { parentPort, workerData } = require("node:worker_threads");
+const { readFileSync } = require("node:fs");
+const re = new RegExp(workerData.pattern, "i");
+const hits = [];
+for (const f of workerData.files) {
+  let text;
+  try { text = readFileSync(f.abs, "utf8"); } catch { continue; }
+  const lines = text.split("\\n");
+  for (let i = 0; i < lines.length && hits.length < 50; i++) {
+    if (re.test(lines[i])) hits.push(f.rel + ":" + (i + 1) + ": " + lines[i].trim().slice(0, 160));
+  }
+  if (hits.length >= 50) break;
+}
+parentPort.postMessage(hits);`;
+
+export function searchInWorker(pattern: string, files: { rel: string; abs: string }[]): Promise<string[] | "timeout"> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(SEARCH_WORKER, { eval: true, workerData: { pattern, files }, resourceLimits: { maxOldGenerationSizeMb: 128 } });
+    const timer = setTimeout(() => { void worker.terminate(); resolve("timeout"); }, SEARCH_TIMEOUT_MS);
+    worker.once("message", (hits: string[]) => { clearTimeout(timer); void worker.terminate(); resolve(hits); });
+    worker.once("error", (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
 function ensureSnapshot(ctx: ToolContext): void {
   if (ctx.snapshotted) return;
   snapshotProject(ctx.project.uuid, "Before the coder AI's changes");
@@ -171,18 +206,16 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       case "search_code": {
-        let re: RegExp;
-        try { re = new RegExp(s(args.pattern), "i"); } catch { return { ok: false, output: "Invalid regular expression", summary: "Search failed" }; }
+        const pattern = s(args.pattern);
+        if (pattern.length > MAX_SEARCH_PATTERN) return { ok: false, output: `Pattern is too long (${MAX_SEARCH_PATTERN} characters max).`, summary: "Search failed" };
+        try { new RegExp(pattern, "i"); } catch { return { ok: false, output: "Invalid regular expression", summary: "Search failed" }; }
         const folder = s(args.folder) ? cleanRelPath(s(args.folder)) + "/" : "";
-        const hits: string[] = [];
-        for (const f of listFiles(uuid)) {
-          if (f.isDir || !TEXT_EXT.test(f.path) || f.size > MAX_EDIT_BYTES || (folder && !f.path.startsWith(folder))) continue;
-          readFileSync(path.join(dir, f.path), "utf8").split("\n").forEach((line, i) => {
-            if (hits.length < 50 && re.test(line)) hits.push(`${f.path}:${i + 1}: ${line.trim().slice(0, 160)}`);
-          });
-          if (hits.length >= 50) break;
-        }
-        return { ok: true, output: hits.join("\n") || "No matches.", summary: `Searched for “${s(args.pattern).slice(0, 40)}” (${hits.length} matches)` };
+        const targets = listFiles(uuid)
+          .filter((f) => !f.isDir && TEXT_EXT.test(f.path) && f.size <= MAX_EDIT_BYTES && (!folder || f.path.startsWith(folder)))
+          .map((f) => ({ rel: f.path, abs: path.join(dir, f.path) }));
+        const hits = await searchInWorker(pattern, targets);
+        if (hits === "timeout") return { ok: false, output: `The search took over ${SEARCH_TIMEOUT_MS / 1000}s and was stopped. Use a simpler pattern (avoid nested repeats like (a+)+).`, summary: "Search stopped (too slow)" };
+        return { ok: true, output: hits.join("\n") || "No matches.", summary: `Searched for “${pattern.slice(0, 40)}” (${hits.length} matches)` };
       }
 
       case "edit_file": {

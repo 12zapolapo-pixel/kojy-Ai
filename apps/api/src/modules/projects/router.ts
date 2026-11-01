@@ -18,6 +18,7 @@ import { router, permittedProc } from "../../trpc.js";
 import { schema } from "../../db/client.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { getRedis, getRedisPublisher } from "../../utils/redis.js";
+import { checkRateLimit, RATE_LIMITS } from "@kojyai/security";
 import { emitAuditLog } from "../../events/audit.js";
 import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
 import {
@@ -60,6 +61,26 @@ function files<T>(fn: () => T): T {
   catch (err) {
     if (err instanceof ProjectFileError) throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
     throw err;
+  }
+}
+
+async function filesAsync<T>(fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); }
+  catch (err) {
+    if (err instanceof ProjectFileError) throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+    throw err;
+  }
+}
+
+/**
+ * SECURITY FIX (V-04): zip upload, download and snapshot restore each pack or
+ * unpack up to 200 MB. The general 300/min API limit let a few accounts keep
+ * the API busy; these get their own small per-user budget.
+ */
+async function zipThrottle(userId: number): Promise<void> {
+  const limit = await checkRateLimit(getRedis(), String(userId), RATE_LIMITS.PROJECT_ZIP);
+  if (!limit.allowed) {
+    throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Too many uploads or downloads — try again in ${limit.retryAfter ?? 60}s.` });
   }
 }
 
@@ -165,7 +186,8 @@ export const projectsRouter = router({
     .input(projectId.extend({ zipBase64: z.string().min(1).max(Math.ceil(MAX_UPLOAD_BYTES * 4 / 3) + 4) }))
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
-      const result = files(() => extractZip(project.uuid, Buffer.from(input.zipBase64, "base64")));
+      await zipThrottle(ctx.user!.id);
+      const result = await filesAsync(() => extractZip(project.uuid, Buffer.from(input.zipBase64, "base64")));
       let detected: string | null = null;
       if (!project.entrypoint) {
         detected = detectEntrypoint(project.uuid);
@@ -204,7 +226,8 @@ export const projectsRouter = router({
   /** Whole project as a base64 zip. */
   download: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
-    const zip = files(() => zipProject(project.uuid));
+    await zipThrottle(ctx.user!.id);
+    const zip = await filesAsync(() => zipProject(project.uuid));
     return { filename: `${project.name.replace(/[^\w.-]+/g, "_") || "project"}.zip`, zipBase64: Buffer.from(zip).toString("base64") };
   }),
 
@@ -334,6 +357,7 @@ export const projectsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
       if (project.agentState === "working") throw new TRPCError({ code: "CONFLICT", message: "Stop the AI first." });
+      await zipThrottle(ctx.user!.id);
       const count = files(() => restoreSnapshot(project.uuid, input.snapshotId));
       const when = new Date(Number(input.snapshotId)).toISOString().replace("T", " ").slice(0, 16);
       await ctx.db.insert(projectMessages).values({
