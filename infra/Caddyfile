@@ -33,6 +33,13 @@
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
+		# V-09: the session token lives in sessionStorage, so any XSS could read
+		# it; the CSP limits what injected markup could load or run. No inline
+		# scripts or eval are used. Inline styles are (React/Monaco), and the
+		# fonts come from Google Fonts. ws(s)://{hostport} is the live-update socket.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' wss://{hostport} ws://{hostport}; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		X-Frame-Options DENY
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		-Server
 	}
 }
