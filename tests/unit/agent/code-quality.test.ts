@@ -53,9 +53,13 @@ describe("code checker output", () => {
       'bot.py:19: error: "Highrise" has no attribute "send_chat"; maybe "send_channel"?  [attr-defined]',
       'bot.py:30: error: Value of type "list[Any] | None" is not indexable  [index]',
       'bot.py:40: error: Need type annotation for "x"  [var-annotated]',
+      'cmds.py:5: error: "CommandBuilderMixin" has no attribute "highrise"  [attr-defined]',
+      'bot.py:50: error: "HighriseRoomBot" has no attribute "_settigns"; maybe "_settings"?  [attr-defined]',
+      'bot.py:60: error: Module "highrise" has no attribute "Bot"  [attr-defined]',
     ].join("\n");
     const issues = parseIssues(mypy, "mypy");
-    expect(issues.map((i) => `${i.line}:${i.severity}`)).toEqual(["12:error", "12:warning", "19:error", "30:warning"]);
+    // Mixin attributes live in another class: left out. The bot's own classes: a warning.
+    expect(issues.map((i) => `${i.line}:${i.severity}`)).toEqual(["12:error", "12:warning", "19:error", "30:warning", "50:warning", "60:error"]);
     const flakes = parseIssues("bot.py:19:49: undefined name 'usr'\nbot.py:1:1: 'os' imported but unused", "pyflakes");
     expect(flakes).toEqual([expect.objectContaining({ line: 19, severity: "error", message: "undefined name 'usr'" })]);
     expect(formatIssues([...issues, ...flakes])).toMatch(/^Errors[\s\S]*bot\.py:19: undefined name 'usr'[\s\S]*Warnings/);

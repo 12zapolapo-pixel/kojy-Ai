@@ -349,10 +349,13 @@ export class Agent {
         m = toMsg(rows[i]!, false);
         cost = estimateTokens(JSON.stringify(m));
       }
-      if (cost > budget && i < lastUser) break;
+      // Over the budget: stop here, even inside the current task (a long task on
+      // Groq's small plan keeps its newest steps; the request goes back on top below).
+      if (cost > budget) break;
       budget -= cost;
       picked.unshift(m);
     }
+    if (!picked.some((m) => m.role === "user") && lastUser >= 0) picked.unshift(toMsg(rows[lastUser]!, true));
     // Start at a user message, whether the budget or the 80-row window did the
     // cutting: a history that begins mid-task leaves a tool result without its
     // call, and Gemini refuses a tool call that doesn't follow a user turn (400).

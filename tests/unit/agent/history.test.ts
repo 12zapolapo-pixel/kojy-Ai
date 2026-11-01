@@ -52,3 +52,21 @@ describe("coder AI history on a long task", () => {
     expect(messages.filter((m) => m.role === "tool")).toHaveLength(40);
   });
 });
+
+describe("coder AI history on a small plan", () => {
+  it("keeps the request and the newest steps when the current task alone is over the budget", async () => {
+    const rows: Record<string, unknown>[] = [{ role: "user", kind: "text", content: "fix the bot", data: null }];
+    for (let i = 0; i < 30; i++) {
+      rows.push({ role: "assistant", kind: "text", content: "", data: { toolCalls: [{ id: `c${i}`, type: "function", function: { name: "read_file", arguments: "{}" } }] } });
+      rows.push({ role: "tool", kind: "tool", content: "x".repeat(400), data: { toolCallId: `c${i}`, summary: "Read" } });
+    }
+    const db = { select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({ limit: async () => [...rows].reverse() }) }) }) }) };
+    const agent = new Agent(db as any, {} as any, null);
+    const messages: ChatMessage[] = await (agent as any).buildMessages({ thread: "project:1", projectId: 1, system: async () => "SYS" }, 1200);
+    expect(messages[1]).toEqual({ role: "user", content: "fix the bot" });
+    const tools = messages.filter((m) => m.role === "tool");
+    expect(tools.length).toBeGreaterThan(0);
+    expect(tools.length).toBeLessThan(30);
+    expect((tools[tools.length - 1] as { tool_call_id: string }).tool_call_id).toBe("c29"); // the newest step is kept
+  });
+});

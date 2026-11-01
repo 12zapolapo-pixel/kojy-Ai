@@ -229,6 +229,10 @@ export interface Issue { file: string; line: number; message: string; severity: 
 const MYPY_ERRORS = new Set(["attr-defined", "name-defined", "call-arg", "call-overload"]);
 const MYPY_WARNINGS = new Set(["union-attr", "arg-type", "operator", "index"]);
 
+/** Highrise SDK classes: a missing attribute on one of these is a real bug. */
+const SDK_TYPES = new Set(["Highrise", "BaseBot", "WebAPI", "User", "Position", "AnchorPosition", "SessionMetadata", "RoomPermissions",
+  "RoomInfo", "Error", "CurrencyItem", "Item", "Reaction", "ResponseError"]);
+
 export function parseIssues(out: string, tool: "pyflakes" | "mypy"): Issue[] {
   const issues: Issue[] = [];
   for (const raw of out.split("\n")) {
@@ -249,7 +253,15 @@ export function parseIssues(out: string, tool: "pyflakes" | "mypy"): Issue[] {
       // result the attribute doesn't exist at all (a bug); when X is Error, the
       // code just doesn't check for a failed request first.
       const realResult = code === "union-attr" && !/^Item "(Error|None)" of/.test(m[3]!);
-      const severity = MYPY_ERRORS.has(code) || realResult ? "error" : MYPY_WARNINGS.has(code) ? "warning" : null;
+      let severity: Issue["severity"] | null = MYPY_ERRORS.has(code) || realResult ? "error" : MYPY_WARNINGS.has(code) ? "warning" : null;
+      if (code === "attr-defined") {
+        // The SDK's own classes (and modules) really lack the attribute. The bot's own
+        // classes are often mixins whose attributes live in another class: mypy can't
+        // see that, so those are left out ("…Mixin") or only a warning.
+        const subject = /^(?:Module )?"([\w.]+)" has no attribute/.exec(m[3]!)?.[1] ?? "";
+        if (/Mixin$/.test(subject)) continue;
+        severity = /^Module /.test(m[3]!) || SDK_TYPES.has(subject) || /(Request|Response|Event)$/.test(subject) ? "error" : "warning";
+      }
       if (severity) issues.push({ file: m[1]!.replace(/^\.\//, ""), line: Number(m[2]), message: `${m[3]} [${code}]`, severity, tool });
     }
   }
