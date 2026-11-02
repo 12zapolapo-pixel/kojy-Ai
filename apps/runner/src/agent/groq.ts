@@ -3,10 +3,11 @@
  * OWNERSHIP: apps/runner/src/agent
  *
  * Providers, in the order they are tried:
- *   1. Gemini (Google AI Studio, OpenAI-compatible endpoint). Every key is
+ *   1. Mistral (MISTRAL_API_KEY; models from MISTRAL_MODELS, default
+ *      mistral-large-4 then mistral-large-2512 = Mistral Large 3).
+ *   2. Gemini (Google AI Studio, OpenAI-compatible endpoint). Every key is
  *      tried with every model: keys come from AGENT_API_KEY and
  *      AGENT_API_KEYS (comma-separated), models from GEMINI_MODELS.
- *   2. Mistral (optional, MISTRAL_API_KEY, models from MISTRAL_MODELS).
  *   3. Groq (optional, GROQ_API_KEY): the main and fast models, paced to the
  *      free plan's per-minute token budget.
  *
@@ -47,7 +48,7 @@ const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGEN
   .map((k) => k?.trim()).filter(usable))];
 
 const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/$/, "");
-const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4").split(",").map((s) => s.trim()).filter(Boolean);
+const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,mistral-large-2512").split(",").map((s) => s.trim()).filter(Boolean);
 const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY!.trim() : "";
 
 const GROQ_BASE = (process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
@@ -77,12 +78,12 @@ function buildLanes(): Lane[] {
         id: `mistral:${model}`, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
       }))
     : [];
-  if (!GROQ_KEY) return [...gemini, ...mistral];
+  if (!GROQ_KEY) return [...mistral, ...gemini];
   const groqModels = [...new Set([GROQ_SMART, GROQ_FAST])];
   const groq = groqModels.map((model): Lane => ({
     id: `groq:${model}`, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
   }));
-  return [...gemini, ...mistral, ...groq];
+  return [...mistral, ...gemini, ...groq];
 }
 
 const LANES = buildLanes();
