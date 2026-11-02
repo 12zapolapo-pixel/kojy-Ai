@@ -1,17 +1,26 @@
 /**
- * Groq chat client for the coder AI — OpenAI-compatible, with tool calls.
+ * AI client for the coder AI: OpenAI-compatible chat with tool calls.
  * OWNERSHIP: apps/runner/src/agent
  *
- * Built for Groq's free plan (per model: ~8K tokens/minute, ~200K/day):
- *   - paces itself: waits before a request that would go over the minute budget
- *   - on 429 it waits for `retry-after` and tries again
- *   - when the main model's daily budget is used up it moves to the fast model
- * GROQ_BASE_URL can point at any OpenAI-compatible server (used by tests).
+ * Providers, in the order they are tried:
+ *   1. Gemini (Google AI Studio, OpenAI-compatible endpoint). Every key is
+ *      tried with every model: keys come from AGENT_API_KEY and
+ *      AGENT_API_KEYS (comma-separated), models from GEMINI_MODELS.
+ *   2. Groq (optional, GROQ_API_KEY): the main and fast models, paced to the
+ *      free plan's per-minute token budget.
+ *
+ * Each (key, model) pair is a "lane". A lane that hits its limit (429), fails
+ * its key (401/403) or doesn't exist (404) is put on cooldown and the next
+ * lane is tried straight away, so one exhausted key never stops the work.
+ * Keys are never logged.
+ *
+ * GEMINI_BASE_URL / GROQ_BASE_URL can point at any OpenAI-compatible server
+ * (used by tests).
  */
 
 import { createLogger } from "../logger.js";
 
-const log = createLogger("agent-groq");
+const log = createLogger("agent-ai");
 
 export interface ToolCall { id: string; type: "function"; function: { name: string; arguments: string } }
 export interface ChatMessage {
@@ -26,17 +35,54 @@ export class AiUnavailableError extends Error {}
 /** The request is over the plan's per-request size; retry with less history. */
 export class RequestTooLargeError extends AiUnavailableError {}
 
-const BASE_URL = (process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
-const SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
-const FAST = process.env.AGENT_FALLBACK_MODEL ?? process.env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
+// ─── Configuration ────────────────────────────────────────────────────────────
+
+const usable = (k: string | undefined): k is string => !!k && k.trim() !== "" && !k.includes("placeholder");
+
+const GEMINI_BASE = (process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta/openai").replace(/\/$/, "");
+const GEMINI_MODELS = (process.env.GEMINI_MODELS ?? "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGENT_API_KEYS ?? "").split(",")]
+  .map((k) => k?.trim()).filter(usable))];
+
+const GROQ_BASE = (process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
+const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY!.trim() : "";
+const GROQ_SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
+const GROQ_FAST = process.env.AGENT_FALLBACK_MODEL ?? process.env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
 const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);
+
+interface Lane {
+  id: string;
+  provider: "gemini" | "groq";
+  model: string;
+  key: string;
+  base: string;
+  /** For logs only; never the key itself. */
+  label: string;
+}
+
+function buildLanes(): Lane[] {
+  const gemini = GEMINI_MODELS.flatMap((model) =>
+    GEMINI_KEYS.map((key, i): Lane => ({
+      id: `gemini:${model}:${i}`, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
+    })),
+  );
+  if (!GROQ_KEY) return gemini;
+  const groqModels = [...new Set([GROQ_SMART, GROQ_FAST])];
+  const groq = groqModels.map((model): Lane => ({
+    id: `groq:${model}`, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
+  }));
+  return [...gemini, ...groq];
+}
+
+const LANES = buildLanes();
 
 /** Rough size of a request: ~4 characters per token. */
 export const estimateTokens = (text: string) => Math.ceil(text.length / 4);
 
-// Tokens sent in the last minute, per model — shared by every project.
+// Groq's free plan limits tokens per minute per model; Gemini's are per request, handled by cooldowns.
 const recent = new Map<string, { at: number; tokens: number }[]>();
-const exhaustedUntil = new Map<string, number>();
+const coolUntil = new Map<string, number>();
 
 function usedLastMinute(model: string): number {
   const now = Date.now();
@@ -46,6 +92,12 @@ function usedLastMinute(model: string): number {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const cool = (lane: Lane, ms: number, why: string) => {
+  coolUntil.set(lane.id, Date.now() + ms);
+  log.warn({ lane: lane.label, minutes: Math.round(ms / 60_000) }, `${why} — trying the next AI`);
+};
+const isCooling = (lane: Lane) => (coolUntil.get(lane.id) ?? 0) > Date.now();
+const DAILY = /per day|TPD|RPD|quota|RESOURCE_EXHAUSTED|daily/i;
 
 export interface ChatOptions {
   messages: ChatMessage[];
@@ -57,78 +109,101 @@ export interface ChatOptions {
 }
 
 export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
-  const key = process.env.GROQ_API_KEY;
-  if (!key || key.includes("placeholder")) {
-    throw new AiUnavailableError("The coder AI needs a Groq key: set GROQ_API_KEY in the server's .env (free at console.groq.com/keys).");
+  if (LANES.length === 0) {
+    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey) or GROQ_API_KEY in the server's .env.");
   }
   const maxTokens = opts.maxTokens ?? Number(process.env.AGENT_MAX_OUTPUT_TOKENS ?? 1200);
   const size = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools)) + maxTokens;
+  let badRequests = 0;
 
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < 12; attempt++) {
     if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
-    const model = (exhaustedUntil.get(SMART) ?? 0) > Date.now() ? FAST : SMART;
 
-    const used = usedLastMinute(model);
-    if (used > 0 && used + size > TOKENS_PER_MINUTE) {
-      const oldest = recent.get(model)![0]!;
-      const wait = Math.max(1, Math.ceil((60_000 - (Date.now() - oldest.at)) / 1000));
-      opts.onWait?.(wait, "pacing for the free AI plan");
-      await sleep(wait * 1000);
-      continue;
-    }
-
-    const res = await fetch(`${BASE_URL}/chat/completions`, {
-      method: "POST",
-      signal: opts.signal ?? AbortSignal.timeout(120_000),
-      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model,
-        messages: opts.messages,
-        tools: opts.tools,
-        tool_choice: "auto",
-        temperature: 0.2,
-        max_tokens: maxTokens + 800, // headroom for gpt-oss reasoning tokens
-        reasoning_effort: "medium",
-      }),
-    }).catch((err: Error) => {
-      if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
-      throw new AiUnavailableError(`Couldn't reach the AI: ${err.message}`);
-    });
-    recent.get(model)!.push({ at: Date.now(), tokens: size });
-
-    if (res.ok) {
-      const body = await res.json() as { choices?: { message: ChatMessage }[] };
-      const message = body.choices?.[0]?.message;
-      if (!message) throw new AiUnavailableError("The AI returned an empty answer.");
-      return { message: { role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}) }, model };
-    }
-
-    const text = await res.text().catch(() => "");
-    if (res.status === 429) {
-      if (/Request too large/i.test(text)) throw new RequestTooLargeError("The conversation got too big for the free AI plan.");
-      if (/per day|TPD|RPD/i.test(text)) {
-        if (model === SMART && FAST !== SMART) {
-          exhaustedUntil.set(SMART, Date.now() + 60 * 60_000);
-          log.warn("Daily AI budget used up on the main model — switching to the fast model for an hour");
-          continue;
-        }
-        throw new AiUnavailableError("The free AI plan's daily limit is used up. It resets within 24 hours (or add a paid Groq key).");
-      }
-      const wait = Math.min(65, Number(res.headers.get("retry-after")) || 20);
+    const lane = LANES.find((l) => !isCooling(l));
+    if (!lane) {
+      // Every lane is cooling down: wait for the soonest one, if it's short.
+      const soonest = Math.min(...LANES.map((l) => coolUntil.get(l.id) ?? 0)) - Date.now();
+      if (soonest > 65_000) throw new AiUnavailableError("The AI keys are all at their limit right now. They reset within a few hours, or add another key.");
+      const wait = Math.max(1, Math.ceil(soonest / 1000));
       opts.onWait?.(wait, "AI rate limit");
       await sleep(wait * 1000);
       continue;
     }
-    if (res.status === 400 && /tool_use_failed|failed_generation/i.test(text) && attempt < 2) {
+
+    if (lane.provider === "groq") {
+      const used = usedLastMinute(lane.model);
+      if (used > 0 && used + size > TOKENS_PER_MINUTE) {
+        const oldest = recent.get(lane.model)![0]!;
+        const wait = Math.max(1, Math.ceil((60_000 - (Date.now() - oldest.at)) / 1000));
+        opts.onWait?.(wait, "pacing for the free AI plan");
+        await sleep(wait * 1000);
+        continue;
+      }
+    }
+
+    const body: Record<string, unknown> = {
+      model: lane.model,
+      messages: opts.messages,
+      tools: opts.tools,
+      tool_choice: "auto",
+      temperature: 0.2,
+      max_tokens: maxTokens + 800, // headroom for reasoning tokens
+    };
+    if (lane.provider === "groq") body.reasoning_effort = "medium";
+
+    const res = await fetch(`${lane.base}/chat/completions`, {
+      method: "POST",
+      signal: opts.signal ?? AbortSignal.timeout(120_000),
+      headers: { "content-type": "application/json", authorization: `Bearer ${lane.key}` },
+      body: JSON.stringify(body),
+    }).catch((err: Error) => {
+      if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
+      cool(lane, 30_000, `${lane.label} couldn't be reached (${err.message})`);
+      return null;
+    });
+    if (!res) continue;
+    if (lane.provider === "groq") {
+      const list = recent.get(lane.model) ?? [];
+      list.push({ at: Date.now(), tokens: size });
+      recent.set(lane.model, list);
+    }
+
+    if (res.ok) {
+      const data = await res.json() as { choices?: { message: ChatMessage }[] };
+      const message = data.choices?.[0]?.message;
+      if (!message) { cool(lane, 30_000, `${lane.label} returned an empty answer`); continue; }
+      return { message: { role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}) }, model: lane.model };
+    }
+
+    const text = await res.text().catch(() => "");
+    if (res.status === 413 || /Request too large|context_length|maximum context|too large/i.test(text)) {
+      throw new RequestTooLargeError("The conversation got too big for the AI. Start a new chat or ask about one thing at a time.");
+    }
+    if (res.status === 429) {
+      if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`);
+      else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || 30) * 1000, `${lane.label} is rate limited`);
+      continue;
+    }
+    if (res.status === 400 && /tool_use_failed|failed_generation/i.test(text) && badRequests++ < 2) {
       // The model wrote a malformed tool call; asking again usually works.
       log.warn("Malformed tool call from the model — retrying");
       continue;
     }
-    if (res.status === 413 || (res.status === 400 && /too large|context_length|maximum context/i.test(text))) {
-      throw new RequestTooLargeError("The conversation got too big for the free AI plan. Start a new chat or ask about one thing at a time.");
-    }
-    if (res.status >= 500) { await sleep(3000 * (attempt + 1)); continue; }
-    throw new AiUnavailableError(`AI request failed (${res.status}): ${text.slice(0, 300)}`);
+    if (res.status === 401 || res.status === 403) { cool(lane, 60 * 60_000, `${lane.label} was refused (check the key)`); continue; }
+    if (res.status === 404) { cool(lane, 24 * 60 * 60_000, `${lane.label} isn't available`); continue; }
+    if (res.status >= 500) { cool(lane, 30_000, `${lane.label} had a server error (${res.status})`); continue; }
+    cool(lane, 10 * 60_000, `${lane.label} failed (${res.status}): ${text.slice(0, 160)}`);
   }
   throw new AiUnavailableError("The AI is busy right now — try again in a minute.");
+}
+
+/** For tests: forget cooldowns and pacing. */
+export function _resetAiStateForTests(): void {
+  coolUntil.clear();
+  recent.clear();
+}
+
+/** Which lanes are configured (for the health check and tests). */
+export function configuredLanes(): string[] {
+  return LANES.map((l) => l.label);
 }
