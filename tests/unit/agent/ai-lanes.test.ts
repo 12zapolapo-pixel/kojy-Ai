@@ -39,6 +39,8 @@ beforeAll(async () => {
   process.env.AGENT_API_KEY = KEY_OUT; // also listed in AGENT_API_KEYS: must be de-duplicated
   process.env.GEMINI_MODELS = "model-a,model-b";
   delete process.env.GROQ_API_KEY;
+  process.env.MISTRAL_API_KEY = "mstrl_fake-test-key";
+  process.env.MISTRAL_BASE_URL = `http://127.0.0.1:${port}`;
 });
 
 afterAll(() => new Promise<void>((r) => server.close(() => r())));
@@ -60,6 +62,7 @@ describe("coder AI lanes", () => {
     const ai = await load();
     expect(ai.configuredLanes()).toEqual([
       "Gemini model-a (key 1)", "Gemini model-a (key 2)", "Gemini model-b (key 1)", "Gemini model-b (key 2)",
+      "Mistral mistral-large-latest",
     ]);
   });
 

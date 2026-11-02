@@ -6,7 +6,8 @@
  *   1. Gemini (Google AI Studio, OpenAI-compatible endpoint). Every key is
  *      tried with every model: keys come from AGENT_API_KEY and
  *      AGENT_API_KEYS (comma-separated), models from GEMINI_MODELS.
- *   2. Groq (optional, GROQ_API_KEY): the main and fast models, paced to the
+ *   2. Mistral (optional, MISTRAL_API_KEY, models from MISTRAL_MODELS).
+ *   3. Groq (optional, GROQ_API_KEY): the main and fast models, paced to the
  *      free plan's per-minute token budget.
  *
  * Each (key, model) pair is a "lane". A lane that hits its limit (429), fails
@@ -45,6 +46,10 @@ const GEMINI_MODELS = (process.env.GEMINI_MODELS ?? "gemini-3.6-flash,gemini-3.5
 const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGENT_API_KEYS ?? "").split(",")]
   .map((k) => k?.trim()).filter(usable))];
 
+const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/$/, "");
+const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-latest").split(",").map((s) => s.trim()).filter(Boolean);
+const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY!.trim() : "";
+
 const GROQ_BASE = (process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
 const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY!.trim() : "";
 const GROQ_SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
@@ -53,7 +58,7 @@ const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);
 
 interface Lane {
   id: string;
-  provider: "gemini" | "groq";
+  provider: "gemini" | "mistral" | "groq";
   model: string;
   key: string;
   base: string;
@@ -67,12 +72,17 @@ function buildLanes(): Lane[] {
       id: `gemini:${model}:${i}`, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
     })),
   );
-  if (!GROQ_KEY) return gemini;
+  const mistral = MISTRAL_KEY
+    ? MISTRAL_MODELS.map((model): Lane => ({
+        id: `mistral:${model}`, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
+      }))
+    : [];
+  if (!GROQ_KEY) return [...gemini, ...mistral];
   const groqModels = [...new Set([GROQ_SMART, GROQ_FAST])];
   const groq = groqModels.map((model): Lane => ({
     id: `groq:${model}`, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
   }));
-  return [...gemini, ...groq];
+  return [...gemini, ...mistral, ...groq];
 }
 
 const LANES = buildLanes();
