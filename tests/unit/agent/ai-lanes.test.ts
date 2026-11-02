@@ -62,7 +62,7 @@ describe("coder AI lanes", () => {
     const ai = await load();
     expect(ai.configuredLanes()).toEqual([
       "Gemini model-a (key 1)", "Gemini model-a (key 2)", "Gemini model-b (key 1)", "Gemini model-b (key 2)",
-      "Mistral mistral-large-latest",
+      "Mistral mistral-large-4",
     ]);
   });
 

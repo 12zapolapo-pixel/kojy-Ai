@@ -47,7 +47,7 @@ const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGEN
   .map((k) => k?.trim()).filter(usable))];
 
 const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/$/, "");
-const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-latest").split(",").map((s) => s.trim()).filter(Boolean);
+const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4").split(",").map((s) => s.trim()).filter(Boolean);
 const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY!.trim() : "";
 
 const GROQ_BASE = (process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
