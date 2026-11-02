@@ -12,6 +12,9 @@ const KEY_OK = "AQ.fake-key-healthy";
 let server: http.Server;
 let seen: { auth: string; model: string }[] = [];
 let mode: "normal" | "quota-on-first" = "normal";
+let rejectModels = new Set<string>();
+let times: number[] = [];
+let bodies: Record<string, unknown>[] = [];
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
@@ -21,6 +24,13 @@ beforeAll(async () => {
       const auth = String(req.headers.authorization ?? "").replace("Bearer ", "");
       const { model } = JSON.parse(body || "{}") as { model: string };
       seen.push({ auth, model });
+      times.push(Date.now());
+      bodies.push(JSON.parse(body || "{}"));
+      if (rejectModels.has(model)) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: 400, message: "Function call is missing a thought_signature" } }));
+        return;
+      }
       if (auth === KEY_OUT && mode === "quota-on-first") {
         res.writeHead(429, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { code: 429, message: "You exceeded your current quota" } }));
@@ -41,6 +51,7 @@ beforeAll(async () => {
   delete process.env.GROQ_API_KEY;
   process.env.MISTRAL_BASE_URL = `http://127.0.0.1:${port}`;
   process.env.MISTRAL_MODELS = "mistral-large-4,mistral-large-2512";
+  process.env.MISTRAL_MIN_INTERVAL_MS = "250";
 });
 
 afterAll(() => new Promise<void>((r) => server.close(() => r())));
@@ -57,7 +68,7 @@ async function load(withMistral = false) {
 const ask = (ai: typeof import("../../../apps/runner/src/agent/groq.js")) =>
   ai.chat({ messages: [{ role: "user", content: "hi" }], tools: [] });
 
-beforeEach(() => { seen = []; mode = "normal"; });
+beforeEach(() => { seen = []; times = []; bodies = []; mode = "normal"; rejectModels = new Set(); });
 
 describe("coder AI lanes", () => {
   it("tries Mistral first, then Gemini, one lane per key and model", async () => {
@@ -107,5 +118,58 @@ describe("coder AI lanes", () => {
     const ai = await load();
     try { await ai.chat({ messages: [{ role: "user", content: "TOO_BIG" }], tools: [] }); }
     catch (err) { expect(String((err as Error).message)).not.toContain("AQ.fake"); }
+  });
+
+  it("a 400 skips that lane for this request only, without a long cooldown", async () => {
+    rejectModels = new Set(["model-a"]);
+    const ai = await load(false);
+    const first = await ask(ai);
+    expect(first.message.content).toBe("hello from model-b");
+    await ask(ai);
+    // model-a is tried again on the second request: it was not taken out for everyone.
+    expect(seen.filter((x) => x.model === "model-a").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("when every lane rejects the request, the error says so instead of 'busy'", async () => {
+    rejectModels = new Set(["model-a", "model-b"]);
+    const ai = await load(false);
+    await expect(ask(ai)).rejects.toThrow(/rejected this request.*thought_signature/);
+  });
+
+  it("paces Mistral requests so the free plan's per-second limit isn't hit", async () => {
+    const ai = await load(true);
+    await ask(ai);
+    await ask(ai);
+    const mistral = seen.map((x, i) => ({ ...x, at: times[i]! })).filter((x) => x.model.startsWith("mistral"));
+    expect(mistral.length).toBe(2);
+    expect(mistral[1]!.at - mistral[0]!.at).toBeGreaterThanOrEqual(240);
+  });
+});
+
+describe("prepareMessages (history written by another model)", () => {
+  const history = [
+    { role: "user", content: "hi" },
+    { role: "assistant", content: null, tool_calls: [
+      { id: "call_1", type: "function", function: { name: "list_files", arguments: "{}" } },
+      { id: "call_2", type: "function", function: { name: "read_file", arguments: "{}" }, extra_content: { google: { thought_signature: "REAL" } } },
+    ] },
+    { role: "tool", tool_call_id: "call_1", content: "ok" },
+  ] as import("../../../apps/runner/src/agent/groq.js").ChatMessage[];
+
+  it("Gemini gets a placeholder signature where one is missing and keeps real ones", async () => {
+    const ai = await load(false);
+    const out = ai.prepareMessages("gemini", history);
+    const calls = out[1]!.tool_calls!;
+    expect(calls[0]!.extra_content?.google?.thought_signature).toBe("skip_thought_signature_validator");
+    expect(calls[1]!.extra_content?.google?.thought_signature).toBe("REAL");
+    expect(history[1]!.tool_calls![0]!.extra_content).toBeUndefined(); // the saved history isn't modified
+  });
+
+  it("Mistral and Groq never see Gemini-only fields", async () => {
+    const ai = await load(false);
+    for (const provider of ["mistral", "groq"] as const) {
+      const calls = ai.prepareMessages(provider, history)[1]!.tool_calls!;
+      expect(calls.every((c) => !("extra_content" in c))).toBe(true);
+    }
   });
 });

@@ -24,7 +24,13 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("agent-ai");
 
-export interface ToolCall { id: string; type: "function"; function: { name: string; arguments: string } }
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+  /** Gemini 3 puts its thought signature here (extra_content.google.thought_signature). */
+  extra_content?: { google?: { thought_signature?: string } } & Record<string, unknown>;
+}
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
@@ -50,6 +56,9 @@ const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGEN
 const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/$/, "");
 const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,mistral-large-2512").split(",").map((s) => s.trim()).filter(Boolean);
 const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY!.trim() : "";
+
+/** Mistral's free plan allows about one request per second. */
+const MISTRAL_MIN_INTERVAL_MS = Number(process.env.MISTRAL_MIN_INTERVAL_MS ?? 1100);
 
 const GROQ_BASE = (process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
 const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY!.trim() : "";
@@ -103,6 +112,32 @@ function usedLastMinute(model: string): number {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+let lastMistralAt = 0;
+
+/**
+ * Gemini 3 refuses a conversation whose tool calls carry no thought
+ * signature (400 "Function call is missing a thought_signature") — which is
+ * every tool call another model made earlier in the same chat. Google's
+ * documented placeholder lets it accept them; real signatures from Gemini
+ * itself are kept. Other providers don't know the field, so it's removed.
+ */
+const DUMMY_SIGNATURE = "skip_thought_signature_validator";
+export function prepareMessages(provider: Lane["provider"], messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((m) => {
+    if (m.role !== "assistant" || !m.tool_calls?.length) return m;
+    const tool_calls = m.tool_calls.map((c): ToolCall => {
+      if (provider === "gemini") {
+        if (c.extra_content?.google?.thought_signature) return c;
+        return { ...c, extra_content: { ...c.extra_content, google: { ...c.extra_content?.google, thought_signature: DUMMY_SIGNATURE } } };
+      }
+      if (!("extra_content" in c)) return c;
+      const { extra_content: _drop, ...rest } = c;
+      return rest;
+    });
+    return { ...m, tool_calls };
+  });
+}
+
 const cool = (lane: Lane, ms: number, why: string) => {
   coolUntil.set(lane.id, Date.now() + ms);
   log.warn({ lane: lane.label, minutes: Math.round(ms / 60_000) }, `${why} — trying the next AI`);
@@ -126,11 +161,18 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
   const maxTokens = opts.maxTokens ?? Number(process.env.AGENT_MAX_OUTPUT_TOKENS ?? 1200);
   const size = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools)) + maxTokens;
   let badRequests = 0;
+  /** Lanes that rejected this particular request (a content problem, not the lane's fault). */
+  const skip = new Set<string>();
+  let firstRejection = "";
 
   for (let attempt = 0; attempt < 12; attempt++) {
     if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
 
-    const lane = LANES.find((l) => !isCooling(l));
+    const lane = LANES.find((l) => !isCooling(l) && !skip.has(l.id));
+    if (!lane && LANES.some((l) => !isCooling(l)) ) {
+      // Every healthy lane rejected this request itself: say why, don't call it "busy".
+      throw new AiUnavailableError(`The AI rejected this request: ${firstRejection.slice(0, 300) || "unknown reason"}`);
+    }
     if (!lane) {
       // Every lane is cooling down: wait for the soonest one, if it's short.
       const soonest = Math.min(...LANES.map((l) => coolUntil.get(l.id) ?? 0)) - Date.now();
@@ -152,9 +194,15 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       }
     }
 
+    if (lane.provider === "mistral") {
+      const wait = lastMistralAt + MISTRAL_MIN_INTERVAL_MS - Date.now();
+      if (wait > 0) await sleep(wait);
+      lastMistralAt = Date.now();
+    }
+
     const body: Record<string, unknown> = {
       model: lane.model,
-      messages: opts.messages,
+      messages: prepareMessages(lane.provider, opts.messages),
       tools: opts.tools,
       tool_choice: "auto",
       temperature: 0.2,
@@ -192,7 +240,7 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
     if (res.status === 429) {
       if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`);
-      else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || 30) * 1000, `${lane.label} is rate limited`);
+      else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || (lane.provider === "mistral" ? 8 : 30)) * 1000, `${lane.label} is rate limited`);
       continue;
     }
     if (res.status === 400 && /tool_use_failed|failed_generation/i.test(text) && badRequests++ < 2) {
@@ -203,7 +251,15 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     if (res.status === 401 || res.status === 403) { cool(lane, 60 * 60_000, `${lane.label} was refused (check the key)`); continue; }
     if (res.status === 404) { cool(lane, 24 * 60 * 60_000, `${lane.label} isn't available`); continue; }
     if (res.status >= 500) { cool(lane, 30_000, `${lane.label} had a server error (${res.status})`); continue; }
-    cool(lane, 10 * 60_000, `${lane.label} failed (${res.status}): ${text.slice(0, 160)}`);
+    if (res.status === 400 || res.status === 422) {
+      // The request itself was refused. Don't take the lane out for everyone;
+      // just try the next lane for this request.
+      skip.add(lane.id);
+      firstRejection ||= `${lane.label}: ${text.replace(/\s+/g, " ")}`;
+      log.warn({ lane: lane.label, status: res.status }, `${lane.label} rejected this request — trying the next AI`);
+      continue;
+    }
+    cool(lane, 2 * 60_000, `${lane.label} failed (${res.status}): ${text.slice(0, 160)}`);
   }
   throw new AiUnavailableError("The AI is busy right now — try again in a minute.");
 }
