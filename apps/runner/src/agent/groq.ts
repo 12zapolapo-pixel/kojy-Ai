@@ -68,6 +68,10 @@ const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);
 
 interface Lane {
   id: string;
+  /** Position in the try-order (0 = tried first). */
+  order: number;
+  /** 1-based number of the key within its provider, for display only. */
+  keyNo: number;
   provider: "gemini" | "mistral" | "groq";
   model: string;
   key: string;
@@ -79,23 +83,24 @@ interface Lane {
 function buildLanes(): Lane[] {
   const gemini = GEMINI_MODELS.flatMap((model) =>
     GEMINI_KEYS.map((key, i): Lane => ({
-      id: `gemini:${model}:${i}`, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
+      id: `gemini:${model}:${i}`, order: 0, keyNo: i + 1, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
     })),
   );
   const mistral = MISTRAL_KEY
     ? MISTRAL_MODELS.map((model): Lane => ({
-        id: `mistral:${model}`, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
+        id: `mistral:${model}`, order: 0, keyNo: 1, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
       }))
     : [];
   if (!GROQ_KEY) return [...mistral, ...gemini];
   const groqModels = [...new Set([GROQ_SMART, GROQ_FAST])];
   const groq = groqModels.map((model): Lane => ({
-    id: `groq:${model}`, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
+    id: `groq:${model}`, order: 0, keyNo: 1, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
   }));
   return [...mistral, ...gemini, ...groq];
 }
 
 const LANES = buildLanes();
+LANES.forEach((l, i) => { l.order = i; });
 
 /** Rough size of a request: ~4 characters per token. */
 export const estimateTokens = (text: string) => Math.ceil(text.length / 4);
@@ -138,9 +143,58 @@ export function prepareMessages(provider: Lane["provider"], messages: ChatMessag
   });
 }
 
-const cool = (lane: Lane, ms: number, why: string) => {
+// ─── Usage for the chat's "AI models" circle ──────────────────────────────────
+// Counts per model/key, per day, in Redis (shared with the API). Never holds a key.
+
+/** The few Redis commands used; a real ioredis client satisfies this. */
+export interface UsageSink {
+  hincrby(key: string, field: string, by: number): Promise<unknown>;
+  hset(key: string, field: string, value: string): Promise<unknown>;
+  expire(key: string, seconds: number): Promise<unknown>;
+}
+export type CoolKind = "rate_limited" | "out_of_quota" | "refused" | "unavailable" | "error";
+export interface LaneState {
+  order: number; provider: string; model: string; keyNo: number; label: string;
+  coolUntil: number; kind: CoolKind | null; reason: string;
+}
+
+let usageSink: UsageSink | null = null;
+const usageKey = () => `ai_usage:${new Date().toISOString().slice(0, 10)}`;
+
+function publishLane(lane: Lane, kind: CoolKind | null, reason: string): void {
+  if (!usageSink) return;
+  const state: LaneState = {
+    order: lane.order, provider: lane.provider, model: lane.model, keyNo: lane.keyNo, label: lane.label,
+    coolUntil: coolUntil.get(lane.id) ?? 0, kind, reason: reason.slice(0, 200),
+  };
+  void usageSink.hset("ai_lanes", lane.id, JSON.stringify(state)).catch(() => undefined);
+}
+
+/** Start recording usage into Redis, and publish every configured model. */
+export function setUsageSink(sink: UsageSink | null): void {
+  usageSink = sink;
+  for (const lane of LANES) publishLane(lane, null, "");
+}
+
+function recordUsage(lane: Lane, d: { req?: number; tokensIn?: number; tokensOut?: number; fail?: number }): void {
+  if (!usageSink) return;
+  const key = usageKey();
+  const sink = usageSink;
+  const ops: Promise<unknown>[] = [];
+  if (d.req) ops.push(sink.hincrby(key, `${lane.id}|req`, d.req));
+  if (d.tokensIn) ops.push(sink.hincrby(key, `${lane.id}|in`, d.tokensIn));
+  if (d.tokensOut) ops.push(sink.hincrby(key, `${lane.id}|out`, d.tokensOut));
+  if (d.fail) ops.push(sink.hincrby(key, `${lane.id}|fail`, d.fail));
+  ops.push(sink.hset(key, `${lane.id}|last`, String(Date.now())));
+  ops.push(sink.expire(key, 8 * 24 * 3600));
+  void Promise.all(ops).catch(() => undefined);
+}
+
+const cool = (lane: Lane, ms: number, why: string, kind: CoolKind = "error") => {
   coolUntil.set(lane.id, Date.now() + ms);
   log.warn({ lane: lane.label, minutes: Math.round(ms / 60_000) }, `${why} — trying the next AI`);
+  recordUsage(lane, { fail: 1 });
+  publishLane(lane, kind, why);
 };
 const isCooling = (lane: Lane) => (coolUntil.get(lane.id) ?? 0) > Date.now();
 const DAILY = /per day|TPD|RPD|quota|RESOURCE_EXHAUSTED|daily/i;
@@ -217,7 +271,7 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       body: JSON.stringify(body),
     }).catch((err: Error) => {
       if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
-      cool(lane, 30_000, `${lane.label} couldn't be reached (${err.message})`);
+      cool(lane, 30_000, `${lane.label} couldn't be reached (${err.message})`, "unavailable");
       return null;
     });
     if (!res) continue;
@@ -228,9 +282,10 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
 
     if (res.ok) {
-      const data = await res.json() as { choices?: { message: ChatMessage }[] };
+      const data = await res.json() as { choices?: { message: ChatMessage }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
       const message = data.choices?.[0]?.message;
       if (!message) { cool(lane, 30_000, `${lane.label} returned an empty answer`); continue; }
+      recordUsage(lane, { req: 1, tokensIn: data.usage?.prompt_tokens ?? 0, tokensOut: data.usage?.completion_tokens ?? 0 });
       return { message: { role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}) }, model: lane.model };
     }
 
@@ -239,8 +294,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       throw new RequestTooLargeError("The conversation got too big for the AI. Start a new chat or ask about one thing at a time.");
     }
     if (res.status === 429) {
-      if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`);
-      else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || (lane.provider === "mistral" ? 8 : 30)) * 1000, `${lane.label} is rate limited`);
+      if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`, "out_of_quota");
+      else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || (lane.provider === "mistral" ? 8 : 30)) * 1000, `${lane.label} is rate limited`, "rate_limited");
       continue;
     }
     if (res.status === 400 && /tool_use_failed|failed_generation/i.test(text) && badRequests++ < 2) {
@@ -248,13 +303,14 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       log.warn("Malformed tool call from the model — retrying");
       continue;
     }
-    if (res.status === 401 || res.status === 403) { cool(lane, 60 * 60_000, `${lane.label} was refused (check the key)`); continue; }
-    if (res.status === 404) { cool(lane, 24 * 60 * 60_000, `${lane.label} isn't available`); continue; }
-    if (res.status >= 500) { cool(lane, 30_000, `${lane.label} had a server error (${res.status})`); continue; }
+    if (res.status === 401 || res.status === 403) { cool(lane, 60 * 60_000, `${lane.label} was refused (check the key or plan)`, "refused"); continue; }
+    if (res.status === 404) { cool(lane, 24 * 60 * 60_000, `${lane.label} isn't available`, "unavailable"); continue; }
+    if (res.status >= 500) { cool(lane, 30_000, `${lane.label} had a server error (${res.status})`, "unavailable"); continue; }
     if (res.status === 400 || res.status === 422) {
       // The request itself was refused. Don't take the lane out for everyone;
       // just try the next lane for this request.
       skip.add(lane.id);
+      recordUsage(lane, { fail: 1 });
       firstRejection ||= `${lane.label}: ${text.replace(/\s+/g, " ")}`;
       log.warn({ lane: lane.label, status: res.status }, `${lane.label} rejected this request — trying the next AI`);
       continue;

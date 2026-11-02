@@ -10,6 +10,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
+import { AiUsageCircle } from "./AiUsage";
 
 type Project = RouterOutputs["projects"]["get"];
 type Msg = RouterOutputs["projects"]["chatList"]["messages"][number];
@@ -232,13 +233,16 @@ function StudioToolbar({ working, onCleared, jsBot }: { working: boolean; onClea
   const clear = trpc.studio.chatClear.useMutation({ onSuccess: onCleared });
   const clearJs = trpc.studio.jsChatClear.useMutation({ onSuccess: onCleared });
   return (
-    <div className="px-4 py-2 border-b border-white/5 flex items-center text-xs">
+    <div className="px-4 py-2 border-b border-white/5 flex items-center text-xs relative">
       <span className="text-white/45">{jsBot ? `${jsBot.name} — JavaScript bot` : "Studio chat — about all your bots"}</span>
-      <button className="ml-auto text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending || clearJs.isPending}
-        onClick={() => {
-          if (!window.confirm("Start a new chat? Kojy keeps what it learned.")) return;
-          if (jsBot) clearJs.mutate({ id: jsBot.id }); else clear.mutate();
-        }}>New chat</button>
+      <div className="ml-auto flex items-center gap-3">
+        <AiUsageCircle />
+        <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending || clearJs.isPending}
+          onClick={() => {
+            if (!window.confirm("Start a new chat? Kojy keeps what it learned.")) return;
+            if (jsBot) clearJs.mutate({ id: jsBot.id }); else clear.mutate();
+          }}>New chat</button>
+      </div>
     </div>
   );
 }
@@ -267,7 +271,8 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
         <input type="checkbox" checked={checkupOn} onChange={(e) => checkup.mutate({ id: project.id, dailyCheckup: e.target.checked })} />
         Daily check-up
       </label>
-      <div className="ml-auto flex gap-2">
+      <div className="ml-auto flex items-center gap-2">
+        <AiUsageCircle />
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working} onClick={onIdeas}>💡 Ideas</button>
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working} onClick={() => setShowUndo((v) => !v)}>↶ Undo AI changes</button>
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending}

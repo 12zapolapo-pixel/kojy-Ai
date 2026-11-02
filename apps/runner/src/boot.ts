@@ -19,6 +19,7 @@ import { createLogger } from "./logger.js";
 import { Supervisor, PROJECTS_DIR, VENVS_DIR } from "./supervisor.js";
 import { initSandbox } from "./sandbox.js";
 import { Agent } from "./agent/agent.js";
+import { setUsageSink } from "./agent/groq.js";
 
 const log = createLogger("runner-boot");
 const CONTROL_PREFIX = "project_control:";
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
   const redis = new Redis(url, redisOptions); // a subscribed connection can't run commands
   for (const c of [sub, redis]) c.on("error", (e: Error) => log.warn(`Redis error: ${e.message}`));
 
+  setUsageSink(redis); // per-model AI usage for the chat's "AI models" circle
   const agent = new Agent(db, supervisor, redis);
   await agent.resetStates();
   // Subscribe only once both connections are fully ready: a subscribe issued

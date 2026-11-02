@@ -14,7 +14,8 @@ import { z } from "zod";
 import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { randomUUID } from "node:crypto";
-import { router, permittedProc } from "../../trpc.js";
+import { router, permittedProc, adminProc } from "../../trpc.js";
+import { readAiUsage } from "./aiUsage.js";
 import { schema } from "../../db/client.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { getRedis, getRedisPublisher } from "../../utils/redis.js";
@@ -318,6 +319,12 @@ export const projectsRouter = router({
       await control(project.uuid, "agent");
       return { success: true };
     }),
+
+  /**
+   * The coder AI's models and what each used today (the chat's "AI models"
+   * circle). Platform-wide, so admins only. Counts come from the runner.
+   */
+  aiUsage: adminProc.query(async () => readAiUsage(getRedis())),
 
   chatStop: permittedProc("bots:update").input(projectId).mutation(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);

@@ -39,7 +39,7 @@ beforeAll(async () => {
       if (model === "gone-model") { res.writeHead(404); res.end("not found"); return; }
       if (body.includes("TOO_BIG")) { res.writeHead(413); res.end("Request too large"); return; }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: `hello from ${model}` } }] }));
+      res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: `hello from ${model}` } }], usage: { prompt_tokens: 11, completion_tokens: 7 } }));
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -171,5 +171,57 @@ describe("prepareMessages (history written by another model)", () => {
       const calls = ai.prepareMessages(provider, history)[1]!.tool_calls!;
       expect(calls.every((c) => !("extra_content" in c))).toBe(true);
     }
+  });
+});
+
+describe("usage recorded for the chat's AI models circle", () => {
+  function fakeSink() {
+    const hashes = new Map<string, Map<string, string>>();
+    const h = (k: string) => { let m = hashes.get(k); if (!m) { m = new Map(); hashes.set(k, m); } return m; };
+    return {
+      hashes,
+      hincrby: async (k: string, f: string, by: number) => { h(k).set(f, String(Number(h(k).get(f) ?? 0) + by)); },
+      hset: async (k: string, f: string, v: string) => { h(k).set(f, v); },
+      expire: async () => undefined,
+    };
+  }
+  const flush = () => new Promise((r) => setTimeout(r, 20));
+
+  it("publishes every configured model, with no keys in it", async () => {
+    const ai = await load(true);
+    const sink = fakeSink();
+    ai.setUsageSink(sink);
+    await flush();
+    const lanes = sink.hashes.get("ai_lanes")!;
+    expect(lanes.size).toBe(ai.configuredLanes().length);
+    for (const v of lanes.values()) expect(v).not.toMatch(/AQ\.fake|mstrl_fake/);
+  });
+
+  it("counts requests and tokens for the model that answered", async () => {
+    const ai = await load(true);
+    const sink = fakeSink();
+    ai.setUsageSink(sink);
+    await ask(ai);
+    await ask(ai);
+    await flush();
+    const today = [...sink.hashes.keys()].find((k) => k.startsWith("ai_usage:"))!;
+    const day = sink.hashes.get(today)!;
+    expect(day.get("mistral:mistral-large-4|req")).toBe("2");
+    expect(day.get("mistral:mistral-large-4|in")).toBe("22");
+    expect(day.get("mistral:mistral-large-4|out")).toBe("14");
+  });
+
+  it("records an out-of-quota model as such, with when it comes back", async () => {
+    mode = "quota-on-first";
+    const ai = await load(false);
+    const sink = fakeSink();
+    ai.setUsageSink(sink);
+    await ask(ai);
+    await flush();
+    const state = JSON.parse(sink.hashes.get("ai_lanes")!.get("gemini:model-a:0")!) as { kind: string; coolUntil: number };
+    expect(state.kind).toBe("out_of_quota");
+    expect(state.coolUntil).toBeGreaterThan(Date.now() + 30 * 60_000);
+    const today = [...sink.hashes.keys()].find((k) => k.startsWith("ai_usage:"))!;
+    expect(sink.hashes.get(today)!.get("gemini:model-a:0|fail")).toBe("1");
   });
 });
