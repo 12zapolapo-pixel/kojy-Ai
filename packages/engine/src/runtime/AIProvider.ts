@@ -63,7 +63,7 @@ export function resolveAIProvider(env: NodeJS.ProcessEnv = process.env): AIProvi
   const explicit = (env.AI_PROVIDER ?? "").toLowerCase() as AIProviderName | "";
 
   const candidates: AIProviderName[] = explicit
-    ? [explicit as AIProviderName]
+    ? [explicit]
     : ["groq", "openai", "mistral", "ollama"];
 
   for (const name of candidates) {

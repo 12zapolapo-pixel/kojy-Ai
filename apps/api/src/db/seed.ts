@@ -133,7 +133,7 @@ async function seed() {
       }).catch(() => null);
 
       console.log(`  ✅ Org: ${org.name} (id: ${orgId})`);
-    } catch (err) {
+    } catch {
       console.log(`  ⏭️  Org ${org.slug} already exists`);
     }
   }

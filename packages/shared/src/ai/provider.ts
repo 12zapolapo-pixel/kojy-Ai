@@ -139,7 +139,7 @@ async function callGroq(
   });
 
   if (!res.ok) throw new Error(`Groq error ${res.status}: ${await res.text()}`);
-  const data = await res.json() as any;
+  const data = await res.json();
 
   return {
     text:         data.choices[0].message.content ?? "",
@@ -167,7 +167,7 @@ async function callMistral(
   });
 
   if (!res.ok) throw new Error(`Mistral error ${res.status}: ${await res.text()}`);
-  const data = await res.json() as any;
+  const data = await res.json();
 
   return {
     text:         data.choices[0].message.content ?? "",
@@ -195,7 +195,7 @@ async function callOpenAI(
   });
 
   if (!res.ok) throw new Error(`OpenAI error ${res.status}: ${await res.text()}`);
-  const data = await res.json() as any;
+  const data = await res.json();
 
   return {
     text:         data.choices[0].message.content ?? "",
@@ -276,7 +276,7 @@ export async function generateImage(
   });
 
   if (!res.ok) return null;
-  const prediction = await res.json() as any;
+  const prediction = await res.json();
 
   // Poll for completion (Replicate is async)
   const pollUrl = prediction.urls?.get;

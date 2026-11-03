@@ -162,8 +162,8 @@ if (process.env.NODE_ENV === "production" && !process.env.TRUSTED_PROXY_IPS) {
 
 function getClientIp(c: any): string {
   const socketAddr: string | undefined =
-    (c.env as any)?.incoming?.socket?.remoteAddress ??
-    (c.env as any)?.incoming?.connection?.remoteAddress;
+    (c.env)?.incoming?.socket?.remoteAddress ??
+    (c.env)?.incoming?.connection?.remoteAddress;
   return resolveClientIp(socketAddr, c.req.header("x-forwarded-for"));
 }
 
@@ -241,7 +241,7 @@ app.use(
       // Full detail server-side always — this is the only place the stack
       // trace is visible now that trpc.ts strips it from production
       // responses (see errorFormatter in trpc.ts).
-      const meta = { err: error, path, type, userId: (ctx as any)?.user?.id };
+      const meta = { err: error, path, type, userId: (ctx)?.user?.id };
       if (error.code === "INTERNAL_SERVER_ERROR") {
         log.error(meta, `Unhandled tRPC error on ${path ?? "unknown procedure"}`);
       } else {

@@ -261,7 +261,7 @@ export function buildTemplateReply(
   ctx: { botUsername?: string; personality: PersonalityDNA; whisper?: boolean },
 ): string | null {
   const { personality, botUsername } = ctx;
-  const { traits, voice } = personality;
+  const { traits } = personality;
   // A whisper is always to the bot.
   const mentionsBot = ctx.whisper === true || isAddressed(message, botUsername);
   const seed = message.length + Math.floor(traits.humor * 100);

@@ -107,7 +107,7 @@ export async function createBotRecord(
     .where(eq(schema.subscriptions.orgId, input.orgId))
     .limit(1);
 
-  const limits = sub?.limits as any;
+  const limits = sub?.limits;
   const maxBots = limits?.maxBots ?? 1;
   if (Number(total) >= maxBots) {
     throw new BotQuotaExceededError(maxBots);

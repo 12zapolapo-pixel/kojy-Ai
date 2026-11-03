@@ -153,7 +153,7 @@ export function validateScriptStructure(code: string): StructuralCheckResult {
   // for tooling purposes, so we re-check via a throwaway Program to surface
   // genuine parse errors the same way a real compile would catch them.
   const host = ts.createCompilerHost({});
-  const originalGetSourceFile = host.getSourceFile;
+  const originalGetSourceFile = host.getSourceFile.bind(host);
   host.getSourceFile = (fileName, langVersion, ...rest) =>
     fileName === "script.ts" ? sourceFile : originalGetSourceFile(fileName, langVersion, ...rest);
 
@@ -303,10 +303,10 @@ export interface SandboxCtx {
 // typed handlers) in TypeScript, but isolates only run JavaScript — so types
 // are removed first with the TypeScript compiler (transpile only, no type
 // check; loaded on first use since it's large).
-let tsCompiler: typeof import("typescript") | null = null;
+let tsCompiler: typeof ts | null = null;
 
 export function transpileScript(code: string): string {
-  tsCompiler ??= createRequire(import.meta.url)("typescript") as typeof import("typescript");
+  tsCompiler ??= createRequire(import.meta.url)("typescript") as typeof ts;
   return tsCompiler.transpileModule(code, {
     compilerOptions: { target: tsCompiler.ScriptTarget.ES2020, module: tsCompiler.ModuleKind.ESNext, removeComments: false },
     reportDiagnostics: false,

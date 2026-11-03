@@ -249,7 +249,7 @@ function SectionHeader({ title, sub, small }: { title: string; sub: string; smal
 function Card({ children }: { children: React.ReactNode }) {
   return <div className="bg-[#0b1220] border border-white/5 rounded-xl p-5 space-y-3">{children}</div>;
 }
-function Row({ label, value, readonly }: { label: string; value: string; readonly?: boolean }) {
+function Row({ label, value, readonly: _readonly }: { label: string; value: string; readonly?: boolean }) {
   return <div className="flex justify-between items-center py-1"><span className="text-xs text-white/35">{label}</span><span className="text-xs text-white/60 font-mono">{value}</span></div>;
 }
 function EditField({ label, value, onChange, type = "text", readonly }: { label: string; value: string; onChange: (v: string) => void; type?: string; readonly?: boolean }) {

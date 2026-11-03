@@ -11,7 +11,7 @@
  */
 
 import { z } from "zod";
-import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { randomUUID } from "node:crypto";
 import { router, permittedProc, adminProc } from "../../trpc.js";
@@ -140,7 +140,7 @@ export const projectsRouter = router({
 
       const uuid = randomUUID();
       const [row] = await ctx.db.insert(botProjects)
-        .values({ uuid, orgId, ownerId: ctx.user!.id, name: input.name, entrypoint: template?.entrypoint ?? "" }).returning();
+        .values({ uuid, orgId, ownerId: ctx.user.id, name: input.name, entrypoint: template?.entrypoint ?? "" }).returning();
       ensureProjectDir(uuid);
       if (template) for (const [file, content] of Object.entries(template.files)) writeProjectFile(uuid, file, content);
 
@@ -152,7 +152,7 @@ export const projectsRouter = router({
         await addToThread(ctx.db, `project:${row!.id}`, row!.id, "user", "text", intro);
         await control(uuid, "agent").catch(() => undefined); // no runner/Redis: the chat waits
       }
-      await emitAuditLog(ctx.db, { orgId, actorId: ctx.user!.id, actorType: "user", action: "project.create", resourceType: "project", resourceId: uuid, afterState: { template: template?.id ?? null } });
+      await emitAuditLog(ctx.db, { orgId, actorId: ctx.user.id, actorType: "user", action: "project.create", resourceType: "project", resourceId: uuid, afterState: { template: template?.id ?? null } });
       return publicProject(row!);
     }),
 
@@ -177,7 +177,7 @@ export const projectsRouter = router({
     await ctx.db.delete(botProjects).where(eq(botProjects.id, project.id));
     removeProjectDir(project.uuid);
     removeSnapshots(project.uuid);
-    await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user!.id, actorType: "user", action: "project.delete", resourceType: "project", resourceId: project.uuid });
+    await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.delete", resourceType: "project", resourceId: project.uuid });
     return { success: true };
   }),
 
@@ -188,7 +188,7 @@ export const projectsRouter = router({
     .input(projectId.extend({ zipBase64: z.string().min(1).max(Math.ceil(MAX_UPLOAD_BYTES * 4 / 3) + 4) }))
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
-      await zipThrottle(ctx.user!.id);
+      await zipThrottle(ctx.user.id);
       const result = await filesAsync(() => extractZip(project.uuid, Buffer.from(input.zipBase64, "base64")));
       let detected: string | null = null;
       if (!project.entrypoint) {
@@ -228,7 +228,7 @@ export const projectsRouter = router({
   /** Whole project as a base64 zip. */
   download: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
-    await zipThrottle(ctx.user!.id);
+    await zipThrottle(ctx.user.id);
     const zip = await filesAsync(() => zipProject(project.uuid));
     return { filename: `${project.name.replace(/[^\w.-]+/g, "_") || "project"}.zip`, zipBase64: Buffer.from(zip).toString("base64") };
   }),
@@ -250,7 +250,7 @@ export const projectsRouter = router({
       const project = await loadProject(ctx, input.id);
       await saveSecret(ctx.db, project.id, input.key, input.value);
       // Key only — never the value.
-      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user!.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { key: input.key } });
+      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { key: input.key } });
       return { success: true };
     }),
 
@@ -301,7 +301,7 @@ export const projectsRouter = router({
         thread: `project:${project.id}`, projectId: project.id, role: "user", kind: "event",
         content: `The owner saved these secrets: ${saved.join(", ")}. Test them (test_secrets) and continue.`,
       });
-      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user!.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { keys: saved } });
+      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { keys: saved } });
       await control(project.uuid, "agent");
       return { success: true, saved };
     }),
@@ -380,7 +380,7 @@ export const projectsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
       if (project.agentState === "working") throw new TRPCError({ code: "CONFLICT", message: "Stop the AI first." });
-      await zipThrottle(ctx.user!.id);
+      await zipThrottle(ctx.user.id);
       const count = files(() => restoreSnapshot(project.uuid, input.snapshotId));
       const when = new Date(Number(input.snapshotId)).toISOString().replace("T", " ").slice(0, 16);
       await ctx.db.insert(projectMessages).values({

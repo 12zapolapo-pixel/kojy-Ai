@@ -51,7 +51,7 @@ export async function runDreamSession(
     return { botId, startedAt: new Date().toISOString(), durationSecs: 0, memoriesProcessed: 0, insightsSurfaced: [], personalityDeltas: {} };
   }
 
-  const memText = memories.slice(0, 20).map((m, i) => `[${m.type}] ${m.summary}`).join("\n");
+  const memText = memories.slice(0, 20).map((m) => `[${m.type}] ${m.summary}`).join("\n");
 
   try {
     const response = await aiChat([
@@ -159,7 +159,7 @@ export interface QuestReward {
 export async function generateQuest(
   userId:       number,
   loyaltyTier:  string,
-  recentActions: string[],
+  _recentActions: string[],
 ): Promise<Quest> {
   const TEMPLATES: Quest[] = [
     {
@@ -267,7 +267,7 @@ export interface KnowledgeEntry {
 
 export async function extractKnowledge(
   messages: string[],
-  existingKnowledge: KnowledgeEntry[],
+  _existingKnowledge: KnowledgeEntry[],
 ): Promise<KnowledgeEntry[]> {
   if (messages.length < 3) return [];
 
@@ -582,7 +582,7 @@ export interface TimeContext {
   suggestedTopics: string[];
 }
 
-export function getTimeContext(timezone = "UTC"): TimeContext {
+export function getTimeContext(_timezone = "UTC"): TimeContext {
   const now  = new Date();
   const hour = now.getUTCHours(); // Simplified — production uses tz library
   const day  = now.getUTCDay();

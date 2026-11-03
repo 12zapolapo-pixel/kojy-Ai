@@ -26,7 +26,7 @@ import { db, schema } from "../db/client.js";
 import { getRedisPublisher, publishBotControl } from "../services/redis.js";
 import { createLogger }      from "../services/logger.js";
 import { runHighriseOrchestrator } from "@kojyai/engine/highrise";
-import type { PipelineStage, ComposerStageEvent, ProjectFile, TestResult, HighriseBotSpec, ComposerArtifact } from "@kojyai/engine/highrise";
+import type { ComposerStageEvent, ProjectFile, ComposerArtifact } from "@kojyai/engine/highrise";
 import type { DelegationStatusEvent } from "@kojyai/shared/events";
 import { decryptApiKey } from "@kojyai/shared/crypto";
 import { createBotRecord, BotQuotaExceededError } from "@kojyai/shared/highrise";
@@ -86,7 +86,7 @@ export async function processComposerRun(job: Job): Promise<void> {
 
     try {
       await db.update(schema.composerProjects)
-        .set(dbUpdate as any)
+        .set(dbUpdate)
         .where(eq(schema.composerProjects.id, dbProjectId));
     } catch (err) {
       log.warn({ err }, "Failed to update composer project stage in DB");
@@ -215,7 +215,7 @@ export async function processComposerRun(job: Job): Promise<void> {
         await writeGeneratedScripts(created.botId, orgId, result.files, null);
 
         await db.update(schema.composerProjects)
-          .set({ botId: created.botId, updatedAt: new Date() } as any)
+          .set({ botId: created.botId, updatedAt: new Date() })
           .where(eq(schema.composerProjects.id, dbProjectId));
 
         await db.insert(schema.auditLogs).values({
@@ -288,7 +288,7 @@ export async function processComposerRun(job: Job): Promise<void> {
   ];
 
   await db.update(schema.composerProjects)
-    .set({ history: finalHistory as any } as any)
+    .set({ history: finalHistory })
     .where(eq(schema.composerProjects.id, dbProjectId));
 
   log.info({

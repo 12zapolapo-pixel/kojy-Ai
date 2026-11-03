@@ -5,7 +5,7 @@
 
 import { z }         from "zod";
 import { eq, and, desc, gte } from "drizzle-orm";
-import { router, permittedProc, adminProc, superadminProc } from "../../trpc.js";
+import { router, permittedProc } from "../../trpc.js";
 import { tryResolveOrgId } from "../../utils/resolveOrgId.js"; // single canonical org resolution (M-08/M-13)
 import { schema }    from "../../db/client.js"; // FIX-2: schema re-exported from client.ts
 import { TRPCError } from "@trpc/server";
@@ -26,7 +26,7 @@ export const auditRouter = router({
       // scoping fix — to the WRONG org). Superadmins with no org are still
       // allowed through: they see everything by design.
       const orgId = await tryResolveOrgId(ctx);
-      if (orgId === null && ctx.user!.role !== "superadmin") throw new TRPCError({ code: "NOT_FOUND" });
+      if (orgId === null && ctx.user.role !== "superadmin") throw new TRPCError({ code: "NOT_FOUND" });
 
       const conditions: any[] = [];
       if (input.resourceType) conditions.push(eq(schema.auditLogs.resourceType, input.resourceType));
@@ -39,7 +39,7 @@ export const auditRouter = router({
       // still sees everything, by design; every other caller is scoped to
       // their own org (NULL-orgId rows — pre-fix history, or events with no
       // attributable org — are superadmin-only, same rationale as C-07).
-      if (ctx.user!.role !== "superadmin") {
+      if (ctx.user.role !== "superadmin") {
         conditions.push(eq(schema.auditLogs.orgId, orgId!));
       }
 

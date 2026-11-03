@@ -36,7 +36,7 @@
  * - Evolution produces invalid scores → clamped to [0,1], job logs warning
  */
 
-import type { PersonalityDNA, PersonalityTraits, VoiceProfile, BehaviorRule } from "@kojyai/shared/types";
+import type { PersonalityDNA, PersonalityTraits, VoiceProfile } from "@kojyai/shared/types";
 
 // ─── Prompt Builder ───────────────────────────────────────────────────────────
 

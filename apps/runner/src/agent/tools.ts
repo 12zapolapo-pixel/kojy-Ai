@@ -331,7 +331,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
             const empty = !d || /^(None|""|'')$/.test(d);
             // An empty default on a credential still means "required"; on anything
             // else (a webhook URL, a feature flag) it means "off unless set".
-            note(m[1]!, f.path, !empty ? d! : /TOKEN|KEY|SECRET|PASSWORD|ROOM_ID/.test(m[1]!) || !d ? null : "empty, feature off");
+            note(m[1]!, f.path, !empty ? d : /TOKEN|KEY|SECRET|PASSWORD|ROOM_ID/.test(m[1]!) || !d ? null : "empty, feature off");
           }
         }
         for (const k of [...vars.keys()]) if (["PATH", "HOME", "HR_BOTAPI_URL"].includes(k) || k.startsWith("KOJY_") || k.startsWith("PYTHON")) vars.delete(k);

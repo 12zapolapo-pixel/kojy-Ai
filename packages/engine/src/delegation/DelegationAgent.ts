@@ -20,7 +20,7 @@
  * Database writes are done by the caller (delegation router / BullMQ processor).
  */
 
-import { resolveAIProvider, type AIProviderConfig } from "../runtime/AIProvider.js";
+import { resolveAIProvider } from "../runtime/AIProvider.js";
 import { planFeatureRequest, type PlannerInput, type TaskPlan } from "./AgentPlanner.js";
 import { generateBotScript, type CoderResult } from "./AgentCoder.js";
 import { executeNaturalLanguageCases } from "../runtime/ScriptSandbox.js";

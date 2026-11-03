@@ -137,7 +137,7 @@ export function grantDirOnce(dir: string, uid: number): void {
 export interface Sandboxed {
   child: ChildProcess;
   /** Signal the process (works across users). */
-  kill(signal?: NodeJS.Signals): void;
+  kill: (signal?: NodeJS.Signals) => void;
 }
 
 /**

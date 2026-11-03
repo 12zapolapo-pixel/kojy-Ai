@@ -39,7 +39,6 @@ import {
   generateChatReply,
   registerScriptPlugin,
   clearScriptPlugins,
-  getScriptPluginIds,
   type ScriptPlugin,
 } from "@kojyai/engine";
 import { buildPersonalityPrompt, createDefaultPersonalityProfile } from "@kojyai/engine/personality";
@@ -168,7 +167,7 @@ export async function initBotRuntimeManager(): Promise<void> {
   log.info(`Runtime manager initialized — ${previouslyOnline.length} bots restored`);
 
   // Heartbeat monitor — detect dead loops every 60s
-  setInterval(() => monitorHeartbeats(), 60_000);
+  setInterval(() => { monitorHeartbeats().catch((err) => log.warn({ err }, "Heartbeat check failed")); }, 60_000);
 
   // Listen for control commands from the worker (start/stop/restart/broadcast).
   // This is the actual link between bots.start/stop/restart/broadcastMessage

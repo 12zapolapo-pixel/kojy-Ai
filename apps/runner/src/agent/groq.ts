@@ -55,7 +55,7 @@ const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGEN
 
 const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/$/, "");
 const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,mistral-large-2512").split(",").map((s) => s.trim()).filter(Boolean);
-const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY!.trim() : "";
+const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY.trim() : "";
 
 /** Mistral's free plan: about one request per second… */
 const MISTRAL_MIN_INTERVAL_MS = Number(process.env.MISTRAL_MIN_INTERVAL_MS ?? 1100);
@@ -63,7 +63,7 @@ const MISTRAL_MIN_INTERVAL_MS = Number(process.env.MISTRAL_MIN_INTERVAL_MS ?? 11
 const MISTRAL_TOKENS_PER_MINUTE = Number(process.env.MISTRAL_TOKENS_PER_MINUTE ?? 20000);
 
 const GROQ_BASE = (process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
-const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY!.trim() : "";
+const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY.trim() : "";
 const GROQ_SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
 const GROQ_FAST = process.env.AGENT_FALLBACK_MODEL ?? process.env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
 const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);

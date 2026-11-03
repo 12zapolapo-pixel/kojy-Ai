@@ -3,7 +3,7 @@
  * OWNERSHIP: apps/web/src/features/bots/panels
  */
 
-import { useState, useRef, useEffect, memo } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery }  from "@tanstack/react-query";
 import { getQueryKey } from "@trpc/react-query";
 import { trpc, trpcClient, type RouterOutputs } from "../../../lib/trpc";
@@ -223,7 +223,7 @@ export function RuntimeHealthPanel({ botId }: { botId: string }) {
 
 // ─── Bot Analytics Panel ──────────────────────────────────────────────────────
 
-export function BotAnalyticsPanel({ botId }: { botId: string }) {
+export function BotAnalyticsPanel({ botId: _botId }: { botId: string }) {
   return (
     <div className="h-full overflow-y-auto scrollbar-thin p-6">
       <div className="grid grid-cols-3 gap-4 mb-6">
@@ -264,7 +264,7 @@ function HealthMetric({ label, value, unit, color }: { label: string; value: str
   );
 }
 
-function AnalyticsCard({ label, value, trend }: { label: string; value: string; trend: string }) {
+function AnalyticsCard({ label, value, trend: _trend }: { label: string; value: string; trend: string }) {
   return (
     <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4">
       <p className="text-xs text-white/30 mb-1">{label}</p>

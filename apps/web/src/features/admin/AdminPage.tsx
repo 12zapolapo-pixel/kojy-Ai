@@ -221,7 +221,7 @@ function FlagsTab() {
 
   const createMutation = useMutation({
     mutationFn: () => trpcClient.admin.createFeatureFlag.mutate({ key: newKey, enabled: false, description: newDesc }),
-    onSuccess:  () => { setNewKey(""); setNewDesc(""); qc.invalidateQueries({ queryKey: getQueryKey(trpc.security.getFeatureFlags) }); },
+    onSuccess:  () => { setNewKey(""); setNewDesc(""); void qc.invalidateQueries({ queryKey: getQueryKey(trpc.security.getFeatureFlags) }); },
   });
 
   const updateMutation = useMutation({

@@ -18,7 +18,6 @@ import { notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger }      from "../services/logger.js";
 import { eq, and, lt, gte, inArray } from "drizzle-orm"; // FIX-20: gte added for analytics lower bound
 import { compressBatch, groupMemoriesForCompression } from "@kojyai/engine/memory";
-import { scoreSentiment }    from "@kojyai/engine/intelligence";
 
 const log       = createLogger("processors");
 // ─── Memory Compression ───────────────────────────────────────────────────────
@@ -160,7 +159,7 @@ export async function processNotificationDelivery(job: Job): Promise<void> {
 
 // ─── Churn Prediction ─────────────────────────────────────────────────────────
 
-export async function processChurnPrediction(job: Job): Promise<void> {
+export async function processChurnPrediction(_job: Job): Promise<void> {
   log.info("Churn prediction sweep starting");
   const orgs = await db.select({ id: schema.organizations.id })
     .from(schema.organizations).where(eq(schema.organizations.status, "active")).limit(50);

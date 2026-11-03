@@ -73,8 +73,8 @@ export const delegationRouter = router({
         uuid,
         userId:    ctx.user.id,
         orgId,
-        messages:  [welcomeMessage] as any,
-        memory:    {} as any,
+        messages:  [welcomeMessage],
+        memory:    {},
         taskStatus: "idle",
       });
 
@@ -121,8 +121,8 @@ export const delegationRouter = router({
           uuid,
           userId: ctx.user.id,
           orgId,
-          messages:  [] as any,
-          memory:    {} as any,
+          messages:  [],
+          memory:    {},
           taskStatus: "idle",
         });
         [session] = await ctx.db

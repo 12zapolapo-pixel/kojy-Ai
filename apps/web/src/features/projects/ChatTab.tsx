@@ -90,9 +90,9 @@ export function ChatTab({ project, jsBot, onPanel }: {
           if (prev.agentState === "working" && res.agentState !== "working") { void utils.projects.invalidate(); void utils.studio.invalidate(); }
           return { agentState: res.agentState, progress: res.progress };
         });
-        timer = setTimeout(poll, res.agentState === "working" ? 1200 : 4000);
+        timer = setTimeout(() => void poll(), res.agentState === "working" ? 1200 : 4000);
       } catch {
-        if (!stopped) timer = setTimeout(poll, 5000);
+        if (!stopped) timer = setTimeout(() => void poll(), 5000);
       }
     };
     void poll();

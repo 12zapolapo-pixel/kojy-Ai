@@ -40,7 +40,7 @@
  * - Corrupt memory payload: skip that entry, log warning, continue
  */
 
-import type { BotMemory, MemoryCompressionState } from "@kojyai/shared/types";
+import type { BotMemory } from "@kojyai/shared/types";
 import { aiChat } from "@kojyai/shared/ai";
 
 // ─── Types ────────────────────────────────────────────────────────────────────

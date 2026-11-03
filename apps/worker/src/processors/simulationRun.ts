@@ -392,7 +392,7 @@ class SimAgent {
     };
   }
 
-  private decideNextAction(second: number, _fakePlayers: FakePlayer[]): void {
+  private decideNextAction(_second: number, _fakePlayers: FakePlayer[]): void {
     const actions = ["walk_to_desk", "walk_to_table", "greet_player", "idle", "respond"];
     // Use seeded RNG — not Math.random() — so simulations are deterministic and reproducible
     const action = actions[Math.floor(this.rng.next() * actions.length)]!;

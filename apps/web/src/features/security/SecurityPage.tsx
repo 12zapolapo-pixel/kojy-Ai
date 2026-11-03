@@ -195,7 +195,7 @@ function FeatureFlagsTab() {
     <div className="h-full overflow-y-auto scrollbar-thin p-6 space-y-3">
       <p className="text-xs text-white/35 mb-2">Feature flags control platform capabilities. Changes take effect within 60 seconds (cached in Redis).</p>
       {displayFlags.length === 0 && <p className="text-sm text-white/40">No feature flags are set.</p>}
-      {(displayFlags as any[]).map((flag: any) => (
+      {(displayFlags).map((flag: any) => (
         <div key={flag.id} className="flex items-center justify-between p-4 bg-[#0b1220] border border-white/5 rounded-xl">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-mono text-white/70">{flag.key}</p>

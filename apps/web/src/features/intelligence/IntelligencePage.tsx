@@ -65,7 +65,7 @@ export default function IntelligencePage() {
   );
 }
 
-function IntelOverview({ data, navigate }: { data: any; navigate: any }) {
+function IntelOverview({ data, navigate: _navigate }: { data: any; navigate: any }) {
   const memStats = data?.memoryStats ?? {};
 
   return (

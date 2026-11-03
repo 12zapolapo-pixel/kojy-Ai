@@ -92,7 +92,7 @@ async function trpcGet<T>(
   // just today's all-string/null AuthUser shape.
   const json = await res.json() as { result?: { data?: unknown } };
   if (json?.result?.data === undefined) return null;
-  return superjson.deserialize(json.result.data as any) as T;
+  return superjson.deserialize<T>(json.result.data as any);
 }
 
 async function trpcPost(

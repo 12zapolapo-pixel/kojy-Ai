@@ -83,7 +83,7 @@ export async function validateHighriseCredentials(
           "user-agent": SDK_UA,
         },
       });
-    } catch (e) {
+    } catch {
       clearTimeout(timeout);
       return reject(new TRPCError({
         code: "BAD_REQUEST",

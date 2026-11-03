@@ -16,7 +16,6 @@ import { createLogger } from "../utils/logger.js";
 const log = createLogger("api-queues");
 
 const queues = new Map<string, Queue>();
-let initialized = false;
 
 import type { ConnectionOptions } from "bullmq";
 

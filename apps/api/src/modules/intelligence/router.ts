@@ -4,15 +4,15 @@
  */
 
 import { z }         from "zod";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProc, permittedProc } from "../../trpc.js";
+import { router, permittedProc } from "../../trpc.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js"; // single canonical org resolution (M-08/M-13)
 import { schema }    from "../../db/client.js"; // FIX-2: schema re-exported from client.ts
 import { emitAuditLog } from "../../events/audit.js";
 import { enqueue }   from "../../jobs/queues.js";
 import { QUEUE_NAMES } from "@kojyai/shared/constants";
-import { createDefaultPersonalityProfile, buildPersonalityPrompt } from "@kojyai/engine/personality";
+import { createDefaultPersonalityProfile } from "@kojyai/engine/personality";
 import { evaluatePersonalityPolicy, checkInjection } from "@kojyai/shared/policy";
 
 const PersonalityUpdateInput = z.object({
@@ -200,7 +200,7 @@ export const intelligenceRouter = router({
 
   getChurnPredictions: permittedProc("intelligence:read")
     .input(z.object({ botId: z.string(), limit: z.number().min(1).max(100).default(20) }))
-    .query(async ({ input, ctx }) => {
+    .query(async () => {
       // L-22: no churn model or sweep job exists yet, so there are never any
       // predictions. Say so explicitly instead of returning an empty result that
       // looks like "we checked and nobody is at risk".

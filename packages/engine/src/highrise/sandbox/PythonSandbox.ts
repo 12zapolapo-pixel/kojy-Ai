@@ -33,8 +33,7 @@
  * output; this package has not needed a non-TS runtime asset until now.
  */
 
-import { spawn } from "node:child_process";
-import { execFile } from "node:child_process";
+import { spawn , execFile } from "node:child_process";
 import { promisify } from "node:util";
 import fs   from "node:fs/promises";
 import os   from "node:os";

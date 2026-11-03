@@ -58,7 +58,7 @@ export const studioRouter = router({
     const live = (s: string) => s === "running" || s === "online";
     return [
       ...py.map((p) => ({ kind: "python" as const, id: p.uuid, name: p.name, status: p.status, live: live(p.status), working: p.agentState === "working", updatedAt: p.updatedAt })),
-      ...js.map((b) => ({ kind: "javascript" as const, id: b.uuid, name: b.name, status: b.status as string, live: live(b.status), working: false, updatedAt: b.updatedAt })),
+      ...js.map((b) => ({ kind: "javascript" as const, id: b.uuid, name: b.name, status: b.status, live: live(b.status), working: false, updatedAt: b.updatedAt })),
     ].sort((a, b) => a.name.localeCompare(b.name));
   }),
 

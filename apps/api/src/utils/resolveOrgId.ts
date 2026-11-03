@@ -21,7 +21,8 @@
 
 import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
-import { db, schema } from "../db/client.js";
+import type { db} from "../db/client.js";
+import { schema } from "../db/client.js";
 
 export interface OrgResolvableContext {
   db:      typeof db;

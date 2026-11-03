@@ -184,7 +184,7 @@ function StepCreateBot({ botName, setBotName, apiKey, setApiKey, roomId, setRoom
   );
 }
 
-function StepPersonality({ botId, onNext }: { botId: string | null; onNext: () => void }) {
+function StepPersonality({ botId: _botId, onNext }: { botId: string | null; onNext: () => void }) {
   const PRESETS = [
     { id: "friendly",    label: "The Friend",      desc: "Warm, empathetic, and always happy to chat", icon: "😊" },
     { id: "professional",label: "The Professional", desc: "Formal, knowledgeable, and trustworthy",     icon: "💼" },
@@ -228,7 +228,7 @@ function StepConnectRoom({ roomId, onNext }: { roomId: string; onNext: () => voi
   );
 }
 
-function StepSimulation({ botId, onNext }: { botId: string | null; onNext: () => void }) {
+function StepSimulation({ botId: _botId, onNext }: { botId: string | null; onNext: () => void }) {
   const [ran, setRan] = useState(false);
   return (
     <div className="space-y-4">
@@ -301,7 +301,7 @@ function StepIntelligence({ onNext }: { onNext: () => void }) {
   );
 }
 
-function StepLaunch({ botId, onFinish }: { botId: string | null; onFinish: () => void }) {
+function StepLaunch({ botId: _botId, onFinish }: { botId: string | null; onFinish: () => void }) {
   return (
     <div className="space-y-6 text-center">
       <div className="space-y-2">

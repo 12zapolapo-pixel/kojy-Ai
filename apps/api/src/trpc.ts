@@ -288,7 +288,7 @@ export const protectedProc = publicProcedure.use(withRateLimit).use(withAuth);
 /** Permission-gated procedure factory */
 export function permittedProc(permission: Permission) {
   return protectedProc.use(({ ctx, next }) => {
-    const { role, tier } = ctx.user!;
+    const { role, tier } = ctx.user;
     if (!hasPermission(role, tier, permission)) {
       throw new TRPCError({
         code:    "FORBIDDEN",
@@ -354,7 +354,7 @@ function withAdminAudit(scope: "admin" | "superadmin") {
 /** Admin-only procedures — mutations are audit-logged structurally (M-04). */
 export const adminProc = protectedProc
   .use(({ ctx, next }) => {
-    if (ctx.user!.role !== "admin" && ctx.user!.role !== "superadmin") {
+    if (ctx.user.role !== "admin" && ctx.user.role !== "superadmin") {
       throw new TRPCError({
         code:    "FORBIDDEN",
         message: "Administrator access required.",
@@ -367,7 +367,7 @@ export const adminProc = protectedProc
 /** Superadmin-only procedures — mutations are audit-logged structurally (M-04). */
 export const superadminProc = protectedProc
   .use(({ ctx, next }) => {
-    if (ctx.user!.role !== "superadmin") {
+    if (ctx.user.role !== "superadmin") {
       throw new TRPCError({
         code:    "FORBIDDEN",
         message: "Superadmin access required.",

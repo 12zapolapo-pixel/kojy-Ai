@@ -142,7 +142,9 @@ describe("coder AI lanes", () => {
     await ask(ai);
     const mistral = seen.map((x, i) => ({ ...x, at: times[i]! })).filter((x) => x.model.startsWith("mistral"));
     expect(mistral.length).toBe(2);
-    expect(mistral[1]!.at - mistral[0]!.at).toBeGreaterThanOrEqual(240);
+    // Pacing is 250 ms here; times are when the fake server finished reading each
+    // request, which a busy test machine can delay a little. Unpaced, the gap is ~0.
+    expect(mistral[1]!.at - mistral[0]!.at).toBeGreaterThanOrEqual(200);
   });
 });
 

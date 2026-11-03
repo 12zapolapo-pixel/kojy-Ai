@@ -23,9 +23,7 @@
  */
 
 import Stripe           from "stripe";
-import { eq }           from "drizzle-orm";
-import { db }           from "../../db/client.js";
-import { schema }       from "../../db/client.js";
+import { db , schema }           from "../../db/client.js";
 import { createLogger } from "../../utils/logger.js";
 import { getRedis }     from "../../utils/redis.js";
 import { enqueue }      from "../../jobs/queues.js";
@@ -103,7 +101,7 @@ export async function handleStripeWebhook(
     await db.insert(schema.stripeWebhookEvents).values({
       stripeEventId: event.id,
       type:          event.type,
-      payload:       event.data.object as unknown as Record<string, unknown>,
+      payload:       event.data.object,
       processed:     false,
     })
     // A duplicate (Redis was unavailable) keeps the row we already stored

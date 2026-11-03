@@ -226,7 +226,7 @@ export function scanToxicityFast(text: string): ToxicityResult {
         score += 0.4;
         categories.push(entry.category);
       }
-    } else if ((entry as RegExp).test(lower)) {
+    } else if ((entry).test(lower)) {
       score += 0.3;
       categories.push("spam");
     }
@@ -478,7 +478,7 @@ export async function exportUserData(
 export async function deleteUserData(
   db: any,
   userId: number,
-  enqueue: (queue: string, data: object) => Promise<unknown>,
+  _enqueue: (queue: string, data: object) => Promise<unknown>,
 ): Promise<void> {
   // Implementation note: runs in a transaction with compensating actions
   // Full implementation in apps/api/src/modules/gdpr/service.ts
@@ -531,7 +531,7 @@ export async function lookupIpIntelligence(
       `https://ipapi.co/${ip}/json/`,  // HTTPS — ip-api.com free tier uses HTTP; ipapi.co uses HTTPS
       { signal: AbortSignal.timeout(3000) },
     );
-    const data = await response.json() as any;
+    const data = await response.json();
 
     // ipapi.co field mapping
     const isProxy  = data.threat?.is_proxy   === true || data.threat?.is_anonymous === true;
