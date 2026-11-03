@@ -54,7 +54,8 @@ const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGEN
   .map((k) => k?.trim()).filter(usable))];
 
 const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/$/, "");
-const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,mistral-large-2512").split(",").map((s) => s.trim()).filter(Boolean);
+// Large 3 (mistral-large-2512) is refused on the free plan ("not available in your subscription tier").
+const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,codestral-latest").split(",").map((s) => s.trim()).filter(Boolean);
 const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY.trim() : "";
 
 /** Mistral's free plan: about one request per second… */
@@ -201,6 +202,9 @@ export interface UsageSink {
   hincrby(key: string, field: string, by: number): Promise<unknown>;
   hset(key: string, field: string, value: string): Promise<unknown>;
   expire(key: string, seconds: number): Promise<unknown>;
+  /** With these two, models taken out of the configuration also leave the chat's list. */
+  hkeys?(key: string): Promise<string[]>;
+  hdel?(key: string, ...fields: string[]): Promise<unknown>;
 }
 export type CoolKind = "rate_limited" | "out_of_quota" | "refused" | "unavailable" | "error";
 export interface LaneState {
@@ -224,6 +228,15 @@ function publishLane(lane: Lane, kind: CoolKind | null, reason: string): void {
 export function setUsageSink(sink: UsageSink | null): void {
   usageSink = sink;
   for (const lane of LANES) publishLane(lane, null, "");
+  // A model removed from .env would otherwise stay in the AI models circle for good.
+  if (!sink?.hkeys || !sink.hdel) return;
+  const configured = new Set(LANES.map((l) => l.id));
+  void sink.hkeys("ai_lanes")
+    .then((ids) => {
+      const gone = ids.filter((id) => !configured.has(id));
+      return gone.length && sink.hdel ? sink.hdel("ai_lanes", ...gone) : undefined;
+    })
+    .catch(() => undefined);
 }
 
 function recordUsage(lane: Lane, d: { req?: number; tokensIn?: number; tokensOut?: number; fail?: number }): void {
