@@ -30,6 +30,7 @@ import { createLogger } from "../logger.js";
 import { chat, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
+import { taskMemory, taskMemoryPrompt, continuesAutomatically, type PartOutcome } from "./taskMemory.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
@@ -37,6 +38,8 @@ import { runCheckups } from "./checkup.js";
 const log = createLogger("agent");
 
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
+/** How many parts of MAX_STEPS one request may take before it asks the owner to continue. */
+const AUTO_PARTS = Number(process.env.AGENT_AUTO_PARTS ?? 4);
 const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 3000);
 const AUTOFIX_PER_DAY = 3;
 
@@ -165,26 +168,33 @@ export class Agent {
     const abort = new AbortController();
     this.active.set(uuid, abort);
     try {
-      do {
+      // A long request runs in parts of MAX_STEPS. When a part runs out of steps
+      // the next one starts by itself, so the owner doesn't have to type "continue".
+      let part = 0;
+      for (;;) {
         this.again.delete(uuid);
-        await this.runOnce(uuid, abort.signal);
-      } while (this.again.has(uuid) && !abort.signal.aborted);
+        const outcome = await this.runOnce(uuid, abort.signal, part);
+        if (continuesAutomatically(outcome, part, AUTO_PARTS, abort.signal.aborted)) { part++; continue; }
+        part = 0;
+        if (!this.again.has(uuid) || abort.signal.aborted) break;
+      }
     } finally {
       this.active.delete(uuid);
       await this.progress(uuid, null);
     }
   }
 
-  private async runOnce(uuid: string, signal: AbortSignal): Promise<void> {
+  private async runOnce(uuid: string, signal: AbortSignal, part: number): Promise<PartOutcome> {
     const scope = await this.scopeFor(uuid);
-    if (!scope) return;
+    if (!scope) return "done";
     const automated = await this.startedAutomatically(scope.thread);
     await scope.setState("working");
-    let finalState: "idle" | "waiting" = "idle";
+    let finalState: "idle" | "waiting" | "working" = "idle";
+    let outcome: PartOutcome = "limit";
 
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
-        if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); break; }
+        if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); outcome = "done"; break; }
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
 
         let message: ChatMessage | undefined;
@@ -201,7 +211,7 @@ export class Agent {
         }
         const calls = message.tool_calls ?? [];
         await this.add(scope, "assistant", message.content ?? "", "text", calls.length ? { toolCalls: calls } : undefined);
-        if (!calls.length) break;
+        if (!calls.length) { outcome = "done"; break; }
 
         let pause = false;
         for (const call of calls) {
@@ -216,18 +226,26 @@ export class Agent {
           });
           if (result.pause) pause = true;
         }
-        if (pause) { finalState = "waiting"; break; }
-        if (step === MAX_STEPS - 1) {
-          await this.add(scope, "assistant", "I've used my step limit for this task. Send “continue” and I'll pick up where I left off.", "event");
+        if (pause) { finalState = "waiting"; outcome = "waiting"; break; }
+      }
+      if (outcome === "limit") {
+        if (continuesAutomatically("limit", part, AUTO_PARTS, signal.aborted)) {
+          // Keep the state "working" so the chat doesn't flicker to idle between parts.
+          finalState = "working";
+          await this.add(scope, "assistant", `Still on it — part ${part + 2} of ${AUTO_PARTS} of this request. Continuing.`, "event");
+        } else {
+          await this.add(scope, "assistant", "I've used my step limit for this request. Send “continue” and I'll pick up from the notes on this request.", "event");
         }
       }
     } catch (err) {
       const text = err instanceof AiUnavailableError ? err.message : `Something went wrong: ${(err as Error).message}`;
       if (!(err instanceof AiUnavailableError)) log.error({ err, uuid }, "Agent run failed");
+      outcome = "done"; // an error is not a step limit: don't restart the request by itself
       await this.add(scope, "assistant", text, "error");
     } finally {
       await scope.setState(finalState);
     }
+    return outcome;
   }
 
   /**
@@ -249,10 +267,16 @@ export class Agent {
    */
   private async buildMessages(scope: Scope, historyTokens: number): Promise<ChatMessage[]> {
     const [rowsDesc, system] = await Promise.all([
-      this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(80),
+      // More than the history window: the task memory looks further back for the owner's request.
+      this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(300),
       scope.system(),
     ]);
-    const rows = rowsDesc.reverse().filter((r) => r.kind !== "error");
+    const stored = rowsDesc.reverse().filter((r) => r.kind !== "error");
+    const memory = taskMemory(stored.map((r) => {
+      const d = (r.data ?? {}) as { summary?: string; ok?: boolean };
+      return { role: r.role, kind: r.kind, content: r.content, summary: d.summary, ok: d.ok };
+    }));
+    const rows = stored.slice(-80);
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
 
     const toMsg = (r: Row, full: boolean): ChatMessage => {
@@ -291,7 +315,8 @@ export class Agent {
     if (cut > 0) { while (start < picked.length && picked[start]!.role !== "user") start++; }
     const history = pairToolCalls(picked.slice(start));
 
-    return [{ role: "system", content: system }, ...history];
+    // The request and finished steps are part of the system prompt, which is never cut to fit the budget.
+    return [{ role: "system", content: system + taskMemoryPrompt(memory) }, ...history];
   }
 
   // ── stabilizer ─────────────────────────────────────────────────────────────
