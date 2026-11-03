@@ -14,6 +14,9 @@ export interface LogLine { ts: number; stream: string; line: string }
 export const PLATFORM_RESTART_LINE = "■ KojyAI is restarting (platform update) — the bot starts again when it's back";
 /** Printed by launcher.py each time the Highrise SDK (re)connects to the room. */
 export const CONNECTED_PREFIX = "[kojy] Connected to Highrise";
+/** Printed by launcher.py after connecting: whether the bot is a moderator in its room. */
+export const ROOM_RIGHTS_PREFIX = "[kojy] Room rights:";
+export const NOT_MODERATOR_MARK = "NOT a moderator";
 
 export type BotEventKind = "platform_restart" | "highrise_reconnect" | "exit" | "watchdog" | "stop";
 export interface BotEvent {
@@ -44,7 +47,8 @@ function classify(l: LogLine): Kind {
   if (l.stream === "stdin") return "system";
   if (t.startsWith(CONNECTED_PREFIX)) return "connected";
   if (t.startsWith("[kojy] Starting")) return "launching";
-  if (t.startsWith("[kojy] Watchdog")) return "error_output"; // why the watchdog is about to restart it
+  if (t.startsWith("[kojy] Watchdog:")) return "error_output"; // why the watchdog is about to restart it
+  if (t.startsWith("[kojy] ")) return "system"; // the launcher's other notes (room rights, checks on)
   if (/closed by server, reconnecting/.test(t)) return "hr_closed";
   if (t === "ERROR: reconnecting...") return "hr_reconnecting";
   if (t.startsWith("ERROR: ") || t === "Websocket error, exiting.") return "hr_error";
@@ -202,6 +206,8 @@ export function connectionReport(lines: LogLine[], now: number): string {
     `${n("highrise_reconnect")} Highrise reconnect(s) (Highrise closes connections now and then; the SDK reconnects by itself), ` +
     `${n("exit")} exit(s) of the bot itself, ${n("watchdog")} watchdog restart(s) (frozen code, or not answering in the room), ` +
     `${n("stop")} stop/restart(s) from KojyAI.`);
+  const rights = [...lines].reverse().find((l) => l.line.startsWith(ROOM_RIGHTS_PREFIX));
+  if (rights) out.push(`Room rights (${stamp(rights.ts)}): ${rights.line.slice(ROOM_RIGHTS_PREFIX.length).trim()}`);
   const recent = events.slice(-8);
   if (recent.length) {
     out.push("Recent events (newest last):");

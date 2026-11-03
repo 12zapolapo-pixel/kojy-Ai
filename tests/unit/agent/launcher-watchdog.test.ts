@@ -34,8 +34,18 @@ class Answer:
     content = []
 class Socket:
     closed = False
+class Rights:
+    def __init__(self, moderator):
+        self.moderator = moderator
+class Refused:
+    message = "not allowed"
 class Chat:
     ws = Socket()
+    async def get_room_privilege(self, user_id):
+        mode = os.environ.get("ROOM_RIGHTS", "mod")
+        if mode == "error":
+            return Refused()
+        return Rights(mode == "mod" and user_id == "bot-1")
     async def get_room_users(self):
         mode = os.environ.get("ROOM_MODE", "ok")
         if mode == "silent":
@@ -43,6 +53,7 @@ class Chat:
         return Answer()
 class Meta:
     connection_id = "test-connection"
+    user_id = "bot-1"
 async def main(definitions):
     bot = definitions[0].bot
     if os.environ.get("ROOM_MODE") != "never-connects":
@@ -117,4 +128,15 @@ describe("bot watchdog", () => {
     expect(r.out).not.toContain("Freeze and room checks on");
     expect(r.err).not.toContain("BotFrozenError");
   }, 8_000);
+
+  test("after connecting it says whether the bot is a moderator in its room", async () => {
+    const not = await launch("testbot:FineBot", { ROOM_RIGHTS: "not" }, 3_000);
+    expect(not.out).toContain("[kojy] Room rights: the bot is NOT a moderator in this room — commands that move, kick, mute or ban people won't work");
+    const mod = await launch("testbot:FineBot", { ROOM_RIGHTS: "mod" }, 3_000);
+    expect(mod.out).toContain("[kojy] Room rights: the bot is a moderator here.");
+    const err = await launch("testbot:FineBot", { ROOM_RIGHTS: "error" }, 3_000);
+    expect(err.out).toContain("[kojy] Room rights: couldn't check (not allowed)");
+    const testRoom = await launch("testbot:FineBot", { ROOM_RIGHTS: "not", KOJY_WATCHDOG: "off" }, 3_000);
+    expect(testRoom.out).not.toContain("Room rights");
+  }, 20_000);
 });

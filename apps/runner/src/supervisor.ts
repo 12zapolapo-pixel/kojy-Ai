@@ -17,14 +17,14 @@ import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, renameSync, appendFileSync, rmSync } from "node:fs";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Database } from "@kojyai/db";
 import { botProjects, projectSecrets } from "@kojyai/db/schema";
 import { decryptApiKey } from "@kojyai/shared/crypto";
 import { ActivityRecorder, notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger } from "./logger.js";
 import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./sandbox.js";
-import { PLATFORM_RESTART_LINE } from "./agent/botHealth.js";
+import { NOT_MODERATOR_MARK, PLATFORM_RESTART_LINE, ROOM_RIGHTS_PREFIX } from "./agent/botHealth.js";
 
 const log = createLogger("supervisor");
 
@@ -32,6 +32,8 @@ export const PROJECTS_DIR = process.env.PROJECTS_DIR ?? "/app/projects";
 export const VENVS_DIR = process.env.VENVS_DIR ?? "/app/venvs";
 const PYTHON_BIN  = process.env.PYTHON_BIN ?? "python3";
 export const LAUNCHER = path.join(path.dirname(new URL(import.meta.url).pathname), "launcher.py");
+/** check_code's loader check (see botcheck.py). */
+export const BOTCHECK = path.join(path.dirname(new URL(import.meta.url).pathname), "botcheck.py");
 const LOG_DIR     = path.join(PROJECTS_DIR, ".logs");
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
 const RESTART_DELAYS_S = [5, 15, 30, 60];
@@ -39,6 +41,7 @@ const RESTART_DELAYS_S = [5, 15, 30, 60];
 const START_RETRY_DELAYS_S = [30, 120, 600, 1800];
 const HEALTHY_RUN_MS = 120_000;
 const STOP_GRACE_MS = 10_000;
+const NO_MODERATOR_STATUS = "Not a moderator in its room: commands that move, kick, mute or ban people won't work";
 
 /** Always installed next to the project's own requirements.txt. */
 const BASE_REQUIREMENTS = ["highrise-bot-sdk==25.1.0", "setuptools<82"];
@@ -83,6 +86,8 @@ export class Supervisor {
   private activity: ActivityRecorder;
   /** Crash streak at which the owner was last told, so they hear once per streak. */
   private alerted = new Map<string, number>();
+  /** Bots whose owner was told the bot isn't a moderator in its room (once per runner run). */
+  private rightsWarned = new Set<string>();
 
   constructor(private db: Database) {
     this.activity = new ActivityRecorder(db, 5000, (err) => log.warn({ err }, "Could not save bot activity"));
@@ -375,6 +380,26 @@ export class Supervisor {
     });
   }
 
+  /**
+   * The launcher checked the bot's rights in its room. Without moderator
+   * rights Highrise refuses teleports, kicks, mutes and bans: say so on the
+   * bot's page and tell the owner (once), since no code change can fix it.
+   */
+  private onRoomRights(uuid: string, line: string): void {
+    const run = this.procs.get(uuid);
+    if (!run) return;
+    const missing = line.includes(NOT_MODERATOR_MARK);
+    void this.db.update(botProjects).set({ statusMessage: missing ? NO_MODERATOR_STATUS : null })
+      .where(and(eq(botProjects.uuid, uuid), eq(botProjects.status, "running")))
+      .catch((err: unknown) => log.warn({ err, uuid }, "Could not save the room-rights note"));
+    if (!missing) { this.rightsWarned.delete(uuid); return; }
+    if (this.rightsWarned.has(uuid)) return;
+    this.rightsWarned.add(uuid);
+    void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} isn't a moderator in its room`,
+      "Commands that move, kick, mute or ban people (like !tp and !bring) can't work until you make the bot a moderator in the Highrise room's settings.",
+      `/studio/p/${uuid}`);
+  }
+
   // ── console + status ───────────────────────────────────────────────────────
 
   private pipe(uuid: string, child: ChildProcess): void {
@@ -384,7 +409,10 @@ export class Supervisor {
       src?.on("data", (chunk: string) => {
         const lines = (partial + chunk).split("\n");
         partial = lines.pop() ?? "";
-        for (const line of lines) this.console(uuid, stream, line);
+        for (const line of lines) {
+          this.console(uuid, stream, line);
+          if (stream === "stdout" && line.startsWith(ROOM_RIGHTS_PREFIX)) this.onRoomRights(uuid, line);
+        }
       });
       src?.on("end", () => { if (partial) this.console(uuid, stream, partial); });
     }

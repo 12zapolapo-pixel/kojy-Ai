@@ -81,21 +81,56 @@ def install_activity_reporter(bot) -> None:
 
 
 CONNECTED_PREFIX = "[kojy] Connected to Highrise"
+ROOM_RIGHTS_PREFIX = "[kojy] Room rights:"
+NOT_MODERATOR = "the bot is NOT a moderator in this room"
+
+# Fire-and-forget tasks are kept here until they finish (asyncio only holds weak references).
+_background: set = set()
 
 
-def announce_connections(bot) -> None:
+async def report_room_rights(bot, session_metadata) -> None:
+    """Say whether the bot is a moderator in its room.
+
+    Without moderator rights Highrise refuses teleports, kicks, mutes and bans,
+    so commands like !tp fail however good the code is. The runner shows this
+    line on the bot's page and tells the owner.
+    """
+    bot_id = str(getattr(session_metadata, "user_id", "") or "")
+    if not bot_id:
+        return
+    try:
+        rights = await asyncio.wait_for(bot.highrise.get_room_privilege(bot_id), timeout=20)
+    except Exception as error:
+        print(f"{ROOM_RIGHTS_PREFIX} couldn't check ({error})", flush=True)
+        return
+    moderator = getattr(rights, "moderator", None)
+    if moderator is None:  # Highrise answered with an error
+        print(f"{ROOM_RIGHTS_PREFIX} couldn't check ({getattr(rights, 'message', rights)})", flush=True)
+    elif moderator:
+        print(f"{ROOM_RIGHTS_PREFIX} the bot is a moderator here.", flush=True)
+    else:
+        print(f"{ROOM_RIGHTS_PREFIX} {NOT_MODERATOR} — commands that move, kick, mute or ban people "
+              "won't work until the room owner makes it a moderator.", flush=True)
+
+
+def announce_connections(bot, check_rights: bool = True) -> None:
     """Print a line each time the SDK (re)connects to the room.
 
     The SDK calls bot.on_start after every successful (re)connect, so this
     line in the console marks when the bot was really in the room — the
-    runner's log summary for the owner and the coder AI reads it. Wrapped on
-    the instance; the bot's own on_start always runs.
+    runner's log summary for the owner and the coder AI reads it. Then, in the
+    background, the bot's room rights are checked. Wrapped on the instance;
+    the bot's own on_start always runs.
     """
     original = bot.on_start
 
     async def on_start(session_metadata):
         connection = getattr(session_metadata, "connection_id", None)
         print(f"{CONNECTED_PREFIX} (connection {connection})" if connection else CONNECTED_PREFIX, flush=True)
+        if check_rights:
+            task = asyncio.get_running_loop().create_task(report_room_rights(bot, session_metadata))
+            _background.add(task)
+            task.add_done_callback(_background.discard)
         return await original(session_metadata)
 
     bot.on_start = on_start
@@ -258,8 +293,10 @@ def main() -> None:
 
     bot = bot_class()
     install_activity_reporter(bot)
-    announce_connections(bot)
-    watchdog = None if os.environ.get("KOJY_WATCHDOG", "on").strip().lower() == "off" else Watchdog(bot)
+    # The fake test room turns these off: it's a short run with no real room behind it.
+    real_room = os.environ.get("KOJY_WATCHDOG", "on").strip().lower() != "off"
+    announce_connections(bot, check_rights=real_room)
+    watchdog = Watchdog(bot) if real_room else None
     print(f"[kojy] Starting {entry} in room {room_id}", flush=True)
 
     async def run() -> None:

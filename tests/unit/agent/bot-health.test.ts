@@ -118,6 +118,18 @@ describe("connection summary", () => {
     expect(connectionReport(lines, at("13:01:00"))).toMatch(/2 watchdog restart\(s\)/);
   });
 
+  it("shows the bot's room rights, and the launcher's notes don't count as being back in the room", () => {
+    const lines: LogLine[] = [
+      L("12:00:00", "system", "▶ Starting a:B"),
+      L("12:00:01", "stdout", "[kojy] Freeze and room checks on: the code is checked every 5s (restart when frozen for 60s), the room every 60s"),
+      L("12:00:01", "stdout", `${CONNECTED_PREFIX}`),
+      L("12:00:02", "stdout", "[kojy] Room rights: the bot is NOT a moderator in this room — commands that move, kick, mute or ban people won't work until the room owner makes it a moderator."),
+    ];
+    const report = connectionReport(lines, at("12:10:00"));
+    expect(report).toContain("Room rights (11-03 12:00:02): the bot is NOT a moderator in this room");
+    expect(connectionEvents(lines).since).toBe(at("12:00:01"));
+  });
+
   it("a stop and start from KojyAI is its own kind of event", () => {
     const lines: LogLine[] = [
       L("09:00:00", "system", "▶ Starting a:B"),

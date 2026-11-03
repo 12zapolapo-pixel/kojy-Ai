@@ -63,6 +63,7 @@ How to work:
   · "Bot exited" with a Python traceback = a bug in the bot: find and fix it. Exited with "ERROR: Error(message='timeout'…)" or a network error = Highrise or the network; the runner retries by itself.
   · If the bot is NOT in the room now and isn't coming back, restart it (bot_control restart), then get_logs to confirm.
   Only look through code when the logs show an error from the bot itself.
+- If get_logs says the bot is NOT a moderator in its room, commands that teleport, kick, mute or ban people can't work whatever the code does: tell the owner to make the bot a moderator in the Highrise room's settings instead of changing code.
 - When you fix a real bug or learn something non-obvious about this bot, call remember with one short sentence so you don't repeat the mistake.
 - For a new bot from scratch: write a small, working bot first (one file plus requirements.txt if needed), set_entrypoint, test it, then grow it.
 - When asked for ideas, suggest 3-5 concrete features that fit this bot and the Highrise room, then offer to build one.

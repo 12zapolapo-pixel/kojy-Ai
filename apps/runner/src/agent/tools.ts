@@ -18,7 +18,7 @@ import {
   listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
-import { LAUNCHER } from "../supervisor.js";
+import { BOTCHECK, LAUNCHER } from "../supervisor.js";
 import { runRoomTest } from "./mockRoom.js";
 import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
@@ -85,6 +85,18 @@ export const TOOL_SPECS: ToolSpec[] = [
 ];
 
 const TEXT_EXT = /\.(py|txt|md|json|ya?ml|toml|ini|cfg|env|example|js|ts|html|css|sh)$|(^|\/)(Dockerfile|Procfile|requirements[^/]*)$/i;
+/**
+ * botcheck.py's "HIDDEN name|placeholder class|real class" lines, explained:
+ * an empty \`...\` method earlier in the class bases replaces the real one.
+ */
+export function hiddenMethods(out: string): string[] {
+  return out.split("\n").filter((l) => l.startsWith("HIDDEN ")).map((l) => {
+    const [name, placeholder, real] = l.slice(7).trim().split("|");
+    return `- ${name}: the empty placeholder in ${placeholder} is used instead of the real ${name} in ${real}. ` +
+      `Remove the placeholder, or list ${placeholder} after ${real} in the bot class's bases.`;
+  });
+}
+
 const clip = (s: string, max = 6000) => (s.length > max ? `${s.slice(0, max)}\n… (${s.length - max} more characters)` : s);
 
 function runCapture(uid: number, cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; out: string }> {
@@ -270,11 +282,17 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           if (compile.code !== 0) return { ok: false, output: clip(`Syntax errors:\n${compile.out}`), summary: "Code check: syntax errors" };
           const entry = ctx.project.entrypoint;
           if (!entry) return { ok: true, output: "All files compile. No entrypoint set yet (use set_entrypoint).", summary: "Code check: compiles (no entrypoint yet)" };
-          const [mod, cls] = entry.split(":");
-          const probe = `import sys; sys.path.insert(0, "."); import importlib; m = importlib.import_module(${JSON.stringify(mod)}); c = getattr(m, ${JSON.stringify(cls)}); from highrise import BaseBot; assert issubclass(c, BaseBot), "${cls} is not a BaseBot"; c(); print("IMPORT_OK")`;
-          const imp = await runCapture(uid, python, ["-c", probe], work, env, 60_000);
-          const ok = imp.out.includes("IMPORT_OK");
-          return { ok, output: clip(ok ? `All files compile and ${entry} loads.` : `Importing ${entry} failed:\n${imp.out}`), summary: ok ? "Code check passed" : "Code check: the bot fails to load" };
+          const imp = await runCapture(uid, python, [BOTCHECK, entry], work, env, 60_000);
+          if (!imp.out.includes("IMPORT_OK")) return { ok: false, output: clip(`Importing ${entry} failed:\n${imp.out}`), summary: "Code check: the bot fails to load" };
+          const hidden = hiddenMethods(imp.out);
+          if (hidden.length) {
+            return {
+              ok: false,
+              output: clip(`All files compile and ${entry} loads, but these methods do nothing when the bot runs:\n${hidden.join("\n")}`),
+              summary: `Code check: ${hidden.length} placeholder method(s) hide real ones`,
+            };
+          }
+          return { ok: true, output: `All files compile and ${entry} loads.`, summary: "Code check passed" };
         } finally {
           rmSync(work, { recursive: true, force: true });
         }
