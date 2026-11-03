@@ -98,6 +98,7 @@ describe("connection summary", () => {
   it("restarts by the launcher's watchdog are told apart from crashes", () => {
     const lines: LogLine[] = [
       L("12:00:00", "system", "▶ Starting a:B"),
+      L("12:00:00", "stdout", "[kojy] Freeze and room checks on: the code is checked every 5s (restart when frozen for 60s), the room every 60s"),
       L("12:00:01", "stdout", `${CONNECTED_PREFIX}`),
       L("12:05:00", "stderr", "Traceback (most recent call last):"),
       L("12:05:00", "stderr", '  File "/app/projects/u/bot.py", line 12, in wait_for_api'),

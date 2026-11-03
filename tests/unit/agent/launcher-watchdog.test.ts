@@ -106,6 +106,7 @@ describe("bot watchdog", () => {
     const r = await launch("testbot:FineBot", { KOJY_FREEZE_SECONDS: "2", KOJY_ROOM_CHECK_SECONDS: "1" }, 6_000);
     expect(r.code).toBeNull(); // still running when the test stopped it
     expect(r.out).toContain("hello room");
+    expect(r.out).toContain("[kojy] Freeze and room checks on: the code is checked every 0.5s (restart when frozen for 2s), the room every 1s");
     expect(r.out).not.toContain("Watchdog");
     expect(r.err).not.toContain("BotFrozenError");
   }, 10_000);
@@ -113,6 +114,7 @@ describe("bot watchdog", () => {
   test("KOJY_WATCHDOG=off (the test room) disables it", async () => {
     const r = await launch("testbot:FrozenBot", { KOJY_WATCHDOG: "off", KOJY_FREEZE_SECONDS: "1" }, 4_000);
     expect(r.code).toBeNull();
+    expect(r.out).not.toContain("Freeze and room checks on");
     expect(r.err).not.toContain("BotFrozenError");
   }, 8_000);
 });

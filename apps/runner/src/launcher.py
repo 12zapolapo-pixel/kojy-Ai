@@ -146,6 +146,11 @@ class Watchdog:
         self.loop = loop
         threading.Thread(target=self._watch_code, name="kojy-watchdog", daemon=True).start()
         self.room_task = loop.create_task(self._watch_room())  # kept: a task nobody holds can be collected
+        print(
+            f"[kojy] Freeze and room checks on: the code is checked every {self.check_every:g}s "
+            f"(restart when frozen for {self.freeze_after:g}s), the room every {self.room_every:g}s",
+            flush=True,
+        )
 
     # ── frozen code ──────────────────────────────────────────────────────────
 
