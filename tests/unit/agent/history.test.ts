@@ -21,7 +21,8 @@ describe("coder AI history", () => {
   });
 });
 
-import { isNetworkFailure, supersededResults } from "../../../apps/runner/src/agent/agent.js";
+import { supersededResults } from "../../../apps/runner/src/agent/agent.js";
+import { isNetworkFailure } from "../../../apps/runner/src/agent/autoFix.js";
 
 describe("reading the same thing twice (2026-11-03: Kojy re-read bot.py in a loop)", () => {
   const callRow = (id: number, callId: string, name: string, args: string) =>

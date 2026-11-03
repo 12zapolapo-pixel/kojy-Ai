@@ -15,7 +15,7 @@ export const PLATFORM_RESTART_LINE = "■ KojyAI is restarting (platform update)
 /** Printed by launcher.py each time the Highrise SDK (re)connects to the room. */
 export const CONNECTED_PREFIX = "[kojy] Connected to Highrise";
 
-export type BotEventKind = "platform_restart" | "highrise_reconnect" | "exit" | "stop";
+export type BotEventKind = "platform_restart" | "highrise_reconnect" | "exit" | "watchdog" | "stop";
 export interface BotEvent {
   ts: number;
   kind: BotEventKind;
@@ -44,6 +44,7 @@ function classify(l: LogLine): Kind {
   if (l.stream === "stdin") return "system";
   if (t.startsWith(CONNECTED_PREFIX)) return "connected";
   if (t.startsWith("[kojy] Starting")) return "launching";
+  if (t.startsWith("[kojy] Watchdog")) return "error_output"; // why the watchdog is about to restart it
   if (/closed by server, reconnecting/.test(t)) return "hr_closed";
   if (t === "ERROR: reconnecting...") return "hr_reconnecting";
   if (t.startsWith("ERROR: ") || t === "Websocket error, exiting.") return "hr_error";
@@ -127,7 +128,9 @@ export function connectionEvents(lines: LogLine[]): {
         break;
       case "exit": {
         const what = l.line.replace(/^✖\s*/, "").replace(/\s+—.*$/, "");
-        push({ ts: l.ts, kind: "exit", detail: `${what}${lastError ? ` — last error: ${lastError.slice(0, 160)}` : ""}`, backAfterS: null });
+        // The launcher's watchdog ended it: frozen code, or not really in the room.
+        const watchdog = /^(BotFrozenError|\[kojy\] Watchdog:)/.test(lastError);
+        push({ ts: l.ts, kind: watchdog ? "watchdog" : "exit", detail: `${what}${lastError ? ` — last error: ${lastError.slice(0, 160)}` : ""}`, backAfterS: null });
         set("offline", l.ts);
         break;
       }
@@ -175,6 +178,7 @@ const LABEL: Record<BotEventKind, string> = {
   platform_restart: "KojyAI restart",
   highrise_reconnect: "Highrise reconnect",
   exit: "Bot exited",
+  watchdog: "Watchdog restart",
   stop: "Stopped/restarted from KojyAI",
 };
 
@@ -196,7 +200,8 @@ export function connectionReport(lines: LogLine[], now: number): string {
   const n = (k: BotEventKind) => day.filter((e) => e.kind === k).length;
   out.push(`Last 24 h: ${n("platform_restart")} KojyAI restart(s) (platform updates; bots come back by themselves), ` +
     `${n("highrise_reconnect")} Highrise reconnect(s) (Highrise closes connections now and then; the SDK reconnects by itself), ` +
-    `${n("exit")} exit(s) of the bot itself, ${n("stop")} stop/restart(s) from KojyAI.`);
+    `${n("exit")} exit(s) of the bot itself, ${n("watchdog")} watchdog restart(s) (frozen code, or not answering in the room), ` +
+    `${n("stop")} stop/restart(s) from KojyAI.`);
   const recent = events.slice(-8);
   if (recent.length) {
     out.push("Recent events (newest last):");

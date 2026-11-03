@@ -115,6 +115,7 @@ export async function runRoomTest(opts: RoomTestOptions): Promise<RoomTestResult
       HIGHRISE_ROOM_ID: opts.env.HIGHRISE_ROOM_ID ?? "test-room",
       HIGHRISE_BOT_TOKEN: opts.env.HIGHRISE_BOT_TOKEN ?? "test-token",
       PYTHONUNBUFFERED: "1",
+      KOJY_WATCHDOG: "off", // a short test run; the fake room doesn't answer room checks
     },
     stdio: ["ignore", "pipe", "pipe"],
     });

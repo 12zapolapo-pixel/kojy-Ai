@@ -95,6 +95,28 @@ describe("connection summary", () => {
     expect(state).toBe("connected");
   });
 
+  it("restarts by the launcher's watchdog are told apart from crashes", () => {
+    const lines: LogLine[] = [
+      L("12:00:00", "system", "▶ Starting a:B"),
+      L("12:00:01", "stdout", `${CONNECTED_PREFIX}`),
+      L("12:05:00", "stderr", "Traceback (most recent call last):"),
+      L("12:05:00", "stderr", '  File "/app/projects/u/bot.py", line 12, in wait_for_api'),
+      L("12:05:00", "stderr", "    time.sleep(1000)"),
+      L("12:05:00", "stderr", "BotFrozenError: the bot's code didn't hand control back for 61s, so the bot couldn't answer anyone in the room."),
+      L("12:05:00", "system", "✖ Bot exited (code 3) after 300s — restarting in 5s"),
+      L("12:05:05", "system", "▶ Starting a:B"),
+      L("12:05:06", "stdout", `${CONNECTED_PREFIX}`),
+      L("13:00:00", "stdout", "[kojy] Watchdog: Highrise didn't answer 3 room checks in a row, so the bot isn't really in the room — restarting the bot."),
+      L("13:00:00", "system", "✖ Bot exited (code 4) after 3295s — restarting in 5s"),
+      L("13:00:05", "system", "▶ Starting a:B"),
+      L("13:00:07", "stdout", `${CONNECTED_PREFIX}`),
+    ];
+    const { events } = connectionEvents(lines);
+    expect(events.map((e) => [e.kind, e.backAfterS])).toEqual([["watchdog", 6], ["watchdog", 7]]);
+    expect(events[0]!.detail).toContain("BotFrozenError");
+    expect(connectionReport(lines, at("13:01:00"))).toMatch(/2 watchdog restart\(s\)/);
+  });
+
   it("a stop and start from KojyAI is its own kind of event", () => {
     const lines: LogLine[] = [
       L("09:00:00", "system", "▶ Starting a:B"),

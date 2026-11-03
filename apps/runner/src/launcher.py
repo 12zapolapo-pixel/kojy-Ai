@@ -17,6 +17,9 @@ import importlib
 import json
 import os
 import sys
+import threading
+import time
+import traceback
 
 
 def fail(message: str) -> None:
@@ -98,6 +101,137 @@ def announce_connections(bot) -> None:
     bot.on_start = on_start
 
 
+FROZEN_EXIT = 3
+NOT_IN_ROOM_EXIT = 4
+
+
+def env_seconds(name: str, default: float) -> float:
+    try:
+        return max(1.0, float(os.environ.get(name, default)))
+    except ValueError:
+        return float(default)
+
+
+class Watchdog:
+    """Keeps checking that the bot still works, and gets it restarted when not.
+
+    Frozen code: every few seconds a thread asks the bot's event loop to run
+    a tiny callback. Code that blocks (time.sleep, a web request without
+    await, an endless loop) stops the loop, so the callback never runs. After
+    KOJY_FREEZE_SECONDS the thread prints where the code is stuck — as a
+    Python traceback, so the runner starts Kojy on it — and exits; the runner
+    then starts the bot again.
+
+    Not in the room: every KOJY_ROOM_CHECK_SECONDS the bot asks Highrise for
+    the room's users. No answer three times in a row, or no connection at all
+    for KOJY_OFFLINE_SECONDS, means it isn't really in the room any more: it
+    exits and the runner starts it again.
+
+    KOJY_WATCHDOG=off turns it off (the fake test room does).
+    """
+
+    ROOM_FAILURES_ALLOWED = 3
+
+    def __init__(self, bot) -> None:
+        self.bot = bot
+        self.freeze_after = env_seconds("KOJY_FREEZE_SECONDS", 60)
+        self.check_every = min(5.0, self.freeze_after / 4)
+        self.room_every = env_seconds("KOJY_ROOM_CHECK_SECONDS", 60)
+        self.offline_after = env_seconds("KOJY_OFFLINE_SECONDS", 300)
+        self.beat = time.monotonic()
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.room_task: asyncio.Task | None = None
+
+    def start(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        threading.Thread(target=self._watch_code, name="kojy-watchdog", daemon=True).start()
+        self.room_task = loop.create_task(self._watch_room())  # kept: a task nobody holds can be collected
+
+    # ── frozen code ──────────────────────────────────────────────────────────
+
+    def _alive(self) -> None:
+        self.beat = time.monotonic()
+
+    def _watch_code(self) -> None:
+        last = time.monotonic()
+        while True:
+            time.sleep(self.check_every)
+            now = time.monotonic()
+            if now - last > self.check_every * 3:
+                # This thread overslept too: the whole process was paused (the
+                # server swapping hard, a suspended machine). Not the bot's fault.
+                self.beat = now
+            last = now
+            try:
+                self.loop.call_soon_threadsafe(self._alive)
+            except RuntimeError:
+                return  # the loop has closed: the bot is exiting anyway
+            stuck = now - self.beat
+            if stuck >= self.freeze_after:
+                self._report_freeze(stuck)
+                os._exit(FROZEN_EXIT)
+
+    def _report_freeze(self, stuck: float) -> None:
+        frame = sys._current_frames().get(threading.main_thread().ident)
+        lines = ["Traceback (most recent call last):\n"]
+        if frame is not None:
+            lines += traceback.format_stack(frame, limit=30)
+        lines.append(
+            f"BotFrozenError: the bot's code didn't hand control back for {int(stuck)}s, so the bot couldn't "
+            "answer anyone in the room. It was stuck at the line above (a blocking call such as time.sleep "
+            "or a web request without await, or an endless loop). The watchdog restarted it.\n"
+        )
+        try:
+            sys.stdout.flush()
+            sys.stderr.write("".join(lines))
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    # ── not in the room ──────────────────────────────────────────────────────
+
+    def _connected(self) -> bool:
+        ws = getattr(getattr(self.bot, "highrise", None), "ws", None)
+        return ws is not None and not getattr(ws, "closed", True)
+
+    async def _room_answers(self) -> bool:
+        try:
+            answer = await asyncio.wait_for(self.bot.highrise.get_room_users(), timeout=20)
+        except Exception:
+            return False
+        return hasattr(answer, "content")  # an Error answer has none
+
+    async def _watch_room(self) -> None:
+        failures = 0
+        offline_since: float | None = None
+        while True:
+            await asyncio.sleep(self.room_every)
+            try:
+                now = time.monotonic()
+                if not self._connected():
+                    # The SDK reconnects by itself; only a long gap needs a fresh start.
+                    if offline_since is None:
+                        offline_since = now
+                    if now - offline_since >= self.offline_after:
+                        self._restart(f"the bot hasn't been connected to Highrise for {int(now - offline_since)}s")
+                    continue
+                offline_since = None
+                failures = 0 if await self._room_answers() else failures + 1
+                if failures >= self.ROOM_FAILURES_ALLOWED:
+                    self._restart(f"Highrise didn't answer {failures} room checks in a row, so the bot isn't really in the room")
+            except Exception as error:  # the watchdog itself must never take the bot down
+                print(f"[kojy] Watchdog check failed: {error}", flush=True)
+
+    @staticmethod
+    def _restart(why: str) -> None:
+        print(f"[kojy] Watchdog: {why} — restarting the bot.", flush=True)
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(NOT_IN_ROOM_EXIT)
+
+
 def main() -> None:
     entry = os.environ.get("KOJY_ENTRY", "").strip()
     room_id = os.environ.get("HIGHRISE_ROOM_ID", "").strip()
@@ -120,8 +254,15 @@ def main() -> None:
     bot = bot_class()
     install_activity_reporter(bot)
     announce_connections(bot)
+    watchdog = None if os.environ.get("KOJY_WATCHDOG", "on").strip().lower() == "off" else Watchdog(bot)
     print(f"[kojy] Starting {entry} in room {room_id}", flush=True)
-    asyncio.run(sdk_main([BotDefinition(bot, room_id, token)]))
+
+    async def run() -> None:
+        if watchdog:
+            watchdog.start(asyncio.get_running_loop())
+        await sdk_main([BotDefinition(bot, room_id, token)])
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

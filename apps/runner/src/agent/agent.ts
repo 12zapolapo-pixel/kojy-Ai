@@ -15,16 +15,18 @@
  * the step limit. Every step is written to project_messages, which is both
  * the chat the page shows and the model's history.
  *
- * Stabilizer: when a bot crashes repeatedly with a Python traceback, the
- * supervisor calls onCrash and (if the project allows auto-fix) the AI is
- * started on the crash by itself — at most 3 times a day per project.
+ * Stabilizer: when a bot crashes with a Python traceback (or the launcher's
+ * watchdog finds its code frozen), the supervisor calls onCrash and, if the
+ * project allows auto-fix, Kojy fixes it by itself right away — edits, tests,
+ * restarts — within the limits in autoFix.ts; at most 3 times a day per project.
  */
 
+import { readFileSync } from "node:fs";
 import { and, desc, eq, gt } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
 import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
-import { listFiles } from "@kojyai/shared/projects";
+import { listFiles, resolveInside } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
 import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
@@ -35,6 +37,7 @@ import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, rec
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
+import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, isNetworkFailure, type AutomatedKind } from "./autoFix.js";
 
 const log = createLogger("agent");
 
@@ -48,19 +51,12 @@ const AUTO_PARTS = Number(process.env.AGENT_AUTO_PARTS ?? 4);
  */
 const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 12000);
 const AUTOFIX_PER_DAY = 3;
+/** Another automatic fix for the same bot waits at least this long after the last one started. */
+const AUTOFIX_GAP_MS = 5 * 60_000;
 /** A request cut off by a runner restart picks up again this long after boot (bots are back by then). */
 const RESUME_DELAY_MS = 20_000;
 /** …if it was still active this recently. */
 const RESUME_WITHIN_MS = 30 * 60_000;
-
-/**
- * The bot's last output before it exited points at the network (DNS, Highrise
- * unreachable, connection reset) rather than its code: nothing to "fix".
- */
-const NETWORK_FAILURE = /ClientConnectorError|ClientConnectionError|ClientOSError|ServerDisconnectedError|ServerTimeoutError|WSServerHandshakeError|ConnectionResetError|ConnectionRefusedError|ConnectionAbortedError|socket\.gaierror|gaierror|TimeoutError|Temporary failure in name resolution|Name or service not known|Network is unreachable|Cannot connect to host/;
-export function isNetworkFailure(tail: string[]): boolean {
-  return tail.filter((l) => l.trim()).slice(-6).some((l) => NETWORK_FAILURE.test(l));
-}
 
 /** Tools that only look at something: an older result is outdated once the same look is repeated. */
 const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat"]);
@@ -103,18 +99,6 @@ export function supersededResults(rows: { id: number; role: string; data: unknow
   }
   return out;
 }
-
-/**
- * V-03: in a run started by a crash or the daily check-up (not by the owner),
- * these tools are refused until the owner approves a plan. They change code,
- * the running bot, secrets, or Kojy's long-term memory (a poisoned "lesson"
- * would outlive the run).
- */
-export const NEEDS_OWNER = new Set(["write_file", "edit_file", "delete_file", "bot_control", "set_entrypoint", "request_secrets", "remember"]);
-const AUTOMATED_KINDS = new Set(["crash", "checkup"]);
-const OWNER_APPROVAL_NEEDED =
-  "Not allowed yet: this run was started by the bot's own output (a crash or the daily check-up), not by the owner. " +
-  "Investigate and test as much as you like, then explain the cause and call propose_plan with the fix. Once the owner approves, you can change files and restart the bot.";
 
 type Row = typeof projectMessages.$inferSelect;
 
@@ -283,7 +267,9 @@ export class Agent {
   private async runOnce(uuid: string, signal: AbortSignal, part: number): Promise<PartOutcome> {
     const scope = await this.scopeFor(uuid);
     if (!scope) return "done";
-    const automated = await this.startedAutomatically(scope.thread);
+    const automated = await this.automatedKind(scope.thread);
+    /** A file's current text, for the crash-fix limits ("" when it doesn't exist). */
+    const currentText = (rel: string) => { try { return readFileSync(resolveInside(uuid, rel), "utf8"); } catch { return ""; } };
     await scope.setState("working");
     let finalState: "idle" | "waiting" | "working" = "idle";
     let outcome: PartOutcome = "limit";
@@ -319,8 +305,9 @@ export class Agent {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* reported below */ }
           await this.progress(uuid, describeCall(call.function.name, args));
-          const result: ToolResult = automated && NEEDS_OWNER.has(call.function.name)
-            ? { ok: false, output: OWNER_APPROVAL_NEEDED, summary: "Needs the owner's approval first" }
+          const refusal = automated ? automaticRefusal(automated, call.function.name, args, currentText) : null;
+          const result: ToolResult = refusal
+            ? { ok: false, output: refusal, summary: automated === "crash" ? "Not allowed in an automatic fix" : "Needs the owner's approval first" }
             : await runTool(call.function.name, args);
           await this.add(scope, "tool", result.output, result.cardKind ?? (result.card ? "secret_request" : "tool"), {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
@@ -358,15 +345,15 @@ export class Agent {
   }
 
   /**
-   * V-03: true when the newest user-role message was written by the platform
-   * because the bot crashed or for the daily check-up — i.e. the run follows
-   * bot output, not something the owner asked for or approved.
+   * V-03: "crash" or "checkup" when the newest user-role message was written by
+   * the platform — the run follows the bot's output, not something the owner
+   * asked for or approved — else null. autoFix.ts says what such a run may do.
    */
-  private async startedAutomatically(thread: string): Promise<boolean> {
+  private async automatedKind(thread: string): Promise<AutomatedKind | null> {
     const [last] = await this.db.select({ kind: projectMessages.kind }).from(projectMessages)
       .where(and(eq(projectMessages.thread, thread), eq(projectMessages.role, "user")))
       .orderBy(desc(projectMessages.id)).limit(1);
-    return !!last && AUTOMATED_KINDS.has(last.kind);
+    return last && AUTOMATED_KINDS.has(last.kind) ? (last.kind as AutomatedKind) : null;
   }
 
   /**
@@ -434,10 +421,11 @@ export class Agent {
   // ── stabilizer ─────────────────────────────────────────────────────────────
 
   private async onCrash(uuid: string, streak: number, tail: string[]): Promise<void> {
-    if (streak < 2 || this.active.has(uuid)) return;
-    // Only code errors: a network blip or Highrise outage isn't something to "fix".
-    const traceback = tail.findIndex((l) => l.includes("Traceback (most recent call last)"));
-    if (traceback < 0 || isNetworkFailure(tail)) return;
+    if (this.active.has(uuid)) return;
+    // Only code errors (a traceback, or code the watchdog caught frozen): a
+    // network blip or Highrise outage isn't something to "fix".
+    const excerpt = crashExcerpt(tail);
+    if (!excerpt || isNetworkFailure(tail)) return;
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (!project?.autoFix || project.desiredState !== "running") return;
     if (!configuredLanes().length) return; // no AI key of any kind
@@ -445,27 +433,35 @@ export class Agent {
     const now = Date.now();
     const recent = (this.autofixLog.get(uuid) ?? []).filter((t) => now - t < 24 * 3600_000);
     if (recent.length >= AUTOFIX_PER_DAY) return;
-    // Don't start a second fix for the same crash while the last one is fresh.
+    // A fix that didn't hold gets another try, but not in a tight loop.
+    const thread = `project:${project.id}`;
     const [last] = await this.db.select({ id: projectMessages.id }).from(projectMessages)
-      .where(and(eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.kind, "crash"), gt(projectMessages.createdAt, new Date(now - 20 * 60_000)))).limit(1);
+      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.kind, "crash"), gt(projectMessages.createdAt, new Date(now - AUTOFIX_GAP_MS)))).limit(1);
     if (last) return;
     recent.push(now);
     this.autofixLog.set(uuid, recent);
 
-    const trace = tail.slice(Math.max(0, traceback - 2)).slice(-40).join("\n");
-    // V-03: the output is the bot's (and so possibly a room visitor's) text —
-    // wrapped as untrusted data, and this run can't change anything until the
-    // owner approves the plan (see NEEDS_OWNER below).
-    await this.add({ thread: `project:${project.id}`, projectId: project.id }, "user",
-      `The bot crashed ${streak} times in a row. Its last output (from the bot, not from the owner):\n${untrusted(trace)}\n\nFind the cause in the code and check it with check_code / test_in_room. Then explain it in one or two sentences and call propose_plan with the fix — files and the bot stay unchanged until the owner approves.`,
+    const frozen = excerpt.includes("BotFrozenError");
+    // V-03: the output is the bot's (and so possibly a room visitor's) text:
+    // only the traceback goes in, wrapped as untrusted data, and autoFix.ts
+    // limits what this run can change.
+    await this.add({ thread, projectId: project.id }, "user",
+      `The bot ${frozen ? "froze" : "crashed"}${streak > 1 ? ` (${streak} times in a row)` : ""}. Its error output (from the bot, not from the owner):\n${untrusted(excerpt)}\n\n` +
+      "Fix it now — the owner wants crashes fixed without waiting for them: find the cause in the code, make the smallest fix, check it with check_code and test_in_room, " +
+      "then restart the bot with bot_control and confirm with get_logs that it's back in the room." +
+      (frozen ? " It froze: the lines above show where its code was stuck. Make that code stop blocking (await asyncio.sleep instead of time.sleep, asyncio.to_thread or a timeout for slow calls, or end the endless loop)." : "") +
+      " Finish with one or two sentences for the owner: what was wrong and what you changed.",
       "crash");
-    log.info({ uuid, streak }, "Auto-fix started for a crashing bot");
+    log.info({ uuid, streak, frozen }, "Auto-fix started");
     void this.run(uuid).then(async () => {
-      const [last] = await this.db.select({ content: projectMessages.content }).from(projectMessages)
-        .where(and(eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.role, "assistant"))).orderBy(desc(projectMessages.id)).limit(1);
-      const summary = last?.content.trim().slice(0, 400) || "Kojy looked into the crash — see the chat.";
-      await notifyUser(this.db, project.ownerId, "bot_error", `Kojy has a fix for ${project.name} — approve it in the chat`, summary, `/studio/p/${uuid}`);
-      void sendAlert(`🛠️ ${project.name} kept crashing — Kojy: ${summary}`);
+      const [entry] = await recentWork(this.db, thread, 1);
+      const what = frozen ? "a freeze" : "a crash";
+      const title = entry?.status === "waiting_for_owner" ? `Kojy needs your OK to fix ${project.name}`
+        : entry?.files.length ? `Kojy fixed ${what} in ${project.name}`
+        : `Kojy looked into ${what} in ${project.name}`;
+      const summary = entry?.summary.trim().slice(0, 400) || "See the bot's chat.";
+      await notifyUser(this.db, project.ownerId, "bot_error", title, summary, `/studio/p/${uuid}`);
+      void sendAlert(`🛠️ ${title}: ${summary}`);
     }).catch((err) => log.warn({ err, uuid }, "Auto-fix follow-up failed"));
   }
 }
