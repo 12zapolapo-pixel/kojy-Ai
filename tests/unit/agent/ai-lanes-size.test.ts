@@ -14,6 +14,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 type MistralMode = "ok" | "chunks" | "thinking-only-with-tools" | "thinking-only" | "quota" | "busy-1s" | "busy-always" | "too-big";
 let mistralMode: MistralMode = "ok";
 let seen: string[] = [];
+/** The last request body each model got. */
+let bodies: Record<string, Record<string, unknown>> = {};
 let server: http.Server;
 
 beforeAll(async () => {
@@ -23,6 +25,7 @@ beforeAll(async () => {
     req.on("end", () => {
       const { model } = JSON.parse(body || "{}") as { model: string };
       seen.push(model);
+      bodies[model] = JSON.parse(body || "{}") as Record<string, unknown>;
       const json = (status: number, data: unknown, headers: Record<string, string> = {}) => {
         res.writeHead(status, { "content-type": "application/json", ...headers });
         res.end(JSON.stringify(data));
@@ -88,7 +91,7 @@ async function load(env: Record<string, string> = {}) {
 const ask = (ai: Awaited<ReturnType<typeof load>>, tokens: number) =>
   ai.chat({ messages: [{ role: "user", content: "x".repeat(tokens * 4) }], tools: [], maxTokens: 10 });
 
-beforeEach(() => { seen = []; mistralMode = "ok"; });
+beforeEach(() => { seen = []; bodies = {}; mistralMode = "ok"; });
 
 describe("Mistral's chunked answers", () => {
   it("keeps only the reply's text, never the thinking", async () => {
@@ -188,5 +191,53 @@ describe("2026-11-03: \"The AI is busy right now\" while an AI was free", () => 
     expect((await ask(ai, 2000)).message.content).toBe("hello from gem-ok");
     expect(Date.now() - started).toBeLessThan(1000);
     expect(seen.filter((m) => m === "mistral-large-4")).toHaveLength(1); // not hit again only to be refused
+  });
+});
+
+describe("more models: LiteLLM and free providers", () => {
+  const base = () => process.env.MISTRAL_BASE_URL!; // the fake server
+
+  it("a LiteLLM proxy and a free provider become lanes after Gemini and before Groq", async () => {
+    const ai = await load({
+      AGENT_API_KEYS: "AQ.k1", GEMINI_MODELS: "gem-a",
+      LITELLM_BASE_URL: `${base()}/`, LITELLM_API_KEY: "sk-litellm-test", LITELLM_MODELS: "router-model",
+      CEREBRAS_BASE_URL: base(), CEREBRAS_API_KEY: "csk-test", CEREBRAS_MODELS: "fast-model, big-model",
+    });
+    expect(ai.configuredLanes()).toEqual([
+      "Mistral mistral-large-4", "Gemini gem-a (key 1)",
+      "LiteLLM router-model", "Cerebras fast-model", "Cerebras big-model",
+      "Groq groq-small",
+    ]);
+  });
+
+  it("LiteLLM is left out without its address, and a provider without models is left out", async () => {
+    const ai = await load({ LITELLM_API_KEY: "sk-litellm-test", LITELLM_MODELS: "router-model", OPENROUTER_API_KEY: "sk-or-test" });
+    expect(ai.configuredLanes().some((l) => l.startsWith("LiteLLM") || l.startsWith("OpenRouter"))).toBe(false);
+  });
+
+  it("when Mistral is out of quota the LiteLLM model answers, in plain OpenAI format", async () => {
+    mistralMode = "quota";
+    const ai = await load({ LITELLM_BASE_URL: base(), LITELLM_API_KEY: "sk-litellm-test", LITELLM_MODELS: "router-model" });
+    const out = await ai.chat({
+      messages: [
+        { role: "user", content: "read bot.py" },
+        { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "read_file", arguments: "{}" }, extra_content: { google: { thought_signature: "x" } } }] },
+        { role: "tool", tool_call_id: "c1", content: "print(1)" },
+        { role: "user", content: "x".repeat(4000) }, // too long for Groq's 600-token test plan
+      ],
+      tools: [], maxTokens: 10,
+    });
+    expect(out.message.content).toBe("hello from router-model");
+    const sent = JSON.stringify(bodies["router-model"]);
+    expect(sent).not.toContain("extra_content");
+    expect(sent).not.toContain("reasoning_effort");
+  });
+
+  it("a provider's per-minute budget from .env is respected", async () => {
+    const ai = await load({ CEREBRAS_BASE_URL: base(), CEREBRAS_API_KEY: "csk-test", CEREBRAS_MODELS: "fast-model", CEREBRAS_TOKENS_PER_MINUTE: "500", MISTRAL_API_KEY: "" });
+    expect(ai.configuredLanes()).toContain("Cerebras fast-model");
+    // 1000 tokens can never fit a 500-a-minute plan (nor Groq's 600): the chat is asked to shorten.
+    await expect(ask(ai, 1000)).rejects.toBeInstanceOf(ai.RequestTooLargeError);
+    expect(seen).not.toContain("fast-model");
   });
 });

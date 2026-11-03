@@ -68,6 +68,24 @@ const GROQ_SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "o
 const GROQ_FAST = process.env.AGENT_FALLBACK_MODEL ?? process.env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
 const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);
 
+/**
+ * More models through OpenAI-compatible endpoints, each switched on by its
+ * key in .env:
+ *   <NAME>_API_KEY      the key (LiteLLM: a virtual key or its master key)
+ *   <NAME>_MODELS       models to use, comma-separated, best first
+ *   <NAME>_BASE_URL     the endpoint (required for LiteLLM; the others have a default)
+ *   <NAME>_TOKENS_PER_MINUTE  the plan's per-minute token budget (optional)
+ * LiteLLM is a self-hosted router to 100+ providers; the others are providers
+ * with free plans. They're tried after Gemini and before Groq.
+ */
+export const GATEWAYS: { name: string; label: string; base?: string }[] = [
+  { name: "LITELLM", label: "LiteLLM" },
+  { name: "CEREBRAS", label: "Cerebras", base: "https://api.cerebras.ai/v1" },
+  { name: "SAMBANOVA", label: "SambaNova", base: "https://api.sambanova.ai/v1" },
+  { name: "GITHUB_MODELS", label: "GitHub Models", base: "https://models.github.ai/inference" },
+  { name: "OPENROUTER", label: "OpenRouter", base: "https://openrouter.ai/api/v1" },
+];
+
 interface Lane {
   id: string;
   /** Position in the try-order (0 = tried first). */
@@ -78,7 +96,8 @@ interface Lane {
   tokensPerMinute: number;
   /** 1-based number of the key within its provider, for display only. */
   keyNo: number;
-  provider: "gemini" | "mistral" | "groq";
+  /** "gemini", "mistral", "groq", or a gateway's name in lower case ("litellm", "cerebras"…). */
+  provider: string;
   model: string;
   key: string;
   base: string;
@@ -99,12 +118,23 @@ function buildLanes(): Lane[] {
         id: `mistral:${model}`, order: 0, maxRequestTokens: MISTRAL_TOKENS_PER_MINUTE, tokensPerMinute: MISTRAL_TOKENS_PER_MINUTE, keyNo: 1, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
       }))
     : [];
-  if (!GROQ_KEY) return [...mistral, ...gemini];
+  const gateways = GATEWAYS.flatMap(({ name, label, base: defaultBase }): Lane[] => {
+    const key = process.env[`${name}_API_KEY`];
+    const base = (process.env[`${name}_BASE_URL`] || defaultBase || "").trim().replace(/\/$/, "");
+    const models = (process.env[`${name}_MODELS`] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!usable(key) || !base || !models.length) return [];
+    const perMinute = Number(process.env[`${name}_TOKENS_PER_MINUTE`]) || Infinity;
+    return models.map((model): Lane => ({
+      id: `${name.toLowerCase()}:${model}`, order: 0, maxRequestTokens: perMinute, tokensPerMinute: perMinute, keyNo: 1,
+      provider: name.toLowerCase(), model, key: key.trim(), base, label: `${label} ${model}`,
+    }));
+  });
+  if (!GROQ_KEY) return [...mistral, ...gemini, ...gateways];
   const groqModels = [...new Set([GROQ_SMART, GROQ_FAST])];
   const groq = groqModels.map((model): Lane => ({
     id: `groq:${model}`, order: 0, maxRequestTokens: TOKENS_PER_MINUTE, tokensPerMinute: TOKENS_PER_MINUTE, keyNo: 1, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
   }));
-  return [...mistral, ...gemini, ...groq];
+  return [...mistral, ...gemini, ...gateways, ...groq];
 }
 
 const LANES = buildLanes();
@@ -147,7 +177,7 @@ let lastMistralAt = 0;
  * itself are kept. Other providers don't know the field, so it's removed.
  */
 const DUMMY_SIGNATURE = "skip_thought_signature_validator";
-export function prepareMessages(provider: Lane["provider"], messages: ChatMessage[]): ChatMessage[] {
+export function prepareMessages(provider: string, messages: ChatMessage[]): ChatMessage[] {
   return messages.map((m) => {
     if (m.role !== "assistant" || !m.tool_calls?.length) return m;
     const tool_calls = m.tool_calls.map((c): ToolCall => {
@@ -248,7 +278,7 @@ const TOO_LARGE = /context_length|context length|maximum context|too large|too l
 
 export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
   if (LANES.length === 0) {
-    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey) or GROQ_API_KEY in the server's .env.");
+    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter key and model list in the server's .env.");
   }
   const maxTokens = opts.maxTokens ?? Number(process.env.AGENT_MAX_OUTPUT_TOKENS ?? 1200);
   const size = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools)) + maxTokens;
