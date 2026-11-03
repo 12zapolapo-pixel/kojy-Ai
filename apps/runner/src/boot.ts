@@ -16,12 +16,15 @@ import { createDb, runMigrations } from "@kojyai/db";
 import { resolveRedisTls } from "@kojyai/shared/redis";
 import { verifyBotControlMessage } from "@kojyai/shared/crypto";
 import { createLogger } from "./logger.js";
+import { configureErrorReporting, flushErrors, installCrashReporting } from "@kojyai/shared/error-reporting";
 import { Supervisor, PROJECTS_DIR, VENVS_DIR } from "./supervisor.js";
 import { initSandbox } from "./sandbox.js";
 import { Agent } from "./agent/agent.js";
 import { setUsageSink } from "./agent/groq.js";
 
 const log = createLogger("runner-boot");
+// Errors to Sentry when SENTRY_DSN is set (see @kojyai/shared/error-reporting).
+if (configureErrorReporting({ service: "kojyai-runner" })) installCrashReporting();
 const CONTROL_PREFIX = "project_control:";
 
 async function main(): Promise<void> {
@@ -121,5 +124,5 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   log.fatal({ err }, "Runner failed to start");
-  process.exit(1);
+  void flushErrors(2000).finally(() => process.exit(1));
 });

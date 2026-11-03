@@ -34,6 +34,7 @@ import { createContext } from "./trpc.js";
 import { initWebSocketGateway } from "./websocket/gateway.js";
 import { initBotRuntimeManager } from "./modules/bots/runtime-manager.js";
 import { createLogger } from "./utils/logger.js";
+import { configureErrorReporting, flushErrors, installCrashReporting } from "@kojyai/shared/error-reporting";
 import { resolveClientIp, getTrustedProxies } from "./utils/clientIp.js";
 // NOTE: initJobQueues lives in apps/worker — the API process only enqueues jobs,
 // it never initialises queue workers. Removing the dead import prevents a boot crash.
@@ -43,6 +44,8 @@ import { handleStripeWebhook } from "./modules/billing/webhook.js";
 
 
 const log = createLogger("boot");
+// Errors to Sentry when SENTRY_DSN is set (see @kojyai/shared/error-reporting).
+if (configureErrorReporting({ service: "kojyai-api" })) installCrashReporting();
 
 // ─── 1. Environment Validation ────────────────────────────────────────────────
 
@@ -254,6 +257,10 @@ app.use(
   }),
 );
 
+// Settings the website needs at runtime (public by design: a browser DSN
+// only lets someone send error reports to the project).
+app.get("/client-config", (c) => c.json({ sentryDsn: (process.env.SENTRY_DSN_WEB || process.env.SENTRY_DSN || "").trim() || null }));
+
 // Health check — used by load balancer and k8s readiness probe
 app.get("/health", async (c) => {
   return c.json({
@@ -346,5 +353,5 @@ async function main() {
 
 main().catch((err) => {
   log.fatal({ err }, "Boot failed");
-  process.exit(1);
+  void flushErrors(2000).finally(() => process.exit(1));
 });

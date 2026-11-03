@@ -16,6 +16,7 @@
  */
 
 import { Component, type ReactNode, type ErrorInfo } from "react";
+import { reportUiError } from "../lib/errorTracking";
 
 interface ErrorBoundaryProps {
   children:  ReactNode;
@@ -41,6 +42,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("[ErrorBoundary]", error, errorInfo);
+    reportUiError(error, errorInfo.componentStack);
     this.props.onError?.(error, errorInfo);
     this.setState({ errorInfo });
   }

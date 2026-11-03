@@ -45,6 +45,9 @@
     },
     "./logging": {
       "import": "./src/logging/index.ts"
+    },
+    "./error-reporting": {
+      "import": "./src/error-reporting/index.ts"
     }
   },
   "scripts": {
