@@ -70,6 +70,8 @@ interface Lane {
   id: string;
   /** Position in the try-order (0 = tried first). */
   order: number;
+  /** Largest request (estimated tokens) this lane can take at all. */
+  maxRequestTokens: number;
   /** 1-based number of the key within its provider, for display only. */
   keyNo: number;
   provider: "gemini" | "mistral" | "groq";
@@ -81,20 +83,22 @@ interface Lane {
 }
 
 function buildLanes(): Lane[] {
+  // Gemini and Mistral take far longer chats than Kojy sends; Groq's free plan
+  // can't take a request over its tokens-per-minute limit at all.
   const gemini = GEMINI_MODELS.flatMap((model) =>
     GEMINI_KEYS.map((key, i): Lane => ({
-      id: `gemini:${model}:${i}`, order: 0, keyNo: i + 1, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
+      id: `gemini:${model}:${i}`, order: 0, maxRequestTokens: Infinity, keyNo: i + 1, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
     })),
   );
   const mistral = MISTRAL_KEY
     ? MISTRAL_MODELS.map((model): Lane => ({
-        id: `mistral:${model}`, order: 0, keyNo: 1, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
+        id: `mistral:${model}`, order: 0, maxRequestTokens: Infinity, keyNo: 1, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
       }))
     : [];
   if (!GROQ_KEY) return [...mistral, ...gemini];
   const groqModels = [...new Set([GROQ_SMART, GROQ_FAST])];
   const groq = groqModels.map((model): Lane => ({
-    id: `groq:${model}`, order: 0, keyNo: 1, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
+    id: `groq:${model}`, order: 0, maxRequestTokens: TOKENS_PER_MINUTE, keyNo: 1, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
   }));
   return [...mistral, ...gemini, ...groq];
 }
@@ -208,6 +212,24 @@ export interface ChatOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Mistral's reasoning models answer with a list of chunks — their thinking,
+ * then the reply. Only the reply's text is kept: the thinking isn't meant for
+ * the owner, and stored as it came it showed up in the chat as raw JSON.
+ */
+export function contentText(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  const text = content.map((c) => {
+    if (typeof c === "string") return c;
+    if (c && typeof c === "object" && (c as { type?: unknown }).type === "text") return String((c as { text?: unknown }).text ?? "");
+    return "";
+  }).join("");
+  return text || null;
+}
+
+const TOO_LARGE = /context_length|context length|maximum context|too large|too long|exceeds the maximum number of tokens/i;
+
 export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
   if (LANES.length === 0) {
     throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey) or GROQ_API_KEY in the server's .env.");
@@ -217,24 +239,37 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
   let badRequests = 0;
   /** Lanes that rejected this particular request (a content problem, not the lane's fault). */
   const skip = new Set<string>();
+  /** Lanes this request turned out to be too large for. */
+  const tooBig = new Set<string>();
+  const fits = (l: Lane) => size <= l.maxRequestTokens && !tooBig.has(l.id);
   let firstRejection = "";
 
   for (let attempt = 0; attempt < 12; attempt++) {
     if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
 
-    const lane = LANES.find((l) => !isCooling(l) && !skip.has(l.id));
-    if (!lane && LANES.some((l) => !isCooling(l)) ) {
-      // Every healthy lane rejected this request itself: say why, don't call it "busy".
-      throw new AiUnavailableError(`The AI rejected this request: ${firstRejection.slice(0, 300) || "unknown reason"}`);
-    }
+    const lane = LANES.find((l) => !isCooling(l) && !skip.has(l.id) && fits(l));
     if (!lane) {
-      // Every lane is cooling down: wait for the soonest one, if it's short.
-      const soonest = Math.min(...LANES.map((l) => coolUntil.get(l.id) ?? 0)) - Date.now();
-      if (soonest > 65_000) throw new AiUnavailableError("The AI keys are all at their limit right now. They reset within a few hours, or add another key.");
-      const wait = Math.max(1, Math.ceil(soonest / 1000));
-      opts.onWait?.(wait, "AI rate limit");
-      await sleep(wait * 1000);
-      continue;
+      // Lanes that could take this request once their cooldown ends: wait for
+      // the soonest if it's short (better than cutting the history for Groq).
+      const later = LANES.filter((l) => !skip.has(l.id) && fits(l));
+      const soonest = later.length ? Math.min(...later.map((l) => coolUntil.get(l.id) ?? 0)) - Date.now() : Infinity;
+      if (soonest <= 65_000) {
+        const wait = Math.max(1, Math.ceil(soonest / 1000));
+        opts.onWait?.(wait, "AI rate limit");
+        await sleep(wait * 1000);
+        continue;
+      }
+      // A ready lane is only too small for it: the caller retries with less history.
+      if (LANES.some((l) => !isCooling(l) && !skip.has(l.id))) {
+        throw new RequestTooLargeError(later.length
+          ? `The AIs that can take a chat this long are at their limit for about ${Math.ceil(soonest / 60_000)} min, and the free Groq AI is too small for it. Try again then, or start a new chat.`
+          : "The conversation got too big for the AI. Start a new chat or ask about one thing at a time.");
+      }
+      // Every ready lane rejected this request itself: say why, don't call it "busy".
+      if (LANES.some((l) => !isCooling(l))) {
+        throw new AiUnavailableError(`The AI rejected this request: ${firstRejection.slice(0, 300) || "unknown reason"}`);
+      }
+      throw new AiUnavailableError("The AI keys are all at their limit right now. They reset within a few hours, or add another key.");
     }
 
     if (lane.provider === "groq") {
@@ -282,16 +317,28 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
 
     if (res.ok) {
-      const data = await res.json() as { choices?: { message: ChatMessage }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      const data = await res.json() as { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
       const message = data.choices?.[0]?.message;
       if (!message) { cool(lane, 30_000, `${lane.label} returned an empty answer`); continue; }
       recordUsage(lane, { req: 1, tokensIn: data.usage?.prompt_tokens ?? 0, tokensOut: data.usage?.completion_tokens ?? 0 });
-      return { message: { role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length ? { tool_calls: message.tool_calls } : {}) }, model: lane.model };
+      const content = contentText(message.content);
+      const toolCalls = message.tool_calls?.length ? message.tool_calls : undefined;
+      if (!content?.trim() && !toolCalls) {
+        // Nothing to say or do (e.g. it only "thought"): another model may do better.
+        skip.add(lane.id);
+        firstRejection ||= `${lane.label} answered with nothing`;
+        log.warn({ lane: lane.label }, `${lane.label} answered with nothing — trying the next AI`);
+        continue;
+      }
+      return { message: { role: "assistant", content, ...(toolCalls ? { tool_calls: toolCalls } : {}) }, model: lane.model };
     }
 
     const text = await res.text().catch(() => "");
-    if (res.status === 413 || /Request too large|context_length|maximum context|too large/i.test(text)) {
-      throw new RequestTooLargeError("The conversation got too big for the AI. Start a new chat or ask about one thing at a time.");
+    if (res.status === 413 || ((res.status === 400 || res.status === 422) && TOO_LARGE.test(text))) {
+      // Too big for this lane (Groq's per-minute size, a context window); a bigger one may take it.
+      tooBig.add(lane.id);
+      log.warn({ lane: lane.label }, `${lane.label}: request too large — trying the next AI`);
+      continue;
     }
     if (res.status === 429) {
       if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`, "out_of_quota");

@@ -1,0 +1,152 @@
+/**
+ * Kojy's AI client, the parts that broke on 2026-11-03:
+ *  - Mistral's reasoning models answer with chunks (thinking + text); only
+ *    the text may reach the chat (it was stored as raw JSON before).
+ *  - A request bigger than Groq's free per-minute size never goes to Groq;
+ *    it waits for a bigger model that's briefly busy, and only asks for a
+ *    shorter history when nothing that can take it comes back soon.
+ * Uses a local fake of the OpenAI-compatible endpoints.
+ */
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+type MistralMode = "ok" | "chunks" | "thinking-only-with-tools" | "thinking-only" | "quota" | "busy-1s" | "too-big";
+let mistralMode: MistralMode = "ok";
+let seen: string[] = [];
+let server: http.Server;
+
+beforeAll(async () => {
+  server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const { model } = JSON.parse(body || "{}") as { model: string };
+      seen.push(model);
+      const json = (status: number, data: unknown, headers: Record<string, string> = {}) => {
+        res.writeHead(status, { "content-type": "application/json", ...headers });
+        res.end(JSON.stringify(data));
+      };
+      const answer = (message: Record<string, unknown>) => json(200, { choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 5, completion_tokens: 3 } });
+      if (model.startsWith("mistral")) {
+        if (mistralMode === "quota") return json(429, { message: "Monthly quota exceeded for this plan" });
+        if (mistralMode === "busy-1s") { mistralMode = "ok"; return json(429, { message: "Rate limit exceeded" }, { "retry-after": "1" }); }
+        if (mistralMode === "too-big") return json(400, { message: "Prompt contains 300000 tokens, too large for model with 131072 maximum context length" });
+        if (mistralMode === "chunks") {
+          return answer({ content: [{ type: "thinking", thinking: [{ type: "text", text: "secret thoughts" }], closed: true }, { type: "text", text: "Hello owner" }] });
+        }
+        if (mistralMode === "thinking-only-with-tools") {
+          return answer({
+            content: [{ type: "thinking", thinking: [{ type: "text", text: "I should read the logs" }] }],
+            tool_calls: [{ id: "c1", type: "function", function: { name: "get_logs", arguments: "{}" } }],
+          });
+        }
+        if (mistralMode === "thinking-only") return answer({ content: [{ type: "thinking", thinking: [{ type: "text", text: "hmm" }] }] });
+        return answer({ content: `hello from ${model}` });
+      }
+      return answer({ content: `hello from ${model}` });
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  process.env.MISTRAL_BASE_URL = base;
+  process.env.GROQ_BASE_URL = base;
+  process.env.MISTRAL_API_KEY = "mstrl_fake-test-key";
+  process.env.MISTRAL_MODELS = "mistral-large-4";
+  process.env.MISTRAL_MIN_INTERVAL_MS = "0";
+  process.env.GROQ_API_KEY = "gsk_fake-test-key";
+  process.env.AGENT_MODEL = "groq-small";
+  process.env.AGENT_FALLBACK_MODEL = "groq-small";
+  process.env.AGENT_TOKENS_PER_MINUTE = "600";
+  delete process.env.AGENT_API_KEY;
+  delete process.env.AGENT_API_KEYS;
+});
+
+afterAll(async () => {
+  await new Promise<void>((r) => server.close(() => r()));
+  for (const k of ["GROQ_API_KEY", "GROQ_BASE_URL", "AGENT_MODEL", "AGENT_FALLBACK_MODEL", "AGENT_TOKENS_PER_MINUTE", "MISTRAL_API_KEY"]) delete process.env[k];
+});
+
+async function load() {
+  vi.resetModules();
+  const ai = await import("../../../apps/runner/src/agent/groq.js");
+  ai._resetAiStateForTests();
+  return ai;
+}
+
+/** ~tokens of history: the estimate is 4 characters per token. */
+const ask = (ai: Awaited<ReturnType<typeof load>>, tokens: number) =>
+  ai.chat({ messages: [{ role: "user", content: "x".repeat(tokens * 4) }], tools: [], maxTokens: 10 });
+
+beforeEach(() => { seen = []; mistralMode = "ok"; });
+
+describe("Mistral's chunked answers", () => {
+  it("keeps only the reply's text, never the thinking", async () => {
+    mistralMode = "chunks";
+    const ai = await load();
+    const out = await ask(ai, 10);
+    expect(out.message.content).toBe("Hello owner");
+    expect(JSON.stringify(out.message)).not.toContain("secret thoughts");
+  });
+
+  it("thinking plus a tool call: the call is kept, no text", async () => {
+    mistralMode = "thinking-only-with-tools";
+    const ai = await load();
+    const out = await ask(ai, 10);
+    expect(out.message.content).toBeNull();
+    expect(out.message.tool_calls?.[0]?.function.name).toBe("get_logs");
+  });
+
+  it("an answer with nothing in it goes to the next AI", async () => {
+    mistralMode = "thinking-only";
+    const ai = await load();
+    const out = await ask(ai, 10);
+    expect(out.message.content).toBe("hello from groq-small");
+  });
+
+  it("contentText handles every shape", async () => {
+    const ai = await load();
+    expect(ai.contentText("plain")).toBe("plain");
+    expect(ai.contentText(null)).toBeNull();
+    expect(ai.contentText([{ type: "text", text: "a" }, { type: "thinking", thinking: [] }, { type: "text", text: "b" }])).toBe("ab");
+    expect(ai.contentText([{ type: "thinking", thinking: [{ type: "text", text: "x" }] }])).toBeNull();
+  });
+});
+
+describe("requests too big for Groq's free plan", () => {
+  it("a long chat is never sent to Groq; with the big AIs out for long, the chat is told to shorten", async () => {
+    mistralMode = "quota";
+    const ai = await load();
+    const err = await ask(ai, 2000).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ai.RequestTooLargeError);
+    expect(String((err as Error).message)).toMatch(/at their limit for about \d+ min/);
+    expect(seen).toEqual(["mistral-large-4"]); // Groq was never called with it
+    // The shortened retry fits Groq and gets an answer.
+    const out = await ask(ai, 100);
+    expect(out.message.content).toBe("hello from groq-small");
+  });
+
+  it("waits for a big AI that's busy for a moment instead of cutting the history", async () => {
+    mistralMode = "busy-1s";
+    const ai = await load();
+    const started = Date.now();
+    const out = await ask(ai, 2000);
+    expect(out.message.content).toBe("hello from mistral-large-4");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+    expect(seen).not.toContain("groq-small");
+  }, 10_000);
+
+  it("a model whose context is too small for the request is skipped, not fatal", async () => {
+    mistralMode = "too-big";
+    const ai = await load();
+    const out = await ask(ai, 100);
+    expect(out.message.content).toBe("hello from groq-small");
+    expect(seen).toEqual(["mistral-large-4", "groq-small"]);
+  });
+
+  it("the same request too big for every model asks for a shorter one", async () => {
+    mistralMode = "too-big";
+    const ai = await load();
+    await expect(ask(ai, 2000)).rejects.toThrow(/too big for the AI/);
+  });
+});

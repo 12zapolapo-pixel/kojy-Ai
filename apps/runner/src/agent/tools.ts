@@ -22,6 +22,7 @@ import { LAUNCHER } from "../supervisor.js";
 import { runRoomTest } from "./mockRoom.js";
 import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
+import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -72,7 +73,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("test_secrets", "Check that secrets work: Highrise room+token (connects to Highrise), GROQ_API_KEY, OPENAI_API_KEY; others are only checked for being set.", { names: { type: "array", items: { type: "string" } } }),
   fn("set_entrypoint", "Set which class starts the bot, as module.path:ClassName (a class based on BaseBot).", { entrypoint: str("e.g. bot:MyBot") }, ["entrypoint"]),
   fn("bot_control", "Start, stop or restart the real bot (restart makes code changes live).", { action: { type: "string", enum: ["start", "stop", "restart"] } }, ["action"]),
-  fn("get_logs", "The real bot's latest console output (status, errors, tracebacks).", { lines: { type: "integer" } }),
+  fn("get_logs", "Whether the real bot is in the room right now, what happened to its connection in the last day (KojyAI restarts, Highrise reconnects, the bot exiting), and its newest console lines (errors, tracebacks). Call it first when the owner says the bot disconnected, left or isn't answering.", { lines: { type: "integer", description: "console lines to show, newest last (default 40)" } }),
   fn("propose_plan", "Before a bigger change (a new feature, several files, a rewrite), show the owner a short plan with Approve/Change buttons, then stop and wait. Not for small fixes or questions.",
     { title: str("what you'll build, a few words"), steps: { type: "array", items: { type: "string" }, description: "3-7 short steps in plain words" } }, ["title", "steps"]),
   fn("find_emotes", "Search the list of emote ids that work in Highrise (checked in a real room) by name or id, e.g. 'dance', 'wave'. Use these ids in code; never guess emote ids.",
@@ -402,9 +403,19 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 
       case "get_logs": {
         const n = Math.min(Math.max(Number(args.lines) || 40, 5), 120);
-        const lines = readLogs(uuid, undefined, 48 * 1024).lines.slice(-n).map((l) => `${l.stream === "stderr" ? "! " : l.stream === "system" ? "# " : ""}${l.line}`);
-        const [p] = await ctx.db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage, restartCount: botProjects.restartCount }).from(botProjects).where(eq(botProjects.id, ctx.project.id));
-        return { ok: true, output: clip(`Status: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}, restarts: ${p?.restartCount}\n${lines.join("\n") || "(no output yet)"}`), summary: `Read the bot's console (${lines.length} lines)` };
+        // A day of output for the connection summary; only the newest lines are shown.
+        const lines = readLogs(uuid, undefined, 512 * 1024).lines;
+        const [p] = await ctx.db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage, restartCount: botProjects.restartCount, lastStartedAt: botProjects.lastStartedAt })
+          .from(botProjects).where(eq(botProjects.id, ctx.project.id));
+        const now = Date.now();
+        const up = p?.status === "running" && p.lastStartedAt ? `, up ${duration((now - p.lastStartedAt.getTime()) / 1000)} (process started ${stamp(p.lastStartedAt.getTime())})` : "";
+        const output = [
+          `Now: ${stamp(now)} UTC. Status: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}${up}. Restarts so far: ${p?.restartCount}.`,
+          connectionReport(lines, now),
+          "Console, newest line last (times in UTC):",
+          lines.length ? formatConsole(lines.slice(-600), { maxLines: n, maxChars: 6000 }) : "(no output yet)",
+        ].join("\n");
+        return { ok: true, output, summary: `Read the bot's console and connection history (${Math.min(n, lines.length)} lines)` };
       }
 
       case "propose_plan": {

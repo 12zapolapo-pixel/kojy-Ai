@@ -24,6 +24,7 @@ import { decryptApiKey } from "@kojyai/shared/crypto";
 import { ActivityRecorder, notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger } from "./logger.js";
 import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./sandbox.js";
+import { PLATFORM_RESTART_LINE } from "./agent/botHealth.js";
 
 const log = createLogger("supervisor");
 
@@ -34,6 +35,8 @@ export const LAUNCHER = path.join(path.dirname(new URL(import.meta.url).pathname
 const LOG_DIR     = path.join(PROJECTS_DIR, ".logs");
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
 const RESTART_DELAYS_S = [5, 15, 30, 60];
+/** A start that failed before the bot ran (pip, network, database): try again, slower. */
+const START_RETRY_DELAYS_S = [30, 120, 600, 1800];
 const HEALTHY_RUN_MS = 120_000;
 const STOP_GRACE_MS = 10_000;
 
@@ -70,6 +73,8 @@ export class Supervisor {
   private procs = new Map<string, Running>();
   private restartTimers = new Map<string, NodeJS.Timeout>();
   private crashStreak = new Map<string, number>();
+  /** Starts in a row that failed before the bot ran. */
+  private startFailures = new Map<string, number>();
   private busy = new Set<string>();
   private tails = new Map<string, string[]>();
   /** Set by the coder AI: called when a bot crashes on its own (not stopped). */
@@ -90,7 +95,7 @@ export class Supervisor {
     const rows = await this.db.select({ uuid: botProjects.uuid }).from(botProjects)
       .where(eq(botProjects.desiredState, "running"));
     log.info({ count: rows.length }, "Restoring running projects");
-    for (const { uuid } of rows) void this.start(uuid);
+    for (const { uuid } of rows) void this.start(uuid, "back after a KojyAI restart");
   }
 
   async handle(uuid: string, action: string, payload?: Record<string, unknown>): Promise<void> {
@@ -108,6 +113,8 @@ export class Supervisor {
   async shutdown(): Promise<void> {
     for (const t of this.restartTimers.values()) clearTimeout(t);
     const uuids = [...this.procs.keys()];
+    // Says why in each bot's console, so the owner and Kojy don't hunt for a bug.
+    for (const uuid of uuids) this.console(uuid, "system", PLATFORM_RESTART_LINE);
     await Promise.all(uuids.map((uuid) => this.kill(uuid)));
     await Promise.allSettled(uuids.map((uuid) => this.setStatus(uuid, "stopped", "Runner restarting — the bot starts again when it's back")));
     await this.activity.stop();
@@ -115,7 +122,7 @@ export class Supervisor {
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
 
-  private async start(uuid: string): Promise<void> {
+  private async start(uuid: string, reason?: string): Promise<void> {
     if (this.procs.has(uuid) || this.busy.has(uuid)) return;
     this.clearRestart(uuid);
     this.busy.add(uuid);
@@ -133,7 +140,7 @@ export class Supervisor {
       const uid = sandboxUid(project.id); // ensureVenv already granted it the folders
 
       await this.setStatus(uuid, "starting", "Starting…");
-      this.console(uuid, "system", `▶ Starting ${project.entrypoint}`);
+      this.console(uuid, "system", `▶ Starting ${project.entrypoint}${reason ? ` (${reason})` : ""}`);
       // fd 3: the launcher's activity reports (chat, join, tip… as JSON lines).
       const { child, kill: signal } = spawnAs(uid, python, [LAUNCHER], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] });
       const run: Running = { child, signal, startedAt: Date.now(), stopping: false, project: { id: project.id, orgId: project.orgId, ownerId: project.ownerId, name: project.name } };
@@ -150,15 +157,32 @@ export class Supervisor {
       });
 
       child.once("spawn", () => {
+        this.startFailures.delete(uuid);
         this.record(run, "start");
         void this.setStatus(uuid, "running", null);
         void this.db.update(botProjects).set({ lastStartedAt: new Date() }).where(eq(botProjects.uuid, uuid));
       });
       child.once("exit", (code, signal) => void this.onExit(uuid, run, code, signal));
     } catch (err) {
+      // Usually passing (PyPI or the network unreachable, the database busy right
+      // after a restart): try again with backoff while the owner wants it running,
+      // instead of leaving the bot offline until someone presses Start.
       const message = err instanceof Error ? err.message : String(err);
-      this.console(uuid, "system", `✖ ${message}`);
-      await this.setStatus(uuid, "error", message.slice(0, 500));
+      const failures = (this.startFailures.get(uuid) ?? 0) + 1;
+      this.startFailures.set(uuid, failures);
+      const delay = START_RETRY_DELAYS_S[Math.min(failures - 1, START_RETRY_DELAYS_S.length - 1)]!;
+      let retry = true;
+      try {
+        const [p] = await this.db.select({ desiredState: botProjects.desiredState }).from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+        retry = p?.desiredState === "running";
+      } catch { /* database unreachable: keep trying */ }
+      const note = retry ? ` — trying again in ${delay}s` : "";
+      this.console(uuid, "system", `✖ ${message}${note}`);
+      await this.setStatus(uuid, "error", `${message.slice(0, 450)}${note}`).catch(() => undefined);
+      if (retry) {
+        this.clearRestart(uuid);
+        this.restartTimers.set(uuid, setTimeout(() => { this.restartTimers.delete(uuid); void this.start(uuid); }, delay * 1000));
+      }
     } finally {
       this.busy.delete(uuid);
     }
@@ -222,6 +246,7 @@ export class Supervisor {
   private async stop(uuid: string): Promise<void> {
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
+    this.startFailures.delete(uuid);
     if (this.procs.has(uuid)) {
       this.console(uuid, "system", "■ Stopping");
       await this.kill(uuid);
@@ -233,6 +258,7 @@ export class Supervisor {
   private async purge(uuid: string): Promise<void> {
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
+    this.startFailures.delete(uuid);
     await this.kill(uuid);
     const venv = path.join(VENVS_DIR, uuid);
     try {

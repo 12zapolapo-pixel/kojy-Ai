@@ -77,6 +77,27 @@ def install_activity_reporter(bot) -> None:
         setattr(Highrise, method, make_send(original))
 
 
+CONNECTED_PREFIX = "[kojy] Connected to Highrise"
+
+
+def announce_connections(bot) -> None:
+    """Print a line each time the SDK (re)connects to the room.
+
+    The SDK calls bot.on_start after every successful (re)connect, so this
+    line in the console marks when the bot was really in the room — the
+    runner's log summary for the owner and the coder AI reads it. Wrapped on
+    the instance; the bot's own on_start always runs.
+    """
+    original = bot.on_start
+
+    async def on_start(session_metadata):
+        connection = getattr(session_metadata, "connection_id", None)
+        print(f"{CONNECTED_PREFIX} (connection {connection})" if connection else CONNECTED_PREFIX, flush=True)
+        return await original(session_metadata)
+
+    bot.on_start = on_start
+
+
 def main() -> None:
     entry = os.environ.get("KOJY_ENTRY", "").strip()
     room_id = os.environ.get("HIGHRISE_ROOM_ID", "").strip()
@@ -98,6 +119,7 @@ def main() -> None:
 
     bot = bot_class()
     install_activity_reporter(bot)
+    announce_connections(bot)
     print(f"[kojy] Starting {entry} in room {room_id}", flush=True)
     asyncio.run(sdk_main([BotDefinition(bot, room_id, token)]))
 

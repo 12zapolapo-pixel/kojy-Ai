@@ -27,10 +27,10 @@ import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/s
 import { listFiles } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
-import { chat, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
+import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
-import { taskMemory, taskMemoryPrompt, continuesAutomatically, type PartOutcome } from "./taskMemory.js";
+import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, type PartOutcome } from "./taskMemory.js";
 import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
@@ -41,8 +41,68 @@ const log = createLogger("agent");
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
 /** How many parts of MAX_STEPS one request may take before it asks the owner to continue. */
 const AUTO_PARTS = Number(process.env.AGENT_AUTO_PARTS ?? 4);
-const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 3000);
+/**
+ * History sent with each step. Mistral and Gemini take far more; at 3000 one
+ * file read pushed the previous one out and Kojy kept re-reading the same
+ * file. A request too big for the AI that's free (Groq) is retried smaller.
+ */
+const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 12000);
 const AUTOFIX_PER_DAY = 3;
+/** A request cut off by a runner restart picks up again this long after boot (bots are back by then). */
+const RESUME_DELAY_MS = 20_000;
+/** …if it was still active this recently. */
+const RESUME_WITHIN_MS = 30 * 60_000;
+
+/**
+ * The bot's last output before it exited points at the network (DNS, Highrise
+ * unreachable, connection reset) rather than its code: nothing to "fix".
+ */
+const NETWORK_FAILURE = /ClientConnectorError|ClientConnectionError|ClientOSError|ServerDisconnectedError|ServerTimeoutError|WSServerHandshakeError|ConnectionResetError|ConnectionRefusedError|ConnectionAbortedError|socket\.gaierror|gaierror|TimeoutError|Temporary failure in name resolution|Name or service not known|Network is unreachable|Cannot connect to host/;
+export function isNetworkFailure(tail: string[]): boolean {
+  return tail.filter((l) => l.trim()).slice(-6).some((l) => NETWORK_FAILURE.test(l));
+}
+
+/** Tools that only look at something: an older result is outdated once the same look is repeated. */
+const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat"]);
+/** …and these, whatever their arguments: the newest always says more. */
+const NEWEST_WINS = new Set(["get_logs", "check_code"]);
+
+function canonicalArgs(args: string): string {
+  try {
+    const v = JSON.parse(args || "{}") as Record<string, unknown>;
+    return JSON.stringify(Object.keys(v).sort().map((k) => [k, v[k]]));
+  } catch {
+    return args;
+  }
+}
+
+/**
+ * Row ids of tool results made obsolete by a newer identical call (the same
+ * file range read again, the logs fetched again). They go into the history as
+ * their one-line summary, so reading something twice doesn't cost twice.
+ * `rows` oldest first.
+ */
+export function supersededResults(rows: { id: number; role: string; data: unknown }[]): Set<number> {
+  const keyOf = new Map<string, string>();
+  for (const r of rows) {
+    if (r.role !== "assistant") continue;
+    for (const c of (r.data as { toolCalls?: ToolCall[] } | null)?.toolCalls ?? []) {
+      const name = c.function.name;
+      if (LOOK_TOOLS.has(name)) keyOf.set(c.id, NEWEST_WINS.has(name) ? name : `${name}:${canonicalArgs(c.function.arguments)}`);
+    }
+  }
+  const seen = new Set<string>();
+  const out = new Set<number>();
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i]!;
+    if (r.role !== "tool") continue;
+    const key = keyOf.get((r.data as { toolCallId?: string } | null)?.toolCallId ?? "");
+    if (!key) continue;
+    if (seen.has(key)) out.add(r.id);
+    else seen.add(key);
+  }
+  return out;
+}
 
 /**
  * V-03: in a run started by a crash or the daily check-up (not by the owner),
@@ -92,9 +152,44 @@ export class Agent {
     if (action === "agent") return this.run(key);
   }
 
-  /** After a runner restart nobody is working any more. */
+  /**
+   * After a runner restart nobody is working any more. A bot chat that was in
+   * the middle of a request (a platform update restarts the runner) picks it
+   * up again by itself — once per request, so a request that keeps getting
+   * cut off doesn't loop — or says it was interrupted.
+   */
   async resetStates(): Promise<void> {
+    const cut = await this.db.select({ id: botProjects.id, uuid: botProjects.uuid }).from(botProjects).where(eq(botProjects.agentState, "working"));
     await this.db.update(botProjects).set({ agentState: "idle" }).where(eq(botProjects.agentState, "working"));
+    for (const p of cut) {
+      try {
+        await this.resumeAfterRestart(p.uuid, p.id);
+      } catch (err) {
+        log.warn({ err, uuid: p.uuid }, "Could not pick up a request cut off by the restart");
+      }
+    }
+  }
+
+  private async resumeAfterRestart(uuid: string, projectId: number): Promise<void> {
+    const scope = { thread: `project:${projectId}`, projectId };
+    const rows = (await this.db.select({ id: projectMessages.id, role: projectMessages.role, kind: projectMessages.kind, content: projectMessages.content, createdAt: projectMessages.createdAt })
+      .from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(300)).reverse();
+    const request = rows[requestIndex(rows)];
+    const lastActive = rows[rows.length - 1]?.createdAt.getTime() ?? 0;
+    if (!request || Date.now() - lastActive > RESUME_WITHIN_MS) return;
+    let first = false;
+    try {
+      first = (await this.redis?.set(`agent_resumed:${scope.thread}:${request.id}`, "1", "EX", 86_400, "NX")) === "OK";
+    } catch { /* without Redis, don't risk resuming twice */ }
+    if (first) {
+      await this.add(scope, "assistant", "KojyAI restarted while I was working on this — picking up where I left off.", "event");
+      await recordWork(this.db, scope.thread, projectId, "in_progress");
+      log.info({ uuid }, "Picking up a request cut off by the restart");
+      setTimeout(() => void this.run(uuid), RESUME_DELAY_MS).unref();
+    } else {
+      await this.add(scope, "assistant", "KojyAI restarted while I was working on this. Send “continue” and I'll pick up from my notes on this request.", "event");
+      await recordWork(this.db, scope.thread, projectId, "paused");
+    }
   }
 
   private async progress(uuid: string, text: string | null): Promise<void> {
@@ -293,10 +388,12 @@ export class Agent {
     }));
     const rows = stored.slice(-80);
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
+    const superseded = supersededResults(rows);
 
     const toMsg = (r: Row, full: boolean): ChatMessage => {
       if (r.role === "tool") {
         const d = (r.data ?? {}) as { toolCallId?: string; summary?: string };
+        if (superseded.has(r.id)) return { role: "tool", tool_call_id: d.toolCallId ?? "", content: `(earlier result — the same call was made again later) ${d.summary ?? ""}` };
         return { role: "tool", tool_call_id: d.toolCallId ?? "", content: full ? r.content : `(earlier result) ${d.summary ?? ""}` };
       }
       if (r.role === "assistant") {
@@ -340,10 +437,10 @@ export class Agent {
     if (streak < 2 || this.active.has(uuid)) return;
     // Only code errors: a network blip or Highrise outage isn't something to "fix".
     const traceback = tail.findIndex((l) => l.includes("Traceback (most recent call last)"));
-    if (traceback < 0) return;
+    if (traceback < 0 || isNetworkFailure(tail)) return;
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (!project?.autoFix || project.desiredState !== "running") return;
-    if (!process.env.GROQ_API_KEY) return;
+    if (!configuredLanes().length) return; // no AI key of any kind
 
     const now = Date.now();
     const recent = (this.autofixLog.get(uuid) ?? []).filter((t) => now - t < 24 * 3600_000);
