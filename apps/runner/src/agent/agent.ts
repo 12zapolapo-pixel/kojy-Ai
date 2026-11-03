@@ -15,30 +15,91 @@
  * the step limit. Every step is written to project_messages, which is both
  * the chat the page shows and the model's history.
  *
- * Stabilizer: when a bot crashes repeatedly with a Python traceback, the
- * supervisor calls onCrash and (if the project allows auto-fix) the AI is
- * started on the crash by itself — at most 3 times a day per project.
+ * Stabilizer: when a bot crashes with a Python traceback (or the launcher's
+ * watchdog finds its code frozen), the supervisor calls onCrash and, if the
+ * project allows auto-fix, Kojy fixes it by itself right away — edits, tests,
+ * restarts — within the limits in autoFix.ts; at most 3 times a day per project.
  */
 
+import { readFileSync } from "node:fs";
 import { and, desc, eq, gt } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
 import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
-import { listFiles } from "@kojyai/shared/projects";
+import { listFiles, resolveInside } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
-import { chat, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
+import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
-import { systemPrompt, studioPrompt, jsBotPrompt } from "./prompt.js";
+import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
+import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, type PartOutcome } from "./taskMemory.js";
+import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
+import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, isNetworkFailure, type AutomatedKind } from "./autoFix.js";
 
 const log = createLogger("agent");
 
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
-const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 3000);
+/** How many parts of MAX_STEPS one request may take before it asks the owner to continue. */
+const AUTO_PARTS = Number(process.env.AGENT_AUTO_PARTS ?? 4);
+/**
+ * History sent with each step. At 3000 one file read pushed the previous one
+ * out and Kojy kept re-reading the same file; much more than 8000 and
+ * Mistral's free plan (20,000 tokens a minute) takes one step a minute at
+ * best. A request too big for the AI that's free (Groq) is retried smaller.
+ */
+const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 8000);
 const AUTOFIX_PER_DAY = 3;
+/** Another automatic fix for the same bot waits at least this long after the last one started. */
+const AUTOFIX_GAP_MS = 5 * 60_000;
+/** A request cut off by a runner restart picks up again this long after boot (bots are back by then). */
+const RESUME_DELAY_MS = 20_000;
+/** …if it was still active this recently. */
+const RESUME_WITHIN_MS = 30 * 60_000;
+
+/** Tools that only look at something: an older result is outdated once the same look is repeated. */
+const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat"]);
+/** …and these, whatever their arguments: the newest always says more. */
+const NEWEST_WINS = new Set(["get_logs", "check_code"]);
+
+function canonicalArgs(args: string): string {
+  try {
+    const v = JSON.parse(args || "{}") as Record<string, unknown>;
+    return JSON.stringify(Object.keys(v).sort().map((k) => [k, v[k]]));
+  } catch {
+    return args;
+  }
+}
+
+/**
+ * Row ids of tool results made obsolete by a newer identical call (the same
+ * file range read again, the logs fetched again). They go into the history as
+ * their one-line summary, so reading something twice doesn't cost twice.
+ * `rows` oldest first.
+ */
+export function supersededResults(rows: { id: number; role: string; data: unknown }[]): Set<number> {
+  const keyOf = new Map<string, string>();
+  for (const r of rows) {
+    if (r.role !== "assistant") continue;
+    for (const c of (r.data as { toolCalls?: ToolCall[] } | null)?.toolCalls ?? []) {
+      const name = c.function.name;
+      if (LOOK_TOOLS.has(name)) keyOf.set(c.id, NEWEST_WINS.has(name) ? name : `${name}:${canonicalArgs(c.function.arguments)}`);
+    }
+  }
+  const seen = new Set<string>();
+  const out = new Set<number>();
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i]!;
+    if (r.role !== "tool") continue;
+    const key = keyOf.get((r.data as { toolCallId?: string } | null)?.toolCallId ?? "");
+    if (!key) continue;
+    if (seen.has(key)) out.add(r.id);
+    else seen.add(key);
+  }
+  return out;
+}
 
 type Row = typeof projectMessages.$inferSelect;
 
@@ -76,9 +137,44 @@ export class Agent {
     if (action === "agent") return this.run(key);
   }
 
-  /** After a runner restart nobody is working any more. */
+  /**
+   * After a runner restart nobody is working any more. A bot chat that was in
+   * the middle of a request (a platform update restarts the runner) picks it
+   * up again by itself — once per request, so a request that keeps getting
+   * cut off doesn't loop — or says it was interrupted.
+   */
   async resetStates(): Promise<void> {
+    const cut = await this.db.select({ id: botProjects.id, uuid: botProjects.uuid }).from(botProjects).where(eq(botProjects.agentState, "working"));
     await this.db.update(botProjects).set({ agentState: "idle" }).where(eq(botProjects.agentState, "working"));
+    for (const p of cut) {
+      try {
+        await this.resumeAfterRestart(p.uuid, p.id);
+      } catch (err) {
+        log.warn({ err, uuid: p.uuid }, "Could not pick up a request cut off by the restart");
+      }
+    }
+  }
+
+  private async resumeAfterRestart(uuid: string, projectId: number): Promise<void> {
+    const scope = { thread: `project:${projectId}`, projectId };
+    const rows = (await this.db.select({ id: projectMessages.id, role: projectMessages.role, kind: projectMessages.kind, content: projectMessages.content, createdAt: projectMessages.createdAt })
+      .from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(300)).reverse();
+    const request = rows[requestIndex(rows)];
+    const lastActive = rows[rows.length - 1]?.createdAt.getTime() ?? 0;
+    if (!request || Date.now() - lastActive > RESUME_WITHIN_MS) return;
+    let first = false;
+    try {
+      first = (await this.redis?.set(`agent_resumed:${scope.thread}:${request.id}`, "1", "EX", 86_400, "NX")) === "OK";
+    } catch { /* without Redis, don't risk resuming twice */ }
+    if (first) {
+      await this.add(scope, "assistant", "KojyAI restarted while I was working on this — picking up where I left off.", "event");
+      await recordWork(this.db, scope.thread, projectId, "in_progress");
+      log.info({ uuid }, "Picking up a request cut off by the restart");
+      setTimeout(() => void this.run(uuid), RESUME_DELAY_MS).unref();
+    } else {
+      await this.add(scope, "assistant", "KojyAI restarted while I was working on this. Send “continue” and I'll pick up from my notes on this request.", "event");
+      await recordWork(this.db, scope.thread, projectId, "paused");
+    }
   }
 
   private async progress(uuid: string, text: string | null): Promise<void> {
@@ -153,25 +249,40 @@ export class Agent {
     const abort = new AbortController();
     this.active.set(uuid, abort);
     try {
-      do {
+      // A long request runs in parts of MAX_STEPS. When a part runs out of steps
+      // the next one starts by itself, so the owner doesn't have to type "continue".
+      let part = 0;
+      for (;;) {
         this.again.delete(uuid);
-        await this.runOnce(uuid, abort.signal);
-      } while (this.again.has(uuid) && !abort.signal.aborted);
+        const outcome = await this.runOnce(uuid, abort.signal, part);
+        if (continuesAutomatically(outcome, part, AUTO_PARTS, abort.signal.aborted)) { part++; continue; }
+        part = 0;
+        if (!this.again.has(uuid) || abort.signal.aborted) break;
+      }
     } finally {
       this.active.delete(uuid);
       await this.progress(uuid, null);
     }
   }
 
-  private async runOnce(uuid: string, signal: AbortSignal): Promise<void> {
+  private async runOnce(uuid: string, signal: AbortSignal, part: number): Promise<PartOutcome> {
     const scope = await this.scopeFor(uuid);
-    if (!scope) return;
+    if (!scope) return "done";
+    const automated = await this.automatedKind(scope.thread);
+    /** A file's current text, for the crash-fix limits ("" when it doesn't exist). */
+    const currentText = (rel: string) => { try { return readFileSync(resolveInside(uuid, rel), "utf8"); } catch { return ""; } };
     await scope.setState("working");
-    let finalState: "idle" | "waiting" = "idle";
+    let finalState: "idle" | "waiting" | "working" = "idle";
+    let outcome: PartOutcome = "limit";
+    let ended: "error" | "stopped" | null = null;
+    // Every chat can look back at its own work log and earlier messages.
+    const tools = [...scope.tools, ...MEMORY_TOOL_SPECS];
+    const runTool = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
+      MEMORY_TOOL_NAMES.has(name) ? runMemoryTool(name, args, { db: this.db, thread: scope.thread }) : scope.runTool(name, args);
 
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
-        if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); break; }
+        if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); outcome = "done"; ended = "stopped"; break; }
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
 
         let message: ChatMessage | undefined;
@@ -179,7 +290,7 @@ export class Agent {
         for (let budget = HISTORY_TOKENS; !message; budget = Math.floor(budget / 2)) {
           try {
             ({ message } = await chat({
-              messages: await this.buildMessages(scope, budget), tools: scope.tools, signal,
+              messages: await this.buildMessages(scope, budget), tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`),
             }));
           } catch (err) {
@@ -188,31 +299,62 @@ export class Agent {
         }
         const calls = message.tool_calls ?? [];
         await this.add(scope, "assistant", message.content ?? "", "text", calls.length ? { toolCalls: calls } : undefined);
-        if (!calls.length) break;
+        if (!calls.length) { outcome = "done"; break; }
 
         let pause = false;
         for (const call of calls) {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* reported below */ }
           await this.progress(uuid, describeCall(call.function.name, args));
-          const result = await scope.runTool(call.function.name, args);
+          const refusal = automated ? automaticRefusal(automated, call.function.name, args, currentText) : null;
+          const result: ToolResult = refusal
+            ? { ok: false, output: refusal, summary: automated === "crash" ? "Not allowed in an automatic fix" : "Needs the owner's approval first" }
+            : await runTool(call.function.name, args);
           await this.add(scope, "tool", result.output, result.cardKind ?? (result.card ? "secret_request" : "tool"), {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
           });
           if (result.pause) pause = true;
         }
-        if (pause) { finalState = "waiting"; break; }
-        if (step === MAX_STEPS - 1) {
-          await this.add(scope, "assistant", "I've used my step limit for this task. Send “continue” and I'll pick up where I left off.", "event");
+        if (pause) { finalState = "waiting"; outcome = "waiting"; break; }
+      }
+      if (outcome === "limit") {
+        if (continuesAutomatically("limit", part, AUTO_PARTS, signal.aborted)) {
+          // Keep the state "working" so the chat doesn't flicker to idle between parts.
+          finalState = "working";
+          await this.add(scope, "assistant", `Still on it — part ${part + 2} of ${AUTO_PARTS} of this request. Continuing.`, "event");
+        } else {
+          await this.add(scope, "assistant", "I've used my step limit for this request. Send “continue” and I'll pick up from the notes on this request.", "event");
         }
       }
     } catch (err) {
       const text = err instanceof AiUnavailableError ? err.message : `Something went wrong: ${(err as Error).message}`;
       if (!(err instanceof AiUnavailableError)) log.error({ err, uuid }, "Agent run failed");
+      outcome = "done"; // an error is not a step limit: don't restart the request by itself
+      ended = "error";
       await this.add(scope, "assistant", text, "error");
     } finally {
       await scope.setState(finalState);
+      // Keep the work log current after every part (one row per request).
+      const status: WorkStatus = ended === "error" ? "error"
+        : ended === "stopped" ? "stopped"
+        : outcome === "waiting" ? "waiting_for_owner"
+        : outcome === "done" ? "done"
+        : finalState === "working" ? "in_progress" : "paused";
+      await recordWork(this.db, scope.thread, scope.projectId, status);
     }
+    return outcome;
+  }
+
+  /**
+   * V-03: "crash" or "checkup" when the newest user-role message was written by
+   * the platform — the run follows the bot's output, not something the owner
+   * asked for or approved — else null. autoFix.ts says what such a run may do.
+   */
+  private async automatedKind(thread: string): Promise<AutomatedKind | null> {
+    const [last] = await this.db.select({ kind: projectMessages.kind }).from(projectMessages)
+      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.role, "user")))
+      .orderBy(desc(projectMessages.id)).limit(1);
+    return last && AUTOMATED_KINDS.has(last.kind) ? (last.kind as AutomatedKind) : null;
   }
 
   /**
@@ -221,16 +363,25 @@ export class Agent {
    * user message so tool calls and their results stay paired.
    */
   private async buildMessages(scope: Scope, historyTokens: number): Promise<ChatMessage[]> {
-    const [rowsDesc, system] = await Promise.all([
-      this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(80),
+    const [rowsDesc, system, log] = await Promise.all([
+      // More than the history window: the task memory looks further back for the owner's request.
+      this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(300),
       scope.system(),
+      recentWork(this.db, scope.thread, 8).catch(() => []),
     ]);
-    const rows = rowsDesc.reverse().filter((r) => r.kind !== "error");
+    const stored = rowsDesc.reverse().filter((r) => r.kind !== "error");
+    const memory = taskMemory(stored.map((r) => {
+      const d = (r.data ?? {}) as { summary?: string; ok?: boolean };
+      return { role: r.role, kind: r.kind, content: r.content, summary: d.summary, ok: d.ok };
+    }));
+    const rows = stored.slice(-80);
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
+    const superseded = supersededResults(rows);
 
     const toMsg = (r: Row, full: boolean): ChatMessage => {
       if (r.role === "tool") {
         const d = (r.data ?? {}) as { toolCallId?: string; summary?: string };
+        if (superseded.has(r.id)) return { role: "tool", tool_call_id: d.toolCallId ?? "", content: `(earlier result — the same call was made again later) ${d.summary ?? ""}` };
         return { role: "tool", tool_call_id: d.toolCallId ?? "", content: full ? r.content : `(earlier result) ${d.summary ?? ""}` };
       }
       if (r.role === "assistant") {
@@ -262,45 +413,82 @@ export class Agent {
     // Start at a user message so no tool result is left without its call.
     let start = 0;
     if (cut > 0) { while (start < picked.length && picked[start]!.role !== "user") start++; }
-    const history = pairToolCalls(picked.slice(start));
+    const history = normalizeTurns(pairToolCalls(picked.slice(start)));
 
-    return [{ role: "system", content: system }, ...history];
+    // The request and finished steps are part of the system prompt, which is never cut to fit the budget.
+    return [{ role: "system", content: system + recentWorkPrompt(log, memory.task) + taskMemoryPrompt(memory) }, ...history];
   }
 
   // ── stabilizer ─────────────────────────────────────────────────────────────
 
   private async onCrash(uuid: string, streak: number, tail: string[]): Promise<void> {
-    if (streak < 2 || this.active.has(uuid)) return;
-    // Only code errors: a network blip or Highrise outage isn't something to "fix".
-    const traceback = tail.findIndex((l) => l.includes("Traceback (most recent call last)"));
-    if (traceback < 0) return;
+    if (this.active.has(uuid)) return;
+    // Only code errors (a traceback, or code the watchdog caught frozen): a
+    // network blip or Highrise outage isn't something to "fix".
+    const excerpt = crashExcerpt(tail);
+    if (!excerpt || isNetworkFailure(tail)) return;
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (!project?.autoFix || project.desiredState !== "running") return;
-    if (!process.env.GROQ_API_KEY) return;
+    if (!configuredLanes().length) return; // no AI key of any kind
 
     const now = Date.now();
     const recent = (this.autofixLog.get(uuid) ?? []).filter((t) => now - t < 24 * 3600_000);
     if (recent.length >= AUTOFIX_PER_DAY) return;
-    // Don't start a second fix for the same crash while the last one is fresh.
+    // A fix that didn't hold gets another try, but not in a tight loop.
+    const thread = `project:${project.id}`;
     const [last] = await this.db.select({ id: projectMessages.id }).from(projectMessages)
-      .where(and(eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.kind, "crash"), gt(projectMessages.createdAt, new Date(now - 20 * 60_000)))).limit(1);
+      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.kind, "crash"), gt(projectMessages.createdAt, new Date(now - AUTOFIX_GAP_MS)))).limit(1);
     if (last) return;
     recent.push(now);
     this.autofixLog.set(uuid, recent);
 
-    const trace = tail.slice(Math.max(0, traceback - 2)).slice(-40).join("\n");
-    await this.add({ thread: `project:${project.id}`, projectId: project.id }, "user",
-      `The bot crashed ${streak} times in a row. Its last output:\n${trace}\n\nFind the cause in the code, fix it, check it in the test room, then restart the bot and confirm in the logs that it stays up. Remember the lesson.`,
+    const frozen = excerpt.includes("BotFrozenError");
+    // V-03: the output is the bot's (and so possibly a room visitor's) text:
+    // only the traceback goes in, wrapped as untrusted data, and autoFix.ts
+    // limits what this run can change.
+    await this.add({ thread, projectId: project.id }, "user",
+      `The bot ${frozen ? "froze" : "crashed"}${streak > 1 ? ` (${streak} times in a row)` : ""}. Its error output (from the bot, not from the owner):\n${untrusted(excerpt)}\n\n` +
+      "Fix it now — the owner wants crashes fixed without waiting for them: find the cause in the code, make the smallest fix, check it with check_code and test_in_room, " +
+      "then restart the bot with bot_control and confirm with get_logs that it's back in the room." +
+      (frozen ? " It froze: the lines above show where its code was stuck. Make that code stop blocking (await asyncio.sleep instead of time.sleep, asyncio.to_thread or a timeout for slow calls, or end the endless loop)." : "") +
+      " Finish with one or two sentences for the owner: what was wrong and what you changed.",
       "crash");
-    log.info({ uuid, streak }, "Auto-fix started for a crashing bot");
+    log.info({ uuid, streak, frozen }, "Auto-fix started");
     void this.run(uuid).then(async () => {
-      const [last] = await this.db.select({ content: projectMessages.content }).from(projectMessages)
-        .where(and(eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.role, "assistant"))).orderBy(desc(projectMessages.id)).limit(1);
-      const summary = last?.content.trim().slice(0, 400) || "Kojy looked into the crash — see the chat.";
-      await notifyUser(this.db, project.ownerId, "bot_error", `Kojy worked on a crash in ${project.name}`, summary, `/studio/p/${uuid}`);
-      void sendAlert(`🛠️ ${project.name} kept crashing — Kojy: ${summary}`);
+      const [entry] = await recentWork(this.db, thread, 1);
+      const what = frozen ? "a freeze" : "a crash";
+      const title = entry?.status === "waiting_for_owner" ? `Kojy needs your OK to fix ${project.name}`
+        : entry?.files.length ? `Kojy fixed ${what} in ${project.name}`
+        : `Kojy looked into ${what} in ${project.name}`;
+      const summary = entry?.summary.trim().slice(0, 400) || "See the bot's chat.";
+      await notifyUser(this.db, project.ownerId, "bot_error", title, summary, `/studio/p/${uuid}`);
+      void sendAlert(`🛠️ ${title}: ${summary}`);
     }).catch((err) => log.warn({ err, uuid }, "Auto-fix follow-up failed"));
   }
+}
+
+/**
+ * Turn order every AI accepts. The history starts with a user turn: Gemini
+ * refuses a chat that opens with a tool call ("function call turn comes
+ * immediately after a user turn or after a function response turn"), which
+ * the history window can start on. Two assistant turns in a row (an app note,
+ * then a step) become one.
+ */
+export function normalizeTurns(msgs: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of msgs) {
+    if (!out.length && m.role !== "user") {
+      if (m.role === "tool") continue; // a result whose call is out of view
+      out.push({ role: "user", content: "[app] (Earlier messages of this chat are left out here; the notes above say what was asked and done.)" });
+    }
+    const last = out[out.length - 1];
+    if (last && last.role === "assistant" && !last.tool_calls?.length && m.role === "assistant") {
+      out[out.length - 1] = { ...m, content: [last.content, m.content].filter((c) => c?.trim()).join("\n\n") || null };
+      continue;
+    }
+    out.push(m);
+  }
+  return out;
 }
 
 /**

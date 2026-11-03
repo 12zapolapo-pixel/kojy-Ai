@@ -10,7 +10,7 @@
 // - Runs as root only long enough to give the disk to the "node" user.
 
 import { spawn, execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
 
 const DATA = process.env.DATA_DIR ?? "/data";
@@ -21,6 +21,7 @@ const dirs = {
   SQLITE_DIR: `${DATA}/sqlite`,
 };
 for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
+mkdirSync(`${DATA}/caddy`, { recursive: true }); // made here so the chown below covers it
 
 // Railway mounts the disk owned by root; hand it to "node" (uid/gid 1000).
 let ids = {};
@@ -28,6 +29,15 @@ if (userInfo().uid === 0) {
   try { execFileSync("chown", ["-R", "1000:1000", DATA]); } catch (e) { console.error(`[allinone] chown failed: ${e.message}`); }
   ids = { uid: 1000, gid: 1000 };
 }
+
+// V-01: bots run as their own users (apps/runner/src/sandbox.ts). The disk
+// also holds database backups, SQLite caches and Caddy's TLS keys, so close
+// everything here to "other" users; the runner opens each bot only its own
+// project and venv folder. (Directories block traversal, so one level is enough.)
+try {
+  execFileSync("chmod", ["0711", DATA]);
+  for (const name of readdirSync(DATA)) execFileSync("chmod", ["o-rwx", `${DATA}/${name}`]);
+} catch (e) { console.error(`[allinone] could not close ${DATA} to other users: ${e.message}`); }
 
 // Railway's private network is IPv6; ioredis looks up IPv4 only unless the
 // URL says family=0 (any).

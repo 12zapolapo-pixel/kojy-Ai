@@ -391,8 +391,6 @@ export async function closeAllQueues(): Promise<void> {
 // ─── Cron Scheduler ───────────────────────────────────────────────────────────
 
 function initCronScheduler(): void {
-  const connection = createRedisConnection();
-
   const CRON_JOBS = [
     {
       queue: QUEUE_NAMES.MEMORY_COMPRESSION,

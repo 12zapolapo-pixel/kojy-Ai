@@ -18,10 +18,13 @@ import { connectRedis, getRedis,
          getRedisPublisher }               from "./services/redis.js";
 import { initJobQueues, closeAllQueues }   from "./queues/jobQueues.js";
 import { createLogger }                    from "./services/logger.js";
+import { configureErrorReporting, flushErrors, installCrashReporting } from "@kojyai/shared/error-reporting";
 import { refreshEmoteCatalogIfStale }      from "./processors/emoteCatalogRefresh.js";
 
 
 const log = createLogger("worker-boot");
+// Errors to Sentry when SENTRY_DSN is set (see @kojyai/shared/error-reporting).
+if (configureErrorReporting({ service: "kojyai-worker" })) installCrashReporting();
 
 const REQUIRED_ENV = ["DATABASE_URL", "REDIS_URL", "JWT_SECRET", "ENCRYPTION_KEY"];
 for (const key of REQUIRED_ENV) {
@@ -105,5 +108,5 @@ async function main() {
 
 main().catch((err) => {
   log.fatal({ err }, "Worker boot failed");
-  process.exit(1);
+  void flushErrors(2000).finally(() => process.exit(1));
 });

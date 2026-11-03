@@ -35,7 +35,7 @@
  * - Content takes full width
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { NavLink, useLocation } from "react-router-dom";
 import { useAuthStore } from "../state/authStore";
@@ -47,14 +47,6 @@ import { CommandPalette } from "../components/CommandPalette";
 import clsx from "clsx";
 
 // ─── Nav Items ────────────────────────────────────────────────────────────────
-
-interface NavItem {
-  path:    string;
-  label:   string;
-  icon:    string;
-  badge?:  () => number | null;
-  section?: "main" | "ops" | "bottom";
-}
 
 // ─── App Shell ────────────────────────────────────────────────────────────────
 

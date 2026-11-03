@@ -5,9 +5,9 @@
  * OWNERSHIP: apps/runner/src/agent
  */
 
-import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, mkdtempSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { Worker } from "node:worker_threads";
 import path from "node:path";
 import { asc, eq } from "drizzle-orm";
 import WebSocket from "ws";
@@ -18,9 +18,11 @@ import {
   listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
-import { LAUNCHER } from "../supervisor.js";
+import { BOTCHECK, LAUNCHER } from "../supervisor.js";
 import { runRoomTest } from "./mockRoom.js";
+import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
+import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -71,7 +73,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("test_secrets", "Check that secrets work: Highrise room+token (connects to Highrise), GROQ_API_KEY, OPENAI_API_KEY; others are only checked for being set.", { names: { type: "array", items: { type: "string" } } }),
   fn("set_entrypoint", "Set which class starts the bot, as module.path:ClassName (a class based on BaseBot).", { entrypoint: str("e.g. bot:MyBot") }, ["entrypoint"]),
   fn("bot_control", "Start, stop or restart the real bot (restart makes code changes live).", { action: { type: "string", enum: ["start", "stop", "restart"] } }, ["action"]),
-  fn("get_logs", "The real bot's latest console output (status, errors, tracebacks).", { lines: { type: "integer" } }),
+  fn("get_logs", "Whether the real bot is in the room right now, what happened to its connection in the last day (KojyAI restarts, Highrise reconnects, the bot exiting), and its newest console lines (errors, tracebacks). Call it first when the owner says the bot disconnected, left or isn't answering.", { lines: { type: "integer", description: "console lines to show, newest last (default 40)" } }),
   fn("propose_plan", "Before a bigger change (a new feature, several files, a rewrite), show the owner a short plan with Approve/Change buttons, then stop and wait. Not for small fixes or questions.",
     { title: str("what you'll build, a few words"), steps: { type: "array", items: { type: "string" }, description: "3-7 short steps in plain words" } }, ["title", "steps"]),
   fn("find_emotes", "Search the list of emote ids that work in Highrise (checked in a real room) by name or id, e.g. 'dance', 'wave'. Use these ids in code; never guess emote ids.",
@@ -83,18 +85,67 @@ export const TOOL_SPECS: ToolSpec[] = [
 ];
 
 const TEXT_EXT = /\.(py|txt|md|json|ya?ml|toml|ini|cfg|env|example|js|ts|html|css|sh)$|(^|\/)(Dockerfile|Procfile|requirements[^/]*)$/i;
+/**
+ * botcheck.py's "HIDDEN name|placeholder class|real class" lines, explained:
+ * an empty \`...\` method earlier in the class bases replaces the real one.
+ */
+export function hiddenMethods(out: string): string[] {
+  return out.split("\n").filter((l) => l.startsWith("HIDDEN ")).map((l) => {
+    const [name, placeholder, real] = l.slice(7).trim().split("|");
+    return `- ${name}: the empty placeholder in ${placeholder} is used instead of the real ${name} in ${real}. ` +
+      `Remove the placeholder, or list ${placeholder} after ${real} in the bot class's bases.`;
+  });
+}
+
 const clip = (s: string, max = 6000) => (s.length > max ? `${s.slice(0, max)}\n… (${s.length - max} more characters)` : s);
 
-function runCapture(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; out: string }> {
+function runCapture(uid: number, cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number | null; out: string }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    let started: ReturnType<typeof spawnAs>;
+    try { started = spawnAs(uid, cmd, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] }); }
+    catch (e) { resolve({ code: -1, out: (e as Error).message }); return; }
+    const { child, kill } = started;
     let out = "";
     const add = (d: Buffer) => { if (out.length < 20_000) out += d.toString("utf8"); };
-    child.stdout.on("data", add);
-    child.stderr.on("data", add);
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    child.stdout?.on("data", add);
+    child.stderr?.on("data", add);
+    const timer = setTimeout(() => kill("SIGKILL"), timeoutMs);
     child.once("error", (e) => { clearTimeout(timer); resolve({ code: -1, out: e.message }); });
     child.once("exit", (code) => { clearTimeout(timer); resolve({ code, out }); });
+  });
+}
+
+/**
+ * SECURITY FIX (V-04): search_code compiles a regex the AI chose (and the AI
+ * can be steered by file contents) and ran it over up to 5,000 files on the
+ * runner's main thread — a backtracking pattern froze every bot's
+ * supervisor. It now runs in a worker thread that is killed after a few
+ * seconds; the main thread stays free.
+ */
+const SEARCH_TIMEOUT_MS = 4000;
+const MAX_SEARCH_PATTERN = 300;
+const SEARCH_WORKER = `
+const { parentPort, workerData } = require("node:worker_threads");
+const { readFileSync } = require("node:fs");
+const re = new RegExp(workerData.pattern, "i");
+const hits = [];
+for (const f of workerData.files) {
+  let text;
+  try { text = readFileSync(f.abs, "utf8"); } catch { continue; }
+  const lines = text.split("\\n");
+  for (let i = 0; i < lines.length && hits.length < 50; i++) {
+    if (re.test(lines[i])) hits.push(f.rel + ":" + (i + 1) + ": " + lines[i].trim().slice(0, 160));
+  }
+  if (hits.length >= 50) break;
+}
+parentPort.postMessage(hits);`;
+
+export function searchInWorker(pattern: string, files: { rel: string; abs: string }[]): Promise<string[] | "timeout"> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(SEARCH_WORKER, { eval: true, workerData: { pattern, files }, resourceLimits: { maxOldGenerationSizeMb: 128 } });
+    const timer = setTimeout(() => { void worker.terminate(); resolve("timeout"); }, SEARCH_TIMEOUT_MS);
+    worker.once("message", (hits: string[]) => { clearTimeout(timer); void worker.terminate(); resolve(hits); });
+    worker.once("error", (err) => { clearTimeout(timer); reject(err); });
   });
 }
 
@@ -168,18 +219,16 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       case "search_code": {
-        let re: RegExp;
-        try { re = new RegExp(s(args.pattern), "i"); } catch { return { ok: false, output: "Invalid regular expression", summary: "Search failed" }; }
+        const pattern = s(args.pattern);
+        if (pattern.length > MAX_SEARCH_PATTERN) return { ok: false, output: `Pattern is too long (${MAX_SEARCH_PATTERN} characters max).`, summary: "Search failed" };
+        try { new RegExp(pattern, "i"); } catch { return { ok: false, output: "Invalid regular expression", summary: "Search failed" }; }
         const folder = s(args.folder) ? cleanRelPath(s(args.folder)) + "/" : "";
-        const hits: string[] = [];
-        for (const f of listFiles(uuid)) {
-          if (f.isDir || !TEXT_EXT.test(f.path) || f.size > MAX_EDIT_BYTES || (folder && !f.path.startsWith(folder))) continue;
-          readFileSync(path.join(dir, f.path), "utf8").split("\n").forEach((line, i) => {
-            if (hits.length < 50 && re.test(line)) hits.push(`${f.path}:${i + 1}: ${line.trim().slice(0, 160)}`);
-          });
-          if (hits.length >= 50) break;
-        }
-        return { ok: true, output: hits.join("\n") || "No matches.", summary: `Searched for “${s(args.pattern).slice(0, 40)}” (${hits.length} matches)` };
+        const targets = listFiles(uuid)
+          .filter((f) => !f.isDir && TEXT_EXT.test(f.path) && f.size <= MAX_EDIT_BYTES && (!folder || f.path.startsWith(folder)))
+          .map((f) => ({ rel: f.path, abs: path.join(dir, f.path) }));
+        const hits = await searchInWorker(pattern, targets);
+        if (hits === "timeout") return { ok: false, output: `The search took over ${SEARCH_TIMEOUT_MS / 1000}s and was stopped. Use a simpler pattern (avoid nested repeats like (a+)+).`, summary: "Search stopped (too slow)" };
+        return { ok: true, output: hits.join("\n") || "No matches.", summary: `Searched for “${pattern.slice(0, 40)}” (${hits.length} matches)` };
       }
 
       case "edit_file": {
@@ -222,20 +271,28 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       case "check_code": {
-        const python = await ctx.supervisor.ensureVenv(uuid, dir);
+        const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
         const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
+        const uid = sandboxUid(ctx.project.id);
         const work = mkdtempSync(path.join(tmpdir(), "kojy-check-"));
         try {
           cpSync(dir, work, { recursive: true, filter: (src) => !/[/\\](\.git|node_modules|__pycache__|data)$/.test(src) });
-          const compile = await runCapture(python, ["-m", "compileall", "-q", "-x", "(^|/)(\\.|venv|node_modules)", "."], work, env, 60_000);
+          grantDir(work, uid);
+          const compile = await runCapture(uid, python, ["-m", "compileall", "-q", "-x", "(^|/)(\\.|venv|node_modules)", "."], work, env, 60_000);
           if (compile.code !== 0) return { ok: false, output: clip(`Syntax errors:\n${compile.out}`), summary: "Code check: syntax errors" };
           const entry = ctx.project.entrypoint;
           if (!entry) return { ok: true, output: "All files compile. No entrypoint set yet (use set_entrypoint).", summary: "Code check: compiles (no entrypoint yet)" };
-          const [mod, cls] = entry.split(":");
-          const probe = `import sys; sys.path.insert(0, "."); import importlib; m = importlib.import_module(${JSON.stringify(mod)}); c = getattr(m, ${JSON.stringify(cls)}); from highrise import BaseBot; assert issubclass(c, BaseBot), "${cls} is not a BaseBot"; c(); print("IMPORT_OK")`;
-          const imp = await runCapture(python, ["-c", probe], work, env, 60_000);
-          const ok = imp.out.includes("IMPORT_OK");
-          return { ok, output: clip(ok ? `All files compile and ${entry} loads.` : `Importing ${entry} failed:\n${imp.out}`), summary: ok ? "Code check passed" : "Code check: the bot fails to load" };
+          const imp = await runCapture(uid, python, [BOTCHECK, entry], work, env, 60_000);
+          if (!imp.out.includes("IMPORT_OK")) return { ok: false, output: clip(`Importing ${entry} failed:\n${imp.out}`), summary: "Code check: the bot fails to load" };
+          const hidden = hiddenMethods(imp.out);
+          if (hidden.length) {
+            return {
+              ok: false,
+              output: clip(`All files compile and ${entry} loads, but these methods do nothing when the bot runs:\n${hidden.join("\n")}`),
+              summary: `Code check: ${hidden.length} placeholder method(s) hide real ones`,
+            };
+          }
+          return { ok: true, output: `All files compile and ${entry} loads.`, summary: "Code check passed" };
         } finally {
           rmSync(work, { recursive: true, force: true });
         }
@@ -244,10 +301,10 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       case "test_in_room": {
         if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
-        const python = await ctx.supervisor.ensureVenv(uuid, dir);
+        const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
         const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
         const r = await runRoomTest({
-          projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat,
+          uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat,
           join: args.join === true, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
         });
         const verdict = !r.connected ? "The bot never connected to the test room."
@@ -292,7 +349,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
             const empty = !d || /^(None|""|'')$/.test(d);
             // An empty default on a credential still means "required"; on anything
             // else (a webhook URL, a feature flag) it means "off unless set".
-            note(m[1]!, f.path, !empty ? d! : /TOKEN|KEY|SECRET|PASSWORD|ROOM_ID/.test(m[1]!) || !d ? null : "empty, feature off");
+            note(m[1]!, f.path, !empty ? d : /TOKEN|KEY|SECRET|PASSWORD|ROOM_ID/.test(m[1]!) || !d ? null : "empty, feature off");
           }
         }
         for (const k of [...vars.keys()]) if (["PATH", "HOME", "HR_BOTAPI_URL"].includes(k) || k.startsWith("KOJY_") || k.startsWith("PYTHON")) vars.delete(k);
@@ -364,9 +421,19 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 
       case "get_logs": {
         const n = Math.min(Math.max(Number(args.lines) || 40, 5), 120);
-        const lines = readLogs(uuid, undefined, 48 * 1024).lines.slice(-n).map((l) => `${l.stream === "stderr" ? "! " : l.stream === "system" ? "# " : ""}${l.line}`);
-        const [p] = await ctx.db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage, restartCount: botProjects.restartCount }).from(botProjects).where(eq(botProjects.id, ctx.project.id));
-        return { ok: true, output: clip(`Status: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}, restarts: ${p?.restartCount}\n${lines.join("\n") || "(no output yet)"}`), summary: `Read the bot's console (${lines.length} lines)` };
+        // A day of output for the connection summary; only the newest lines are shown.
+        const lines = readLogs(uuid, undefined, 512 * 1024).lines;
+        const [p] = await ctx.db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage, restartCount: botProjects.restartCount, lastStartedAt: botProjects.lastStartedAt })
+          .from(botProjects).where(eq(botProjects.id, ctx.project.id));
+        const now = Date.now();
+        const up = p?.status === "running" && p.lastStartedAt ? `, up ${duration((now - p.lastStartedAt.getTime()) / 1000)} (process started ${stamp(p.lastStartedAt.getTime())})` : "";
+        const output = [
+          `Now: ${stamp(now)} UTC. Status: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}${up}. Restarts so far: ${p?.restartCount}.`,
+          connectionReport(lines, now),
+          "Console, newest line last (times in UTC):",
+          lines.length ? formatConsole(lines.slice(-600), { maxLines: n, maxChars: 6000 }) : "(no output yet)",
+        ].join("\n");
+        return { ok: true, output, summary: `Read the bot's console and connection history (${Math.min(n, lines.length)} lines)` };
       }
 
       case "propose_plan": {

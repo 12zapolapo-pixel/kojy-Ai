@@ -7,7 +7,6 @@ import { useState }  from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getQueryKey } from "@trpc/react-query";
 import { trpc, trpcClient }      from "../../lib/trpc";
-import { PageLoader } from "../../components/PageLoader";
 import clsx          from "clsx";
 
 type ItemType = "all" | "bot_config" | "personality" | "plugin" | "template" | "rental";
@@ -154,7 +153,7 @@ function ItemDetailModal({ id, items, onClose }: { id: string; items: any[]; onC
   const qc = useQueryClient();
   const purchase = useMutation({
     mutationFn: () => trpcClient.marketplace.purchase.mutate({ id }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: getQueryKey(trpc.marketplace.list) }); onClose(); },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: getQueryKey(trpc.marketplace.list) }); onClose(); },
   });
 
   if (!item) return null;

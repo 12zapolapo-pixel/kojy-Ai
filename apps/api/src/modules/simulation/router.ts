@@ -7,7 +7,7 @@ import { z }          from "zod";
 import { eq, and, desc } from "drizzle-orm";
 import { TRPCError }  from "@trpc/server";
 import { nanoid }     from "nanoid";
-import { router, protectedProc, permittedProc } from "../../trpc.js";
+import { router, permittedProc } from "../../trpc.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js"; // single canonical org resolution (M-08/M-13)
 import { schema }     from "../../db/client.js"; // FIX-2: schema re-exported from client.ts
 import { enqueue }    from "../../jobs/queues.js";

@@ -188,22 +188,13 @@ export async function createContext(
 }
 
 function extractSessionId(req: Request): string | null {
-  // Cookie
-  //
-  // SECURITY NOTE (M-03) — READ BEFORE WIRING THIS UP:
-  // Nothing in this codebase currently SETS a "session" cookie (auth.login
-  // returns the session id in the response body, and clients send it as a
-  // Bearer token), so this branch is dormant and not exploitable today.
-  // The moment anyone makes auth.login set this cookie, every mutating
-  // procedure becomes reachable by a forged cross-site request (browsers
-  // attach cookies automatically; they never attach Bearer headers). So the
-  // SAME change that starts setting this cookie MUST ALSO ship one of:
-  //   - the cookie flags  HttpOnly; Secure; SameSite=Strict  (minimum), or
-  //   - real CSRF tokens (double-submit or synchronizer) checked on mutations.
-  // Do not ship the cookie first and "add CSRF later".
-  const cookieHeader = req.headers.get("cookie") ?? "";
-  const cookieMatch = cookieHeader.match(/(?:^|;\s*)session=([^;]+)/);
-  if (cookieMatch?.[1]) return cookieMatch[1];
+  // SECURITY FIX (V-10): sessions are read from the Authorization header only.
+  // A "session" cookie used to be accepted first. Nothing set one, so it was
+  // dormant — but browsers attach cookies to cross-site requests (they never
+  // attach Bearer headers), so the day anything set that cookie, every
+  // mutation would have been open to CSRF. To move to cookies later, set
+  // HttpOnly; Secure; SameSite=Strict AND check a CSRF token (or Origin) on
+  // every mutation in the same change.
 
   // Authorization: Bearer <token> (fallback for BYOK / API usage)
   const auth = req.headers.get("authorization");
@@ -297,7 +288,7 @@ export const protectedProc = publicProcedure.use(withRateLimit).use(withAuth);
 /** Permission-gated procedure factory */
 export function permittedProc(permission: Permission) {
   return protectedProc.use(({ ctx, next }) => {
-    const { role, tier } = ctx.user!;
+    const { role, tier } = ctx.user;
     if (!hasPermission(role, tier, permission)) {
       throw new TRPCError({
         code:    "FORBIDDEN",
@@ -363,7 +354,7 @@ function withAdminAudit(scope: "admin" | "superadmin") {
 /** Admin-only procedures — mutations are audit-logged structurally (M-04). */
 export const adminProc = protectedProc
   .use(({ ctx, next }) => {
-    if (ctx.user!.role !== "admin" && ctx.user!.role !== "superadmin") {
+    if (ctx.user.role !== "admin" && ctx.user.role !== "superadmin") {
       throw new TRPCError({
         code:    "FORBIDDEN",
         message: "Administrator access required.",
@@ -376,7 +367,7 @@ export const adminProc = protectedProc
 /** Superadmin-only procedures — mutations are audit-logged structurally (M-04). */
 export const superadminProc = protectedProc
   .use(({ ctx, next }) => {
-    if (ctx.user!.role !== "superadmin") {
+    if (ctx.user.role !== "superadmin") {
       throw new TRPCError({
         code:    "FORBIDDEN",
         message: "Superadmin access required.",

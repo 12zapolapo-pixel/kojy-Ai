@@ -34,6 +34,7 @@ import { createContext } from "./trpc.js";
 import { initWebSocketGateway } from "./websocket/gateway.js";
 import { initBotRuntimeManager } from "./modules/bots/runtime-manager.js";
 import { createLogger } from "./utils/logger.js";
+import { configureErrorReporting, flushErrors, installCrashReporting } from "@kojyai/shared/error-reporting";
 import { resolveClientIp, getTrustedProxies } from "./utils/clientIp.js";
 // NOTE: initJobQueues lives in apps/worker — the API process only enqueues jobs,
 // it never initialises queue workers. Removing the dead import prevents a boot crash.
@@ -43,6 +44,8 @@ import { handleStripeWebhook } from "./modules/billing/webhook.js";
 
 
 const log = createLogger("boot");
+// Errors to Sentry when SENTRY_DSN is set (see @kojyai/shared/error-reporting).
+if (configureErrorReporting({ service: "kojyai-api" })) installCrashReporting();
 
 // ─── 1. Environment Validation ────────────────────────────────────────────────
 
@@ -141,6 +144,16 @@ if (process.env.ENCRYPTION_KEY && process.env.ENCRYPTION_KEY.length < 64) {
 // anonymous user resolves to the LB's IP and shares ONE rate-limit bucket
 // (legit users lock each other out; a credential-stuffer hides in the crowd).
 // That failure is completely silent, so surface it loudly at startup.
+// V-08: without email, verification and password-reset codes can't reach
+// anyone (they're no longer written to the log in production).
+if (process.env.NODE_ENV === "production" && !process.env.RESEND_API_KEY) {
+  log.warn(
+    process.env.LOG_EMAIL_CODES === "true"
+      ? "RESEND_API_KEY is not set and LOG_EMAIL_CODES=true — verification and password-reset codes are written to this log. Anyone who can read it can reset any password. Set RESEND_API_KEY and remove LOG_EMAIL_CODES."
+      : "RESEND_API_KEY is not set — email verification and password reset won't work (codes are not sent or logged). Set RESEND_API_KEY.",
+  );
+}
+
 if (process.env.NODE_ENV === "production" && !process.env.TRUSTED_PROXY_IPS) {
   log.warn(
     { defaultTrusted: [...getTrustedProxies()] },
@@ -152,8 +165,8 @@ if (process.env.NODE_ENV === "production" && !process.env.TRUSTED_PROXY_IPS) {
 
 function getClientIp(c: any): string {
   const socketAddr: string | undefined =
-    (c.env as any)?.incoming?.socket?.remoteAddress ??
-    (c.env as any)?.incoming?.connection?.remoteAddress;
+    (c.env)?.incoming?.socket?.remoteAddress ??
+    (c.env)?.incoming?.connection?.remoteAddress;
   return resolveClientIp(socketAddr, c.req.header("x-forwarded-for"));
 }
 
@@ -231,7 +244,7 @@ app.use(
       // Full detail server-side always — this is the only place the stack
       // trace is visible now that trpc.ts strips it from production
       // responses (see errorFormatter in trpc.ts).
-      const meta = { err: error, path, type, userId: (ctx as any)?.user?.id };
+      const meta = { err: error, path, type, userId: (ctx)?.user?.id };
       if (error.code === "INTERNAL_SERVER_ERROR") {
         log.error(meta, `Unhandled tRPC error on ${path ?? "unknown procedure"}`);
       } else {
@@ -243,6 +256,10 @@ app.use(
     },
   }),
 );
+
+// Settings the website needs at runtime (public by design: a browser DSN
+// only lets someone send error reports to the project).
+app.get("/client-config", (c) => c.json({ sentryDsn: (process.env.SENTRY_DSN_WEB || process.env.SENTRY_DSN || "").trim() || null }));
 
 // Health check — used by load balancer and k8s readiness probe
 app.get("/health", async (c) => {
@@ -336,5 +353,5 @@ async function main() {
 
 main().catch((err) => {
   log.fatal({ err }, "Boot failed");
-  process.exit(1);
+  void flushErrors(2000).finally(() => process.exit(1));
 });

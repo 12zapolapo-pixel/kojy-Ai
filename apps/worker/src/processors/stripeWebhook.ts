@@ -28,7 +28,6 @@ import { eq, and, sql } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { createLogger } from "../services/logger.js";
 import { getRedisPublisher } from "../services/redis.js";
-import { QUEUE_NAMES } from "@kojyai/shared/constants";
 
 const log = createLogger("stripe-webhook-processor");
 
@@ -108,7 +107,7 @@ export async function processStripeWebhook(job: Job<StripeWebhookJobData>): Prom
           currentPeriodStart:   now,
           currentPeriodEnd:     periodEnd,
           cancelAtPeriodEnd:    false,
-          limits:               limits as any,
+          limits:               limits,
         }).onConflictDoUpdate({
           target: schema.subscriptions.orgId,
           set: {
@@ -116,7 +115,7 @@ export async function processStripeWebhook(job: Job<StripeWebhookJobData>): Prom
             status:               "active",
             stripeSubscriptionId: String(session.subscription ?? ""),
             stripeCustomerId:     String(session.customer ?? ""),
-            limits:               limits as any,
+            limits:               limits,
           },
         });
 
@@ -169,7 +168,7 @@ export async function processStripeWebhook(job: Job<StripeWebhookJobData>): Prom
         }
 
         await db.update(schema.subscriptions)
-          .set(subscriptionUpdate as any)
+          .set(subscriptionUpdate)
           .where(eq(schema.subscriptions.stripeSubscriptionId, String(sub.id ?? "")));
 
         // Sync plan down to org + user tier when the plan actually changed
@@ -224,7 +223,7 @@ export async function processStripeWebhook(job: Job<StripeWebhookJobData>): Prom
               .where(eq(schema.organizations.id, orgIdNum));
 
             await db.update(schema.subscriptions)
-              .set({ status: "canceled", plan: "free", limits: DEFAULT_PLAN_LIMITS as any })
+              .set({ status: "canceled", plan: "free", limits: DEFAULT_PLAN_LIMITS })
               .where(eq(schema.subscriptions.orgId, orgIdNum));
 
             // Downgrade user tier

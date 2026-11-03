@@ -33,7 +33,7 @@ import { randomUUID } from "node:crypto";
 import { jwtVerify } from "jose";
 import { db } from "../db/client.js";
 import { schema } from "../db/client.js"; // FIX-2: schema re-exported from client.ts
-import { eq, gt, and, sql, inArray } from "drizzle-orm"; // FIX-13: inArray added
+import { eq, gt, and, inArray } from "drizzle-orm"; // FIX-13: inArray added
 import { getRedis, getRedisSubscriber, getRedisPublisher } from "../utils/redis.js";
 import { emitAuditLog } from "../events/audit.js";
 import { createLogger } from "../utils/logger.js";
@@ -189,7 +189,7 @@ async function recordAuthFailure(ip: string): Promise<void> {
   const redis = getRedis();
   if (!redis) return;
   try {
-    await withTimeout(redis.eval(AUTH_FAIL_LUA, 1, `rl:wsauth:${ip}`, AUTH_FAIL_WINDOW_SECONDS) as Promise<unknown>, AUTH_THROTTLE_REDIS_TIMEOUT_MS);
+    await withTimeout(redis.eval(AUTH_FAIL_LUA, 1, `rl:wsauth:${ip}`, AUTH_FAIL_WINDOW_SECONDS), AUTH_THROTTLE_REDIS_TIMEOUT_MS);
   } catch (err) {
     log.warn({ err }, "WS auth throttle: Redis unavailable, using in-memory counter only");
   }
@@ -208,11 +208,9 @@ async function handleAuthFailure(ws: WebSocket, client: AuthedClient): Promise<v
 // SECURITY FIX (H-04): Cross-Site WebSocket Hijacking defense. WS upgrade
 // requests are not subject to the same-origin restrictions a browser
 // enforces on fetch()/XHR — any site a victim visits can open a connection
-// here and have the browser silently attach cookies. tryCookieAuth() below
-// is dormant today (auth.login never sets a cookie — see H-05/auth
-// router.ts), so this cannot be exploited *yet*, but fixing it now rather
-// than "whenever the cookie work lands" means it can never be forgotten as
-// a joint change, and it costs nothing to have active early. Built from
+// here and have the browser silently attach cookies. Cookie auth on this
+// socket was removed entirely (V-10), so this Origin check is now defence
+// in depth — keep it for the day cookies come back. Built from
 // FRONTEND_URL (same source of truth as the CORS config in boot.ts) plus an
 // explicit allowlist for additional trusted origins if ever needed.
 const ALLOWED_WS_ORIGINS = new Set(
@@ -282,8 +280,9 @@ export function initWebSocketGateway(server: HttpServer): void {
       }
     }, LIMITS.AUTH_TIMEOUT_MS);
 
-    // Attempt cookie-based auth immediately
-    void tryCookieAuth(ws, client, req);
+    // V-10: no cookie auth. A cookie would let any website open this socket
+    // as a signed-in visitor (cross-site WebSocket hijacking); clients
+    // authenticate with an explicit auth message carrying their token.
 
     ws.on("message", (raw) => handleMessage(ws, client, raw));
     ws.on("close", () => handleClose(ws, client));
@@ -307,25 +306,6 @@ export function initWebSocketGateway(server: HttpServer): void {
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
-
-async function tryCookieAuth(
-  ws: WebSocket,
-  client: AuthedClient,
-  req: IncomingMessage,
-): Promise<void> {
-  const cookie = req.headers["cookie"] ?? "";
-  const sessionId = extractSessionCookie(cookie);
-  if (!sessionId) return; // no cookie -> wait for message-based auth, nothing to count
-
-  try {
-    if (await isAuthBlocked(client.ip)) return; // refused before any DB lookup
-    const userId = await verifySession(sessionId);
-    completeAuth(ws, client, userId, sessionId);
-  } catch {
-    // Cookie auth failed — count it, then wait for message-based auth
-    await handleAuthFailure(ws, client);
-  }
-}
 
 /**
  * Verifies a session id against the DB and returns its user id. Throws if the
@@ -379,7 +359,7 @@ async function authenticateByToken(
   // produced by auth.login today.
   let sessionId: string | undefined;
   try {
-    const secret = new TextEncoder().encode(process.env.JWT_SECRET!);
+    const secret = new TextEncoder().encode(process.env.JWT_SECRET);
     const { payload } = await jwtVerify(token, secret);
     // A validly-signed JWT without a string sessionId claim must not fall
     // through as `undefined` into the DB query.
@@ -441,7 +421,7 @@ function completeAuth(
   sendEvent(ws, { type: "auth_ack", userId: String(userId), orgIds: [], ts: Date.now() } as any);
 
   // Re-auth timer — verify only; never calls completeAuth (see verifySession).
-  client.reauthTimer = setInterval(async () => {
+  const reauth = async (): Promise<void> => {
     try {
       const current = await verifySession(sessionId);
       if (current !== userId) throw new Error("Session now belongs to a different user");
@@ -449,7 +429,8 @@ function completeAuth(
       log.warn({ userId }, "Re-auth failed — disconnecting");
       ws.close(4003, "Session expired");
     }
-  }, LIMITS.REAUTH_INTERVAL_MS);
+  };
+  client.reauthTimer = setInterval(() => void reauth(), LIMITS.REAUTH_INTERVAL_MS);
 }
 
 // ─── Message Handling ─────────────────────────────────────────────────────────
@@ -522,7 +503,7 @@ function handleMessage(ws: WebSocket, client: AuthedClient, raw: any): void {
 
     case "unsubscribe_bot": {
       if (client.subscribedBots !== "all") {
-        (client.subscribedBots as Set<string>).delete(msg.botId); // FIX-12
+        (client.subscribedBots).delete(msg.botId); // FIX-12
       }
       break;
     }
@@ -713,7 +694,7 @@ export function broadcastBotEvent(botId: string, event: ServerEvent): void {
   for (const [ws, client] of clients) {
     if (!client.authenticated) continue;
     const subs = client.subscribedBots;
-    if (subs === "all" || (subs as Set<string>).has(botId)) {
+    if (subs === "all" || (subs).has(botId)) {
       sendEvent(ws, event);
     }
   }
@@ -775,7 +756,7 @@ function initRedisSubscriptions(_wss: WebSocketServer): void {
       // FIX-12: extract string ID directly — no parseInt
       const botId = channel.split(":")[1] ?? "";
       fanOutLocally(
-        (c) => c.subscribedBots === "all" || (c.subscribedBots as Set<string>).has(botId),
+        (c) => c.subscribedBots === "all" || (c.subscribedBots).has(botId),
         event,
       );
     } else if (pattern === "org:*") {
@@ -830,14 +811,10 @@ function sendEvent(ws: WebSocket, event: ServerEvent): void {
   }
 }
 
-function extractSessionCookie(cookieStr: string): string | null {
-  const match = cookieStr.match(/(?:^|;\s*)session=([^;]+)/);
-  return match?.[1] ?? null;
-}
 
 function addToLogBuffer(event: ServerEvent): void {
   if (event.type !== "bot_log") return;
-  logBuffer.push(event as any);
+  logBuffer.push(event);
   if (logBuffer.length > LIMITS.LOG_BUFFER_SIZE) {
     logBuffer.shift();
   }

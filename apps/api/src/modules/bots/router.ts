@@ -42,15 +42,13 @@ import { nanoid }      from "nanoid";
 import { router, protectedProc, permittedProc } from "../../trpc.js";
 import { schema }      from "../../db/client.js"; // FIX-2: schema re-exported from client.ts
 import { createLogger } from "../../utils/logger.js";
-import { broadcastBotEvent, broadcastOrgEvent } from "../../websocket/gateway.js";
+import { broadcastOrgEvent } from "../../websocket/gateway.js";
 import { emitAuditLog } from "../../events/audit.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js"; // M-08/M-13: single canonical implementation
 import { enqueue }     from "../../jobs/queues.js";
 import { QUEUE_NAMES } from "@kojyai/shared/constants";
-import { buildPersonalityPrompt, createDefaultPersonalityProfile, validatePersonalityProfile } from "@kojyai/engine/personality";
 import { encryptApiKey, decryptApiKey, migrateKey } from "@kojyai/shared/crypto";
-import { validateHighriseCredentials } from "@kojyai/shared/highrise";
-import { createBotRecord, BotQuotaExceededError } from "@kojyai/shared/highrise";
+import { validateHighriseCredentials , createBotRecord, BotQuotaExceededError } from "@kojyai/shared/highrise";
 import { startBotLoop } from "./runtime-manager.js";
 
 const log = createLogger("bots-module");

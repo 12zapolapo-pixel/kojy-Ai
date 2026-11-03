@@ -53,7 +53,7 @@ export function PersonalityDNAPanel({ botId }: Props) {
     mutationFn: () => trpcClient.intelligence.updatePersonality.mutate({
       botId, traits: effectiveTraits, voice: { tone: effectiveTone, verbosity, useEmoji, pace: "normal", signaturePhrase: null }, behaviorRules: rules,
     }),
-    onSuccess: () => { setIsDirty(false); qc.invalidateQueries({ queryKey: getQueryKey(trpc.intelligence.getPersonality, { botId }) }); },
+    onSuccess: () => { setIsDirty(false); void qc.invalidateQueries({ queryKey: getQueryKey(trpc.intelligence.getPersonality, { botId }) }); },
   });
 
   const setTrait = useCallback((key: string, val: number) => {
@@ -87,7 +87,7 @@ export function PersonalityDNAPanel({ botId }: Props) {
           <h3 className="text-xs font-mono tracking-widest text-white/30 mb-4">PERSONALITY TRAITS</h3>
           <div className="space-y-4">
             {TRAITS.map(({ key, label, desc }) => {
-              const value = (effectiveTraits as any)[key] ?? 0.5;
+              const value = (effectiveTraits)[key] ?? 0.5;
               return (
                 <div key={key}>
                   <div className="flex items-center justify-between mb-1.5">

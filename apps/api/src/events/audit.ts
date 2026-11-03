@@ -3,7 +3,8 @@
  * OWNERSHIP: apps/api/src/events
  */
 
-import { db, schema } from "../db/client.js";
+import type { db} from "../db/client.js";
+import { schema } from "../db/client.js";
 import { createLogger } from "../utils/logger.js";
 
 const log = createLogger("events");

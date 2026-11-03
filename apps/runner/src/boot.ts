@@ -16,10 +16,15 @@ import { createDb, runMigrations } from "@kojyai/db";
 import { resolveRedisTls } from "@kojyai/shared/redis";
 import { verifyBotControlMessage } from "@kojyai/shared/crypto";
 import { createLogger } from "./logger.js";
-import { Supervisor } from "./supervisor.js";
+import { configureErrorReporting, flushErrors, installCrashReporting } from "@kojyai/shared/error-reporting";
+import { Supervisor, PROJECTS_DIR, VENVS_DIR } from "./supervisor.js";
+import { initSandbox } from "./sandbox.js";
 import { Agent } from "./agent/agent.js";
+import { setUsageSink } from "./agent/groq.js";
 
 const log = createLogger("runner-boot");
+// Errors to Sentry when SENTRY_DSN is set (see @kojyai/shared/error-reporting).
+if (configureErrorReporting({ service: "kojyai-runner" })) installCrashReporting();
 const CONTROL_PREFIX = "project_control:";
 
 async function main(): Promise<void> {
@@ -36,6 +41,8 @@ async function main(): Promise<void> {
   if (process.env.DB_AUTO_MIGRATE !== "false") await runMigrations(db);
 
   const supervisor = new Supervisor(db);
+  // V-01: per-project users for Python code; closes the shared folders to other users.
+  initSandbox([PROJECTS_DIR, VENVS_DIR]);
 
   const url = process.env.REDIS_URL ?? "redis://localhost:6379";
   const redisOptions = {
@@ -47,6 +54,7 @@ async function main(): Promise<void> {
   const redis = new Redis(url, redisOptions); // a subscribed connection can't run commands
   for (const c of [sub, redis]) c.on("error", (e: Error) => log.warn(`Redis error: ${e.message}`));
 
+  setUsageSink(redis); // per-model AI usage for the chat's "AI models" circle
   const agent = new Agent(db, supervisor, redis);
   await agent.resetStates();
   // Subscribe only once both connections are fully ready: a subscribe issued
@@ -116,5 +124,5 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   log.fatal({ err }, "Runner failed to start");
-  process.exit(1);
+  void flushErrors(2000).finally(() => process.exit(1));
 });

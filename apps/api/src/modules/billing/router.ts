@@ -91,7 +91,7 @@ export const billingRouter = router({
         orgId:      orgId,
         orgUuid:    String(orgId),
         email:      ctx.user.email,
-        targetPlan: input.targetPlan as UserTier,
+        targetPlan: input.targetPlan,
         successUrl: `${process.env.FRONTEND_URL ?? "http://localhost:5173"}/settings/billing?success=true`,
         cancelUrl:  `${process.env.FRONTEND_URL ?? "http://localhost:5173"}/settings/billing`,
         ...(input.couponCode ? { couponCode: input.couponCode } : {}),

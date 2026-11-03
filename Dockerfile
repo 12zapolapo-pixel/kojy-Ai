@@ -93,8 +93,17 @@ CMD ["node", "--enable-source-maps", "--no-node-snapshot", "dist/boot.js"]
 # on ARM, for example).
 FROM ${NODE_IMAGE} AS runner
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv python3-dev build-essential ca-certificates \
+ && apt-get install -y --no-install-recommends python3 python3-venv python3-dev build-essential ca-certificates acl libcap2-bin \
+ && (apt-get install -y --no-install-recommends setpriv || true) \
  && rm -rf /var/lib/apt/lists/*
+# V-01 bot sandbox: each project's Python code runs as its own user (see
+# apps/runner/src/sandbox.ts). The helper is setpriv with only the two
+# capabilities needed to switch user, executable by the "node" group alone —
+# bot users aren't in it, so they can't use it to switch back.
+RUN test -x /usr/bin/setpriv \
+ && install -d -m 0755 /usr/local/libexec \
+ && install -o root -g node -m 0750 /usr/bin/setpriv /usr/local/libexec/kojy-setpriv \
+ && setcap cap_setuid,cap_setgid+ep /usr/local/libexec/kojy-setpriv
 ENV NODE_ENV=production \
     PROJECTS_DIR=/app/projects \
     VENVS_DIR=/app/venvs \
@@ -117,7 +126,8 @@ COPY --from=build /src/apps/web/dist /srv
 # builds this. Started by scripts/allinone.mjs; see docs/DEPLOY_RAILWAY.md.
 FROM ${NODE_IMAGE} AS allinone
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates python3 python3-venv python3-dev build-essential \
+ && apt-get install -y --no-install-recommends curl ca-certificates python3 python3-venv python3-dev build-essential acl libcap2-bin \
+ && (apt-get install -y --no-install-recommends setpriv || true) \
  && install -d /usr/share/postgresql-common/pgdg \
  && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
  && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
@@ -127,6 +137,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends postgresql-client-17 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=caddy:2 /usr/bin/caddy /usr/bin/caddy
+# V-01 bot sandbox: each project's Python code runs as its own user (see
+# apps/runner/src/sandbox.ts). The helper is setpriv with only the two
+# capabilities needed to switch user, executable by the "node" group alone —
+# bot users aren't in it, so they can't use it to switch back.
+RUN test -x /usr/bin/setpriv \
+ && install -d -m 0755 /usr/local/libexec \
+ && install -o root -g node -m 0750 /usr/bin/setpriv /usr/local/libexec/kojy-setpriv \
+ && setcap cap_setuid,cap_setgid+ep /usr/local/libexec/kojy-setpriv
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     API_PORT=3001 \

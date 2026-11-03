@@ -915,6 +915,31 @@ export const agentMemories = pgTable("agent_memories", {
   orgIdx: index("agent_memories_org_idx").on(t.orgId, t.projectId),
 }));
 
+// Kojy's work log: one row per owner request in a chat thread — what was
+// asked, how it ended, the files it changed and the steps it took. Written by
+// the runner after every part of a request (the same row is updated), read
+// back into Kojy's prompt and shown to the owner. Not removed by "New chat".
+export const agentWorkLog = pgTable("agent_work_log", {
+  id:               serial("id").primaryKey(),
+  // Same thread names as project_messages ("project:<id>", "bot:<id>", "studio:<org>").
+  thread:           varchar("thread", { length: 64 }).notNull(),
+  projectId:        integer("project_id").default(0).notNull(),
+  // The owner's message that started the request.
+  requestMessageId: integer("request_message_id").notNull(),
+  request:          text("request").notNull(),
+  // done | waiting_for_owner | in_progress | paused | stopped | error
+  status:           varchar("status", { length: 24 }).notNull(),
+  summary:          text("summary").default("").notNull(),
+  files:            jsonb("files").$type<{ path: string; change: string }[]>().default([]).notNull(),
+  actions:          jsonb("actions").$type<string[]>().default([]).notNull(),
+  failed:           jsonb("failed").$type<string[]>().default([]).notNull(),
+  startedAt:        ts("started_at").notNull(),
+  updatedAt:        updatedAt(),
+}, (t) => ({
+  requestIdx: uniqueIndex("agent_work_log_request_idx").on(t.thread, t.requestMessageId),
+  threadIdx:  index("agent_work_log_thread_idx").on(t.thread, t.updatedAt),
+}));
+
 // What bots did, for analytics — written by both runtimes:
 //   source "bot"     → JS bots (sourceId = bots.id), from the API's runtime
 //   source "project" → Python bots (sourceId = bot_projects.id), from the

@@ -12,7 +12,8 @@
 
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { unzipSync, zipSync, strFromU8 } from "fflate";
+import { unzip, unzipSync, zip, zipSync, strFromU8, type Unzipped } from "fflate";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 export const PROJECTS_DIR = path.resolve(process.env.PROJECTS_DIR ?? "./data/projects");
 export const LOG_DIR = path.join(PROJECTS_DIR, ".logs");
@@ -121,21 +122,23 @@ export interface UploadResult { written: number; keptData: string[]; skipped: nu
  * most zips are made) is stripped. Existing `data/` and database files are
  * kept, so re-uploading new code never wipes the bot's saved players/coins.
  */
-export function extractZip(uuid: string, zip: Uint8Array): UploadResult {
-  let files: Record<string, Uint8Array>;
+export async function extractZip(uuid: string, data: Uint8Array): Promise<UploadResult> {
+  // SECURITY FIX (V-04): fflate's async unzip decompresses in worker threads,
+  // so a 200 MB upload no longer freezes the API for everyone; the writes
+  // below are async for the same reason.
   let total = 0;
-  try {
-    files = unzipSync(zip, {
-      filter: (f) => {
-        total += f.originalSize;
-        if (total > MAX_UNZIPPED_BYTES) throw new ProjectFileError("Zip is too large once unpacked (200 MB max).");
-        return !f.name.endsWith("/");
-      },
-    });
-  } catch (err) {
-    if (err instanceof ProjectFileError) throw err;
-    throw new ProjectFileError("That file isn't a valid zip.");
-  }
+  const files = await new Promise<Unzipped>((resolve, reject) => {
+    const fail = (err: unknown) => reject(err instanceof ProjectFileError ? err : new ProjectFileError("That file isn't a valid zip."));
+    try {
+      unzip(data, {
+        filter: (f) => {
+          total += f.originalSize;
+          if (total > MAX_UNZIPPED_BYTES) throw new ProjectFileError("Zip is too large once unpacked (200 MB max).");
+          return !f.name.endsWith("/");
+        },
+      }, (err, out) => (err ? fail(err) : resolve(out)));
+    } catch (err) { fail(err); }
+  });
 
   const names = Object.keys(files);
   if (names.length > MAX_FILES) throw new ProjectFileError(`Zip has too many files (${MAX_FILES} max).`);
@@ -143,7 +146,7 @@ export function extractZip(uuid: string, zip: Uint8Array): UploadResult {
   const strip = tops.size === 1 && names.every((n) => n.replace(/\\/g, "/").includes("/")) ? `${[...tops][0]}/` : "";
 
   const result: UploadResult = { written: 0, keptData: [], skipped: 0 };
-  for (const [name, data] of Object.entries(files)) {
+  for (const [name, bytes] of Object.entries(files)) {
     let rel: string;
     try { rel = cleanRelPath(name.replace(/\\/g, "/").slice(strip.length)); }
     catch { result.skipped++; continue; }
@@ -153,19 +156,20 @@ export function extractZip(uuid: string, zip: Uint8Array): UploadResult {
       if (isPersistentData(rel)) { result.keptData.push(rel); continue; }
       if (lstatSync(file).isSymbolicLink()) { result.skipped++; continue; }
     }
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, data);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, bytes);
     result.written++;
   }
   return result;
 }
 
 /** The whole project as a zip (for download / backup). */
-export function zipProject(uuid: string): Uint8Array {
+export async function zipProject(uuid: string): Promise<Uint8Array> {
+  // V-04: async reads + fflate's worker-thread zip keep the API responsive.
   const root = ensureProjectDir(uuid);
   const entries: Record<string, Uint8Array> = {};
-  for (const f of listFiles(uuid)) if (!f.isDir) entries[f.path] = readFileSync(path.join(root, f.path));
-  return zipSync(entries, { level: 6 });
+  for (const f of listFiles(uuid)) if (!f.isDir) entries[f.path] = await readFile(path.join(root, f.path));
+  return new Promise((resolve, reject) => zip(entries, { level: 6 }, (err, out) => (err ? reject(err) : resolve(out))));
 }
 
 /**
@@ -245,10 +249,15 @@ export function listSnapshots(uuid: string): Snapshot[] {
   const dir = path.join(SNAPSHOT_DIR, uuid);
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter((n) => n.endsWith(".zip")).sort().reverse().map((name) => {
-    const files = unzipSync(readFileSync(path.join(dir, name)));
+    // V-04: only decompress the small metadata entry; count the rest from the
+    // zip's directory instead of unpacking every snapshot on every listing.
+    let count = 0;
+    const files = unzipSync(readFileSync(path.join(dir, name)), {
+      filter: (f) => { if (f.name === ".kojy-snapshot.json") return true; if (!f.name.endsWith("/")) count++; return false; },
+    });
     const meta = files[".kojy-snapshot.json"];
     const info = meta ? JSON.parse(strFromU8(meta)) as { reason: string; createdAt: number } : { reason: "", createdAt: Number(name.slice(0, -4)) };
-    return { id: name.slice(0, -4), reason: info.reason, createdAt: info.createdAt, files: Object.keys(files).length - (meta ? 1 : 0) };
+    return { id: name.slice(0, -4), reason: info.reason, createdAt: info.createdAt, files: count };
   });
 }
 

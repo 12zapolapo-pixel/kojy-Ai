@@ -10,7 +10,7 @@
  * - Fuzzy matching via simple substring scoring
  */
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useBotStore } from "../state/botStore";
 import clsx from "clsx";

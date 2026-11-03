@@ -94,7 +94,7 @@ export async function processDelegationRun(job: Job): Promise<void> {
     try {
       await db.update(schema.delegationSessions)
         .set({
-          taskStatus: status as any,
+          taskStatus: status,
           activeTask: status === "idle" || status === "done" || status === "failed"
             ? null
             : message,
@@ -146,7 +146,7 @@ export async function processDelegationRun(job: Job): Promise<void> {
       broadcastStatus,
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
+
     log.error({ err, sessionUuid }, "delegation agent threw — marking session failed");
     try {
       await db.update(schema.delegationSessions)

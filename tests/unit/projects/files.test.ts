@@ -22,7 +22,7 @@ describe("project files", () => {
     expect(files.listFiles(uuid).some((f) => f.path.startsWith("escape"))).toBe(false);
   });
 
-  it("strips one top folder, skips junk and keeps the bot's existing data", () => {
+  it("strips one top folder, skips junk and keeps the bot's existing data", async () => {
     const dir = files.ensureProjectDir(uuid);
     mkdirSync(path.join(dir, "data"), { recursive: true });
     writeFileSync(path.join(dir, "data", "bot.db"), "LIVE");
@@ -33,7 +33,7 @@ describe("project files", () => {
       "japalo/__pycache__/x.pyc": strToU8("x"),
       "japalo/.git/config": strToU8("x"),
     });
-    const res = files.extractZip(uuid, zip);
+    const res = await files.extractZip(uuid, zip);
     expect(res.written).toBe(2);
     expect(res.keptData).toEqual(["data/bot.db"]);
     expect(readFileSync(path.join(dir, "data", "bot.db"), "utf8")).toBe("LIVE");

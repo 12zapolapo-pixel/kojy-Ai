@@ -56,11 +56,21 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars":           ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
       "@typescript-eslint/no-floating-promises":     "error",   // unhandled async = bugs
       "@typescript-eslint/await-thenable":           "error",
-      "@typescript-eslint/no-misused-promises":      "error",
+      "@typescript-eslint/no-misused-promises":      ["error", { checksVoidReturn: { attributes: false } }],
       "@typescript-eslint/require-await":            "warn",
       "@typescript-eslint/prefer-nullish-coalescing": "warn",
       "@typescript-eslint/no-non-null-assertion":    "warn",
       "@typescript-eslint/consistent-type-imports":  ["error", { prefer: "type-imports" }],
+      // Loose typing (values typed \`any\`, mostly JSON and driver results), not
+      // runtime bugs: shown as warnings to clean up over time, not build-blockers.
+      "@typescript-eslint/no-unsafe-member-access":  "warn",
+      "@typescript-eslint/no-unsafe-assignment":     "warn",
+      "@typescript-eslint/no-unsafe-call":           "warn",
+      "@typescript-eslint/no-unsafe-argument":       "warn",
+      "@typescript-eslint/no-unsafe-return":         "warn",
+      // String(x) / \`${x}\` on loosely typed values (tool arguments, JSON) is deliberate here.
+      "@typescript-eslint/no-base-to-string":        "warn",
+      "@typescript-eslint/restrict-template-expressions": "warn",
 
       // ── Security-relevant ──────────────────────────────────────────────────
       "no-eval":                   "error",
@@ -102,7 +112,8 @@ export default tseslint.config(
       "react/react-in-jsx-scope":         "off",   // not needed in React 17+
       "react/prop-types":                 "off",   // we use TypeScript for props
       "react/display-name":               "warn",
-      "react/no-unescaped-entities":      "error",
+      // Only the characters that really break JSX; quotes and apostrophes in text are fine.
+      "react/no-unescaped-entities":      ["error", { forbid: [">", "}"] }],
       "react-hooks/rules-of-hooks":       "error",
       "react-hooks/exhaustive-deps":      "warn",
     },

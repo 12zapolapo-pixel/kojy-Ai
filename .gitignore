@@ -11,3 +11,6 @@ test-results/
 # Local runtime data
 .sqlite/
 *.db
+
+# Personal Claude Code settings (not shared)
+.claude/settings.local.json

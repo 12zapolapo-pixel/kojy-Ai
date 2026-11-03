@@ -53,7 +53,7 @@ import { getRedis } from "../../utils/redis.js";
 import { checkRateLimit, RATE_LIMITS, lookupIpIntelligence } from "@kojyai/security";
 import { emitSecurityEvent } from "../../events/security.js";
 import { issueCode, deliverCode } from "./codes.js";
-import { QUEUE_NAMES, PLAN_LIMITS } from "@kojyai/shared/constants";
+import { PLAN_LIMITS } from "@kojyai/shared/constants";
 
 const log = createLogger("auth-module");
 

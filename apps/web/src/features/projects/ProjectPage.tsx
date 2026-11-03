@@ -211,9 +211,9 @@ export function ConsoleTab({ project }: { project: Project }) {
         cursor.current = res.cursor;
         if (res.lines.length) setLines((prev) => [...prev, ...res.lines].slice(-3000));
       } catch { /* keep polling */ }
-      if (!stopped) timer = setTimeout(poll, 1500);
+      if (!stopped) timer = setTimeout(() => void poll(), 1500);
     };
-    let timer = setTimeout(poll, 0);
+    let timer = setTimeout(() => void poll(), 0);
     return () => { stopped = true; clearTimeout(timer); };
   }, [project.id]);
 

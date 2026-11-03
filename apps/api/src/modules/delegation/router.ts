@@ -20,7 +20,8 @@ import { z }             from "zod";
 import { eq, and, desc, inArray } from "drizzle-orm";
 import { TRPCError }     from "@trpc/server";
 import { nanoid }        from "nanoid";
-import { router, protectedProc } from "../../trpc.js";
+import { router, protectedProc, adminProc } from "../../trpc.js";
+import { getRedis } from "../../utils/redis.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js"; // M-08/M-13: single canonical implementation
 import { schema }        from "../../db/client.js";
 import { createLogger }  from "../../utils/logger.js";
@@ -72,8 +73,8 @@ export const delegationRouter = router({
         uuid,
         userId:    ctx.user.id,
         orgId,
-        messages:  [welcomeMessage] as any,
-        memory:    {} as any,
+        messages:  [welcomeMessage],
+        memory:    {},
         taskStatus: "idle",
       });
 
@@ -120,8 +121,8 @@ export const delegationRouter = router({
           uuid,
           userId: ctx.user.id,
           orgId,
-          messages:  [] as any,
-          memory:    {} as any,
+          messages:  [],
+          memory:    {},
           taskStatus: "idle",
         });
         [session] = await ctx.db
@@ -289,8 +290,16 @@ export const delegationRouter = router({
 
   // ── Force-refresh emote catalog ───────────────────────────────────────────
 
-  refreshEmotes: protectedProc
+  refreshEmotes: adminProc
     .mutation(async () => {
+      // SECURITY FIX (V-05): was open to any signed-in user with no cooldown,
+      // so anyone could keep the worker re-fetching the whole catalog. Admins
+      // only, and at most once every 10 minutes platform-wide.
+      const redis = getRedis();
+      if (redis) {
+        const fresh = await redis.set("cooldown:emote_catalog_refresh", "1", "EX", 600, "NX");
+        if (fresh !== "OK") throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "The emote catalog was refreshed recently — try again in a few minutes." });
+      }
       // Enqueue a force refresh job — returns immediately
       await enqueue(QUEUE_NAMES.EMOTE_CATALOG_REFRESH, { force: true });
       return { message: "Emote catalog refresh queued — check back in a moment." };

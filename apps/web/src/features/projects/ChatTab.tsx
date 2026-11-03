@@ -10,6 +10,8 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
+import { AiUsageCircle } from "./AiUsage";
+import { WorkHistoryButton } from "./WorkHistory";
 
 type Project = RouterOutputs["projects"]["get"];
 type Msg = RouterOutputs["projects"]["chatList"]["messages"][number];
@@ -88,9 +90,9 @@ export function ChatTab({ project, jsBot, onPanel }: {
           if (prev.agentState === "working" && res.agentState !== "working") { void utils.projects.invalidate(); void utils.studio.invalidate(); }
           return { agentState: res.agentState, progress: res.progress };
         });
-        timer = setTimeout(poll, res.agentState === "working" ? 1200 : 4000);
+        timer = setTimeout(() => void poll(), res.agentState === "working" ? 1200 : 4000);
       } catch {
-        if (!stopped) timer = setTimeout(poll, 5000);
+        if (!stopped) timer = setTimeout(() => void poll(), 5000);
       }
     };
     void poll();
@@ -232,13 +234,16 @@ function StudioToolbar({ working, onCleared, jsBot }: { working: boolean; onClea
   const clear = trpc.studio.chatClear.useMutation({ onSuccess: onCleared });
   const clearJs = trpc.studio.jsChatClear.useMutation({ onSuccess: onCleared });
   return (
-    <div className="px-4 py-2 border-b border-white/5 flex items-center text-xs">
+    <div className="px-4 py-2 border-b border-white/5 flex items-center text-xs relative">
       <span className="text-white/45">{jsBot ? `${jsBot.name} — JavaScript bot` : "Studio chat — about all your bots"}</span>
-      <button className="ml-auto text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending || clearJs.isPending}
-        onClick={() => {
-          if (!window.confirm("Start a new chat? Kojy keeps what it learned.")) return;
-          if (jsBot) clearJs.mutate({ id: jsBot.id }); else clear.mutate();
-        }}>New chat</button>
+      <div className="ml-auto flex items-center gap-3">
+        <AiUsageCircle />
+        <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending || clearJs.isPending}
+          onClick={() => {
+            if (!window.confirm("Start a new chat? Kojy keeps what it learned.")) return;
+            if (jsBot) clearJs.mutate({ id: jsBot.id }); else clear.mutate();
+          }}>New chat</button>
+      </div>
     </div>
   );
 }
@@ -259,7 +264,7 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
 
   return (
     <div className="px-4 py-2 border-b border-white/5 flex flex-wrap items-center gap-3 text-xs relative">
-      <label className="flex items-center gap-1.5 text-white/60 cursor-pointer" title="When the bot keeps crashing with an error, Kojy fixes the code, tests it and restarts the bot (up to 3 times a day).">
+      <label className="flex items-center gap-1.5 text-white/60 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — no approval needed (up to 3 times a day). A fix that would delete files, touch the bot's data, packages or secrets, or add internet or secret access asks you first.">
         <input type="checkbox" checked={autoFixOn} onChange={(e) => autoFix.mutate({ id: project.id, autoFix: e.target.checked })} />
         Auto-fix crashes
       </label>
@@ -267,11 +272,13 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
         <input type="checkbox" checked={checkupOn} onChange={(e) => checkup.mutate({ id: project.id, dailyCheckup: e.target.checked })} />
         Daily check-up
       </label>
-      <div className="ml-auto flex gap-2">
+      <div className="ml-auto flex items-center gap-2">
+        <AiUsageCircle />
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working} onClick={onIdeas}>💡 Ideas</button>
+        <WorkHistoryButton projectId={project.id} />
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working} onClick={() => setShowUndo((v) => !v)}>↶ Undo AI changes</button>
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending}
-          onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot.")) clear.mutate({ id: project.id }); }}>New chat</button>
+          onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot and the work history.")) clear.mutate({ id: project.id }); }}>New chat</button>
       </div>
       {showUndo && (
         <div className="absolute right-4 top-9 z-10 w-80 bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">

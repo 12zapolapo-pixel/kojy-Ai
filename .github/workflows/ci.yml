@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   check:
-    name: Typecheck, unit tests, build
+    name: Typecheck, lint, unit tests, build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -21,6 +21,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm lint # errors fail the build; warnings (loose typing) are shown only
       - run: pnpm test
       - run: pnpm build
 

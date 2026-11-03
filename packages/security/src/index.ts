@@ -114,27 +114,42 @@ export async function checkRateLimit(
     return inMemoryRateLimit(identifier, config, now);
   }
 
-  // Atomic pipeline: remove old entries + count + add current
-  const pipeline = redis.pipeline();
-  pipeline.zremrangebyscore(key, 0, windowStart);
-  pipeline.zcard(key);
-  pipeline.zadd(key, now, `${now}-${Math.random()}`);
-  pipeline.pexpire(key, config.windowMs);
+  // SECURITY FIX (V-07): the old pipeline ran ZADD + PEXPIRE on every call,
+  // including rejected ones, so a client (or everyone behind a shared NAT)
+  // that kept retrying kept the window full and its TTL fresh — a 1-minute
+  // limit became an indefinite lockout. This script trims, counts, and only
+  // records the hit (and extends the TTL) when it is allowed. Atomic.
+  const [allowedFlag, currentCount, oldest] = await redis.eval(
+    SLIDING_WINDOW_LUA, 1, key,
+    String(now), String(windowStart), String(config.maxHits), String(config.windowMs), `${now}-${Math.random()}`,
+  ) as [number, number, number];
 
-  const results = await pipeline.exec();
-  const currentCount = (results?.[1]?.[1] as number) ?? 0;
-
-  const allowed   = currentCount < config.maxHits;
-  const remaining = Math.max(0, config.maxHits - currentCount - 1);
-  const resetAt   = now + config.windowMs;
+  const allowed   = allowedFlag === 1;
+  const used      = allowed ? currentCount + 1 : currentCount;
+  const remaining = Math.max(0, config.maxHits - used);
+  // When full, the window frees up as soon as its oldest hit ages out.
+  const resetAt   = allowed || !oldest ? now + config.windowMs : oldest + config.windowMs;
 
   return {
     allowed,
     remaining,
     resetAt,
-    retryAfter: allowed ? null : Math.ceil(config.windowMs / 1000),
+    retryAfter: allowed ? null : Math.max(1, Math.ceil((resetAt - now) / 1000)),
   };
 }
+
+/** KEYS[1]=window; ARGV: now, windowStart, maxHits, windowMs, member. Returns {allowed, countBefore, oldestScore}. */
+const SLIDING_WINDOW_LUA = `
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, tonumber(ARGV[2]))
+local count = redis.call('ZCARD', KEYS[1])
+if count < tonumber(ARGV[3]) then
+  redis.call('ZADD', KEYS[1], tonumber(ARGV[1]), ARGV[5])
+  redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[4]))
+  return {1, count, 0}
+end
+local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+return {0, count, tonumber(oldest[2]) or 0}
+`;
 
 // Preset rate limit configs
 export const RATE_LIMITS = {
@@ -145,6 +160,8 @@ export const RATE_LIMITS = {
   API_SIMULATION: { windowMs: 3_600_000,   maxHits: 20,    keyPrefix: "rl:api:sim" },
   BOT_MESSAGE:    { windowMs: 1_000,       maxHits: 5,     keyPrefix: "rl:bot:msg" },
   WS_CONNECT:     { windowMs: 60_000,      maxHits: 10,    keyPrefix: "rl:ws:connect" },
+  // V-04: zip upload/download/restore unpack or pack up to 200 MB each.
+  PROJECT_ZIP:    { windowMs: 60_000,      maxHits: 6,     keyPrefix: "rl:project:zip" },
 } as const;
 
 // ─── SKILL #79: Toxicity Filter ──────────────────────────────────────────────
@@ -209,7 +226,7 @@ export function scanToxicityFast(text: string): ToxicityResult {
         score += 0.4;
         categories.push(entry.category);
       }
-    } else if ((entry as RegExp).test(lower)) {
+    } else if ((entry).test(lower)) {
       score += 0.3;
       categories.push("spam");
     }
@@ -461,7 +478,7 @@ export async function exportUserData(
 export async function deleteUserData(
   db: any,
   userId: number,
-  enqueue: (queue: string, data: object) => Promise<unknown>,
+  _enqueue: (queue: string, data: object) => Promise<unknown>,
 ): Promise<void> {
   // Implementation note: runs in a transaction with compensating actions
   // Full implementation in apps/api/src/modules/gdpr/service.ts
@@ -514,7 +531,7 @@ export async function lookupIpIntelligence(
       `https://ipapi.co/${ip}/json/`,  // HTTPS — ip-api.com free tier uses HTTP; ipapi.co uses HTTPS
       { signal: AbortSignal.timeout(3000) },
     );
-    const data = await response.json() as any;
+    const data = await response.json();
 
     // ipapi.co field mapping
     const isProxy  = data.threat?.is_proxy   === true || data.threat?.is_anonymous === true;
@@ -529,7 +546,8 @@ export async function lookupIpIntelligence(
       isVpn:     isProxy,
       isTor,
       isHosting,
-      riskScore: (isProxy ? 0.5 : 0) + (isTor ? 0.8 : 0) + (isHosting ? 0.3 : 0),
+      // V-07: clamp to [0, 1] like the other risk scores (proxy+Tor+hosting summed to 1.6).
+      riskScore: Math.min(1, (isProxy ? 0.5 : 0) + (isTor ? 0.8 : 0) + (isHosting ? 0.3 : 0)),
       isp:       data.org ?? null,
     };
 

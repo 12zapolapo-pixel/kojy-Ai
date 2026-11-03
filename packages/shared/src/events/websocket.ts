@@ -73,7 +73,7 @@ void _schemaMatchesClientEvent;
  */
 export function parseClientEvent(value: unknown): ClientEvent | null {
   const result = clientEventSchema.safeParse(value);
-  return result.success ? (result.data as ClientEvent) : null;
+  return result.success ? (result.data) : null;
 }
 
 // ─── Server → Client ──────────────────────────────────────────────────────────

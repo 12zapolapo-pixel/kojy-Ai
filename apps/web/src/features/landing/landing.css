@@ -1,0 +1,587 @@
+/*
+ * KojyAI landing page
+ * OWNERSHIP: apps/web/src/features/landing
+ *
+ * World: a workbench on warm paper. The page is light and calm; the one dark
+ * object on it is the Bot Studio window, which is the product. Everything is
+ * scoped under .kj so it cannot leak into the app, which keeps its own theme.
+ *
+ * Motion: one authored moment (the sample session in the hero plays once).
+ * Content is visible by default; reduced-motion users get the finished state.
+ */
+
+.kj {
+  --paper:   #f5f0e6;
+  --paper-2: #ece5d5;
+  --rule:    #d9d0bd;
+  --ink:     #17140f;
+  --ink-2:   #4a443a;
+  --ink-3:   #6a6356;
+  --signal:  #ff5a1f;
+  --signal-press: #e84a10;
+
+  --win:      #14110d;
+  --win-2:    #1d1913;
+  --win-rule: rgba(245, 240, 230, 0.13);
+  --win-text: #f5f0e6;
+  --win-dim:  #b9b0a0;
+  --win-kw:   #ff8a5c;
+  --win-str:  #9ad6a8;
+  --win-cmt:  #8c8372;
+  --win-live: #4ade80;
+
+  --display: "Bricolage Grotesque", "Inter", system-ui, sans-serif;
+  --body:    "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono:    "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --gutter: clamp(1rem, 4vw, 3rem);
+  --max: 76rem;
+
+  position: relative;
+  height: 100dvh;
+  width: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 1rem;
+  line-height: 1.6;
+  letter-spacing: 0;
+  scrollbar-color: var(--ink-3) var(--paper);
+  scroll-behavior: smooth;
+}
+
+.kj *, .kj *::before, .kj *::after { box-sizing: border-box; }
+.kj ::selection { background: var(--signal); color: var(--ink); }
+
+:where(.kj) a { color: inherit; text-decoration: none; }
+:where(.kj) h1, :where(.kj) h2, :where(.kj) h3, :where(.kj) p,
+:where(.kj) ul, :where(.kj) dl, :where(.kj) dd { margin: 0; padding: 0; }
+:where(.kj) ul { list-style: none; }
+
+.kj :focus-visible {
+  outline: 3px solid var(--ink);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.kj .kj-band :focus-visible,
+.kj .kj-cta-band :focus-visible { outline-color: var(--paper); }
+
+.kj-wrap {
+  width: 100%;
+  max-width: var(--max);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.kj-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* ── Type ─────────────────────────────────────────────────────────────────── */
+
+.kj-display {
+  font-family: var(--display);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+.kj-h2 {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: clamp(2rem, 4.6vw, 3.5rem);
+  letter-spacing: -0.03em;
+  line-height: 1.02;
+  text-wrap: balance;
+}
+.kj-lede {
+  font-size: clamp(1.0625rem, 1.5vw, 1.25rem);
+  line-height: 1.55;
+  color: var(--ink-2);
+  max-width: 34rem;
+  text-wrap: pretty;
+}
+.kj-body {
+  color: var(--ink-2);
+  max-width: 34rem;
+  text-wrap: pretty;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+
+.kj-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 3rem;
+  padding: 0 1.4rem;
+  border-radius: 0.5rem;
+  font-family: var(--body);
+  font-weight: 600;
+  font-size: 1rem;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+              transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.kj-btn--primary { background: var(--signal); color: var(--ink); }
+.kj-btn--primary:hover { background: var(--signal-press); }
+.kj-btn--primary:active { transform: translateY(1px); }
+.kj-btn--ghost { border-color: var(--ink); color: var(--ink); }
+.kj-btn--ghost:hover { background: var(--ink); color: var(--paper); }
+.kj-btn--small { min-height: 2.5rem; padding: 0 1.1rem; font-size: 0.9375rem; }
+.kj-btn svg { width: 1.1em; height: 1.1em; flex: none; transition: transform 200ms var(--ease); }
+.kj-btn:hover svg { transform: translateX(3px); }
+
+.kj-textlink {
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.25em;
+  text-decoration-color: var(--signal);
+}
+.kj-textlink:hover { text-decoration-color: currentColor; }
+
+/* ── Nav ──────────────────────────────────────────────────────────────────── */
+
+.kj-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--paper);
+  border-bottom: 1px solid var(--rule);
+}
+.kj-nav .kj-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 4rem;
+}
+.kj-mark {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 1.5rem;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+.kj-mark span { font-weight: 500; color: var(--signal-press); }
+.kj-nav-links { display: flex; align-items: center; gap: 0.5rem 1.75rem; }
+.kj-nav-links a:not(.kj-btn) {
+  font-weight: 500;
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+  padding: 0.5rem 0;
+}
+.kj-nav-links a:not(.kj-btn):hover { color: var(--ink); }
+.kj-nav-hide-sm { display: none; }
+@media (min-width: 48rem) { .kj-nav-hide-sm { display: inline; } }
+
+/* ── Hero ─────────────────────────────────────────────────────────────────── */
+
+.kj-hero { padding-block: clamp(2.5rem, 7vw, 6rem) clamp(3rem, 7vw, 6.5rem); }
+.kj-hero-grid {
+  display: grid;
+  gap: clamp(2.5rem, 5vw, 4rem);
+  align-items: center;
+}
+@media (min-width: 64rem) {
+  .kj-hero-grid { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); }
+  .kj-hero-window { margin-right: calc(var(--gutter) * -1 - 4vw); }
+}
+.kj-hero h1 {
+  font-size: clamp(2.5rem, 5.2vw, 4.5rem);
+  margin-bottom: 1.5rem;
+}
+.kj-hero h1 em {
+  font-style: normal;
+  position: relative;
+  z-index: 0;
+  padding: 0 0.12em;
+  margin-inline: -0.04em;
+}
+.kj-hero h1 em::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--signal);
+  border-radius: 0.12em;
+  transform-origin: left center;
+}
+.kj-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.5rem;
+  margin-top: 2rem;
+}
+.kj-hero-note {
+  margin-top: 1.25rem;
+  font-size: 0.875rem;
+  color: var(--ink-3);
+}
+
+/* ── Studio window (the focal object) ─────────────────────────────────────── */
+
+.kj-win {
+  background: var(--win);
+  color: var(--win-text);
+  border-radius: 0.75rem;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(23, 20, 15, 0.18), 0 24px 48px -16px rgba(23, 20, 15, 0.4);
+}
+.kj-win-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--win-rule);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--win-dim);
+}
+.kj-win-bar b { font-weight: 500; color: var(--win-text); }
+.kj-live { display: inline-flex; align-items: center; gap: 0.5rem; color: var(--win-text); }
+.kj-live i {
+  position: relative;
+  width: 0.5rem; height: 0.5rem; border-radius: 50%;
+  background: var(--win-live);
+  animation: kj-live-in 1ms linear var(--live, 3700ms) backwards;
+}
+.kj-win-body { display: grid; }
+@media (min-width: 40rem) {
+  .kj-win-body { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
+}
+.kj-pane { padding: 1.1rem 1rem 1.25rem; min-width: 0; }
+.kj-pane + .kj-pane { border-top: 1px solid var(--win-rule); }
+@media (min-width: 40rem) {
+  .kj-pane + .kj-pane { border-top: 0; border-left: 1px solid var(--win-rule); }
+}
+.kj-pane-label {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--win-dim);
+  margin-bottom: 0.85rem;
+}
+
+.kj-msg { font-size: 0.9375rem; line-height: 1.5; }
+.kj-msg + .kj-msg { margin-top: 0.85rem; }
+.kj-msg--user {
+  background: var(--win-2);
+  border: 1px solid var(--win-rule);
+  border-radius: 0.5rem;
+  padding: 0.7rem 0.85rem;
+}
+.kj-msg--kojy { color: var(--win-dim); }
+.kj-msg--kojy strong { color: var(--win-text); font-weight: 600; }
+
+.kj-steps { margin-top: 1rem; display: grid; gap: 0.45rem; }
+.kj-steps li {
+  display: flex; align-items: center; gap: 0.6rem;
+  font-family: var(--mono); font-size: 0.8125rem; color: var(--win-text);
+}
+.kj-steps svg { width: 1rem; height: 1rem; flex: none; color: var(--win-live); }
+
+.kj-code {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.75;
+  color: var(--win-text);
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 2;
+}
+.kj-code .k { color: var(--win-kw); }
+.kj-code .s { color: var(--win-str); }
+.kj-code .c { color: var(--win-cmt); }
+.kj-code span.l { display: block; }
+
+.kj-log {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--win-rule);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.7;
+  color: var(--win-dim);
+  overflow-x: auto;
+  white-space: pre;
+}
+.kj-log b { font-weight: 400; color: var(--win-text); }
+
+.kj-caption { margin-top: 0.85rem; font-size: 0.8125rem; color: var(--ink-3); }
+
+/* Sample session: plays once on load. Everything is visible without it. */
+@keyframes kj-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes kj-live-in { from { background: var(--win-dim); } to { background: var(--win-live); } }
+.kj--motion .kj-play {
+  animation: kj-rise 520ms var(--ease) backwards;
+  animation-delay: var(--d, 0ms);
+}
+
+/* ── Sections ─────────────────────────────────────────────────────────────── */
+
+.kj-section { padding-block: clamp(3.5rem, 8vw, 7rem); }
+.kj-section + .kj-section { border-top: 1px solid var(--rule); }
+
+.kj-split { display: grid; gap: 2rem 4rem; }
+@media (min-width: 56rem) {
+  .kj-split { grid-template-columns: minmax(0, 4fr) minmax(0, 7fr); align-items: start; }
+  .kj-split-sticky { position: sticky; top: 6rem; }
+}
+
+.kj-rows { position: relative; }
+.kj-rows::before, .kj-bots::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--ink); transform-origin: left center;
+}
+.kj-row {
+  display: grid;
+  gap: 0.5rem 2rem;
+  padding-block: clamp(1.25rem, 2.5vw, 2rem);
+  position: relative;
+}
+.kj-row::after, .kj-bots li::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+  background: var(--rule); transform-origin: left center;
+}
+@media (min-width: 40rem) {
+  .kj-row { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); align-items: baseline; }
+}
+.kj-row h3 {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: clamp(1.75rem, 3.4vw, 2.75rem);
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+}
+
+/* ── The loop (dark band) ─────────────────────────────────────────────────── */
+
+.kj-band {
+  background: var(--ink);
+  color: var(--paper);
+  padding-block: clamp(3.5rem, 8vw, 7rem);
+}
+.kj-band .kj-lede, .kj-band .kj-body { color: #cfc6b4; }
+.kj-loop {
+  display: grid;
+  gap: 2.25rem 2rem;
+  margin-top: clamp(2.5rem, 5vw, 4rem);
+}
+@media (min-width: 40rem) { .kj-loop { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 64rem) { .kj-loop { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.kj-loop li { position: relative; padding-top: 1rem; }
+.kj-loop li::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--signal); transform-origin: left center;
+}
+.kj-loop h3 {
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: clamp(2.5rem, 5vw, 4.25rem);
+  letter-spacing: -0.04em;
+  line-height: 1;
+  margin-bottom: 0.75rem;
+}
+.kj-loop p { color: #cfc6b4; max-width: 18rem; }
+
+.kj-panes {
+  display: grid;
+  margin-top: clamp(3rem, 6vw, 5rem);
+  border-top: 1px solid rgba(245, 240, 230, 0.22);
+}
+.kj-panes > div {
+  display: grid;
+  gap: 0.25rem 2rem;
+  padding-block: 1.1rem;
+  border-bottom: 1px solid rgba(245, 240, 230, 0.14);
+}
+@media (min-width: 40rem) {
+  .kj-panes > div { grid-template-columns: 9rem minmax(0, 1fr); align-items: baseline; }
+}
+.kj-panes dt { font-family: var(--mono); font-size: 0.9375rem; color: var(--signal); }
+.kj-panes dd { color: #e4dccb; }
+
+/* ── Nine bots ────────────────────────────────────────────────────────────── */
+
+.kj-bots { position: relative; }
+.kj-bots li {
+  display: grid;
+  gap: 0.15rem 2rem;
+  padding-block: 1rem;
+  position: relative;
+}
+@media (min-width: 40rem) {
+  .kj-bots li { grid-template-columns: 11rem minmax(0, 1fr); align-items: baseline; }
+}
+.kj-bots b { font-family: var(--display); font-weight: 700; font-size: 1.25rem; letter-spacing: -0.02em; }
+.kj-bots span { color: var(--ink-2); }
+
+/* ── Closing call to action ───────────────────────────────────────────────── */
+
+.kj-cta-band {
+  background: var(--signal);
+  color: var(--ink);
+  padding-block: clamp(3.5rem, 9vw, 7.5rem);
+}
+.kj-cta-band h2 {
+  font-size: clamp(2.5rem, 6.4vw, 5.25rem);
+  max-width: 14ch;
+  margin-bottom: 2rem;
+}
+.kj-cta-band .kj-btn--dark { background: var(--ink); color: var(--paper); }
+.kj-cta-band .kj-btn--dark:hover { background: #000; }
+.kj-cta-band .kj-textlink { text-decoration-color: var(--ink); }
+
+/* ── Footer ───────────────────────────────────────────────────────────────── */
+
+.kj-foot { padding-block: 2rem 2.5rem; }
+.kj-foot .kj-wrap {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem 2rem;
+  font-size: 0.875rem; color: var(--ink-3);
+}
+.kj-foot nav { display: flex; gap: 1.5rem; }
+.kj-foot nav a { color: var(--ink-2); font-weight: 500; }
+.kj-foot nav a:hover { color: var(--ink); }
+
+/* ── Motion layer ─────────────────────────────────────────────────────────────
+ * Every hidden starting state lives under .kj--motion, which is only set when
+ * the visitor has not asked for reduced motion. Without it the page is the
+ * finished, static design. Only transform, opacity and clip-path move.
+ */
+
+.kj-replay {
+  margin-left: 0.75rem;
+  padding: 0.25rem 0;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.25em;
+  text-decoration-color: var(--signal);
+  cursor: pointer;
+}
+.kj-replay:hover { text-decoration-color: currentColor; }
+
+/* Word masks (hero headline, closing headline) */
+.kj-w {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: top;
+  padding: 0.06em 0 0.16em;
+  margin: -0.06em 0 -0.16em;
+}
+.kj-w > span { display: inline-block; }
+
+/* Typed message: ghost text holds the final size so nothing reflows */
+.kj-typed { position: relative; display: block; }
+.kj-typed-ghost { visibility: hidden; }
+.kj-typed-live { position: absolute; inset: 0; }
+.kj-caret {
+  display: inline-block; width: 0.5ch; height: 1em; margin-left: 1px;
+  vertical-align: -0.15em; background: var(--signal);
+}
+
+@keyframes kj-write { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes kj-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes kj-ring {
+  from { transform: scale(1); opacity: 0.85; }
+  to   { transform: scale(3.4); opacity: 0; }
+}
+
+/* Hero session */
+.kj--motion .kj-code .kj-play { animation-name: kj-write; animation-duration: 420ms; }
+.kj--motion .kj-steps svg path {
+  stroke-dasharray: 1;
+  animation: kj-draw 420ms var(--ease) calc(var(--d, 0ms) + 120ms) both;
+}
+.kj--motion .kj-live i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--win-live);
+  animation: kj-ring 1300ms ease-out var(--live, 3700ms) 3 backwards;
+}
+
+/* Scroll reveals: one observer, a few different gestures */
+.kj--motion [data-reveal="rise"] {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 700ms var(--ease), transform 800ms var(--ease);
+  transition-delay: calc(var(--i, 0) * 80ms);
+}
+.kj--motion .kj-hero-window[data-reveal="rise"] {
+  transform: translateY(40px);
+  transition-delay: 150ms;
+}
+.kj--motion [data-reveal="rise"].is-in,
+.kj--motion .kj-hero-window[data-reveal="rise"].is-in { opacity: 1; transform: none; }
+
+.kj--motion [data-reveal="words"] .kj-w > span {
+  transform: translateY(118%);
+  transition: transform 900ms var(--ease);
+  transition-delay: calc(var(--i, 0) * 70ms);
+}
+.kj--motion [data-reveal="words"].is-in .kj-w > span { transform: none; }
+.kj--motion .kj-hero h1 em::before { transform: scaleX(0); transition: transform 800ms var(--ease) 520ms; }
+.kj--motion .kj-hero h1.is-in em::before { transform: none; }
+
+/* Rules draw across, rows rise in behind them */
+.kj--motion [data-reveal="topline"]::before {
+  transform: scaleX(0);
+  transition: transform 1100ms var(--ease);
+}
+.kj--motion [data-reveal="topline"].is-in::before { transform: none; }
+.kj--motion .kj-row[data-reveal]::after,
+.kj--motion .kj-bots li[data-reveal]::after {
+  transform: scaleX(0);
+  transition: transform 900ms var(--ease) calc(var(--i, 0) * 80ms + 150ms);
+}
+.kj--motion .kj-row[data-reveal].is-in::after,
+.kj--motion .kj-bots li[data-reveal].is-in::after { transform: none; }
+
+/* The loop plays in order: rule draws, word wipes in, line rises */
+.kj--motion .kj-loop li::before {
+  transform: scaleX(0);
+  transition: transform 700ms var(--ease) calc(var(--i, 0) * 170ms);
+}
+.kj--motion .kj-loop li h3 {
+  clip-path: inset(-0.1em 100% -0.1em -0.05em);
+  transition: clip-path 800ms var(--ease) calc(var(--i, 0) * 170ms + 200ms);
+}
+.kj--motion .kj-loop li p {
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 600ms var(--ease) calc(var(--i, 0) * 170ms + 550ms),
+              transform 700ms var(--ease) calc(var(--i, 0) * 170ms + 550ms);
+}
+.kj--motion .kj-loop li.is-in::before { transform: none; }
+.kj--motion .kj-loop li.is-in h3 { clip-path: inset(-0.1em -0.1em -0.1em -0.05em); }
+.kj--motion .kj-loop li.is-in p { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .kj { scroll-behavior: auto; }
+  .kj-play, .kj-live i, .kj-live i::after { animation: none; }
+  .kj-btn, .kj-btn svg { transition: none; }
+}

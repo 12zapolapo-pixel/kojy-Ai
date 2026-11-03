@@ -66,9 +66,11 @@ const INJECTION_PATTERNS: ReadonlyArray<{ pattern: RegExp; name: string }> = [
 
   // Invisible / directional control characters
   // RTL Override U+202E, LTR Override U+202D, zero-width U+200B/C/D, BOM U+FEFF
+  // eslint-disable-next-line no-misleading-character-class -- lists invisible characters (incl. the zero-width joiner) on purpose
   { pattern: /[\u202E\u202D\u200B\u200C\u200D\uFEFF]/, name: "INVISIBLE_CHARS" },
 
   // Null bytes
+  // eslint-disable-next-line no-control-regex -- detects null bytes on purpose
   { pattern: /\x00/, name: "NULL_BYTE" },
 
   // JSON escape poisoning — \\u0000 in a string is an encoded null byte

@@ -54,14 +54,7 @@ export async function exportUserData(
 
   if (!user) throw new Error(`User ${userId} not found`);
 
-  // Resolve all org IDs and bot IDs owned by this user — used to scope every
-  // subsequent query correctly. This is the single authoritative scope resolution.
-  const orgMemberships = await db
-    .select({ orgId: schema.orgMembers.orgId })
-    .from(schema.orgMembers)
-    .where(eq(schema.orgMembers.userId, userId));
-
-  const orgIds  = orgMemberships.map((m: { orgId: number }) => m.orgId);
+  // Resolve the bot IDs owned by this user — used to scope the queries below.
   const userBotRows = await db
     .select({ id: schema.bots.id })
     .from(schema.bots)

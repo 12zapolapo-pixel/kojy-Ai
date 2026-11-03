@@ -27,7 +27,7 @@
  */
 
 import type { UserTier } from "@kojyai/shared/types";
-import { PLAN_LIMITS } from "@kojyai/shared/constants";
+import type { PLAN_LIMITS } from "@kojyai/shared/constants";
 
 // ─── SKILL #36: Tiered Subscription Engine ───────────────────────────────────
 

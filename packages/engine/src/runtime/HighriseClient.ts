@@ -29,7 +29,6 @@ import {
   type GetRoomUsersResponse,
   type GetWalletResponse,
   type HighriseError,
-  type HighriseEvent,
   type HighriseIncoming,
   type ModerateRoomRequest,
   type ReactionRequest,
@@ -198,7 +197,7 @@ export class HighriseClient extends EventEmitter {
       } catch (err) {
         clearTimeout(timer);
         this.pending.delete(rid);
-        reject(err as Error);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
   }
@@ -223,7 +222,7 @@ export class HighriseClient extends EventEmitter {
         });
       } catch (err) {
         this.setStatus("error", (err as Error).message);
-        reject(err as Error);
+        reject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
 
@@ -320,7 +319,7 @@ export class HighriseClient extends EventEmitter {
       this.setStatus("error", message);
       // EventEmitter throws on an unhandled "error" event — only emit if someone listens.
       if (this.listenerCount("error") > 0) {
-        this.emit("error", { _type: "Error", message, do_not_reconnect: true } as unknown as HighriseError);
+        this.emit("error", { _type: "Error", message, do_not_reconnect: true });
       }
       this.stop();
       return;
@@ -366,7 +365,7 @@ export class HighriseClient extends EventEmitter {
     }
 
     // Otherwise it's a room event.
-    this.emit("event", msg as HighriseEvent);
+    this.emit("event", msg);
   }
 
   private startKeepalive(): void {

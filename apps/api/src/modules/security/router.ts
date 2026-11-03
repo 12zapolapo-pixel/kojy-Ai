@@ -3,7 +3,7 @@
  * OWNERSHIP: apps/api/src/modules/security
  */
 import { z }         from "zod";
-import { eq, and, desc, gte } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { router, permittedProc } from "../../trpc.js";
 import { emitAuditLog } from "../../events/audit.js";
@@ -26,9 +26,9 @@ export const securityRouter = router({
       // that genuinely have no org context — e.g. a login attempt for an
       // email that was never registered) are visible only to superadmin,
       // since they can't be safely attributed to any specific org.
-      if (ctx.user!.role !== "superadmin") {
+      if (ctx.user.role !== "superadmin") {
         // Honors the org the user actively switched to (was: first-joined org).
-        const orgId = await tryResolveOrgId({ db: ctx.db, user: ctx.user!, session: ctx.session });
+        const orgId = await tryResolveOrgId({ db: ctx.db, user: ctx.user, session: ctx.session });
         conditions.push(eq(schema.securityEvents.orgId, orgId ?? -1)); // -1 = no org → matches nothing
       }
 
@@ -50,8 +50,8 @@ export const securityRouter = router({
       // rule as getEvents: a platform superadmin may resolve any event; every
       // other caller only events belonging to their own active org.
       const conditions: any[] = [eq(schema.securityEvents.id, input.id)];
-      if (ctx.user!.role !== "superadmin") {
-        const orgId = await tryResolveOrgId({ db: ctx.db, user: ctx.user!, session: ctx.session });
+      if (ctx.user.role !== "superadmin") {
+        const orgId = await tryResolveOrgId({ db: ctx.db, user: ctx.user, session: ctx.session });
         conditions.push(eq(schema.securityEvents.orgId, orgId ?? -1)); // -1 = no org → matches nothing
       }
 
@@ -76,7 +76,7 @@ export const securityRouter = router({
         // of who resolved it.
         await emitAuditLog(db, {
           orgId:        event.orgId,
-          actorId:      ctx.user!.id,
+          actorId:      ctx.user.id,
           actorType:    "user",
           action:       "security.resolve_event",
           resourceType: "security_event",
@@ -118,7 +118,7 @@ export const securityRouter = router({
 
       await emitAuditLog(db, {
         orgId:        ctx.session?.activeOrgId ?? null,
-        actorId:      ctx.user!.id,
+        actorId:      ctx.user.id,
         actorType:    "user",
         action:       "security.update_feature_flag",
         resourceType: "feature_flag",

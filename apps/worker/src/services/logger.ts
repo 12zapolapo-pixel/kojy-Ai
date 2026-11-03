@@ -11,6 +11,7 @@
 
 import pino from "pino";
 import { LOG_REDACT_PATHS, redactSensitive } from "@kojyai/shared/logging";
+import { reportFromLog } from "@kojyai/shared/error-reporting";
 
 const isDev = process.env.NODE_ENV !== "production";
 
@@ -26,6 +27,13 @@ const base = pino({
   // second, cheap layer.
   formatters: { log: (obj: Record<string, unknown>) => redactSensitive(obj) },
   redact:     LOG_REDACT_PATHS,
+  // Errors logged at error/fatal level also go to Sentry when SENTRY_DSN is set.
+  hooks: {
+    logMethod(args, method, level) {
+      if (level >= 50) reportFromLog(args, level, (this.bindings() as { module?: string }).module);
+      method.apply(this, args);
+    },
+  },
 });
 
 export function createLogger(module: string) {

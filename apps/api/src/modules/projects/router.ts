@@ -11,13 +11,15 @@
  */
 
 import { z } from "zod";
-import { and, asc, desc, eq, gt, inArray } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { randomUUID } from "node:crypto";
-import { router, permittedProc } from "../../trpc.js";
+import { router, permittedProc, adminProc } from "../../trpc.js";
+import { readAiUsage } from "./aiUsage.js";
 import { schema } from "../../db/client.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { getRedis, getRedisPublisher } from "../../utils/redis.js";
+import { checkRateLimit, RATE_LIMITS } from "@kojyai/security";
 import { emitAuditLog } from "../../events/audit.js";
 import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
 import {
@@ -60,6 +62,26 @@ function files<T>(fn: () => T): T {
   catch (err) {
     if (err instanceof ProjectFileError) throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
     throw err;
+  }
+}
+
+async function filesAsync<T>(fn: () => Promise<T>): Promise<T> {
+  try { return await fn(); }
+  catch (err) {
+    if (err instanceof ProjectFileError) throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+    throw err;
+  }
+}
+
+/**
+ * SECURITY FIX (V-04): zip upload, download and snapshot restore each pack or
+ * unpack up to 200 MB. The general 300/min API limit let a few accounts keep
+ * the API busy; these get their own small per-user budget.
+ */
+async function zipThrottle(userId: number): Promise<void> {
+  const limit = await checkRateLimit(getRedis(), String(userId), RATE_LIMITS.PROJECT_ZIP);
+  if (!limit.allowed) {
+    throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Too many uploads or downloads — try again in ${limit.retryAfter ?? 60}s.` });
   }
 }
 
@@ -118,7 +140,7 @@ export const projectsRouter = router({
 
       const uuid = randomUUID();
       const [row] = await ctx.db.insert(botProjects)
-        .values({ uuid, orgId, ownerId: ctx.user!.id, name: input.name, entrypoint: template?.entrypoint ?? "" }).returning();
+        .values({ uuid, orgId, ownerId: ctx.user.id, name: input.name, entrypoint: template?.entrypoint ?? "" }).returning();
       ensureProjectDir(uuid);
       if (template) for (const [file, content] of Object.entries(template.files)) writeProjectFile(uuid, file, content);
 
@@ -130,7 +152,7 @@ export const projectsRouter = router({
         await addToThread(ctx.db, `project:${row!.id}`, row!.id, "user", "text", intro);
         await control(uuid, "agent").catch(() => undefined); // no runner/Redis: the chat waits
       }
-      await emitAuditLog(ctx.db, { orgId, actorId: ctx.user!.id, actorType: "user", action: "project.create", resourceType: "project", resourceId: uuid, afterState: { template: template?.id ?? null } });
+      await emitAuditLog(ctx.db, { orgId, actorId: ctx.user.id, actorType: "user", action: "project.create", resourceType: "project", resourceId: uuid, afterState: { template: template?.id ?? null } });
       return publicProject(row!);
     }),
 
@@ -151,10 +173,11 @@ export const projectsRouter = router({
     await ctx.db.delete(projectSecrets).where(eq(projectSecrets.projectId, project.id));
     await ctx.db.delete(projectMessages).where(eq(projectMessages.projectId, project.id));
     await ctx.db.delete(schema.agentMemories).where(eq(schema.agentMemories.projectId, project.id));
+    await ctx.db.delete(schema.agentWorkLog).where(eq(schema.agentWorkLog.thread, `project:${project.id}`));
     await ctx.db.delete(botProjects).where(eq(botProjects.id, project.id));
     removeProjectDir(project.uuid);
     removeSnapshots(project.uuid);
-    await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user!.id, actorType: "user", action: "project.delete", resourceType: "project", resourceId: project.uuid });
+    await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.delete", resourceType: "project", resourceId: project.uuid });
     return { success: true };
   }),
 
@@ -165,7 +188,8 @@ export const projectsRouter = router({
     .input(projectId.extend({ zipBase64: z.string().min(1).max(Math.ceil(MAX_UPLOAD_BYTES * 4 / 3) + 4) }))
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
-      const result = files(() => extractZip(project.uuid, Buffer.from(input.zipBase64, "base64")));
+      await zipThrottle(ctx.user.id);
+      const result = await filesAsync(() => extractZip(project.uuid, Buffer.from(input.zipBase64, "base64")));
       let detected: string | null = null;
       if (!project.entrypoint) {
         detected = detectEntrypoint(project.uuid);
@@ -204,7 +228,8 @@ export const projectsRouter = router({
   /** Whole project as a base64 zip. */
   download: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
-    const zip = files(() => zipProject(project.uuid));
+    await zipThrottle(ctx.user.id);
+    const zip = await filesAsync(() => zipProject(project.uuid));
     return { filename: `${project.name.replace(/[^\w.-]+/g, "_") || "project"}.zip`, zipBase64: Buffer.from(zip).toString("base64") };
   }),
 
@@ -225,7 +250,7 @@ export const projectsRouter = router({
       const project = await loadProject(ctx, input.id);
       await saveSecret(ctx.db, project.id, input.key, input.value);
       // Key only — never the value.
-      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user!.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { key: input.key } });
+      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { key: input.key } });
       return { success: true };
     }),
 
@@ -276,7 +301,7 @@ export const projectsRouter = router({
         thread: `project:${project.id}`, projectId: project.id, role: "user", kind: "event",
         content: `The owner saved these secrets: ${saved.join(", ")}. Test them (test_secrets) and continue.`,
       });
-      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user!.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { keys: saved } });
+      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { keys: saved } });
       await control(project.uuid, "agent");
       return { success: true, saved };
     }),
@@ -295,6 +320,27 @@ export const projectsRouter = router({
       await control(project.uuid, "agent");
       return { success: true };
     }),
+
+  /**
+   * The coder AI's models and what each used today (the chat's "AI models"
+   * circle). Platform-wide, so admins only. Counts come from the runner.
+   */
+  aiUsage: adminProc.query(async () => readAiUsage(getRedis())),
+
+  /**
+   * Kojy's work log for this bot, newest first: each request, how it ended,
+   * the files it changed and its result. Kept when the chat is cleared.
+   */
+  workLog: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
+    const project = await loadProject(ctx, input.id);
+    const rows = await ctx.db.select().from(schema.agentWorkLog)
+      .where(eq(schema.agentWorkLog.thread, `project:${project.id}`))
+      .orderBy(desc(schema.agentWorkLog.updatedAt)).limit(50);
+    return rows.map((r) => ({
+      id: r.id, request: r.request, status: r.status, summary: r.summary, files: r.files,
+      steps: r.actions.length, failed: r.failed, startedAt: r.startedAt, updatedAt: r.updatedAt,
+    }));
+  }),
 
   chatStop: permittedProc("bots:update").input(projectId).mutation(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
@@ -334,6 +380,7 @@ export const projectsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
       if (project.agentState === "working") throw new TRPCError({ code: "CONFLICT", message: "Stop the AI first." });
+      await zipThrottle(ctx.user.id);
       const count = files(() => restoreSnapshot(project.uuid, input.snapshotId));
       const when = new Date(Number(input.snapshotId)).toISOString().replace("T", " ").slice(0, 16);
       await ctx.db.insert(projectMessages).values({

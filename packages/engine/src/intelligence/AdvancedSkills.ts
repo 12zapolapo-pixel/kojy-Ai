@@ -9,7 +9,6 @@ import { aiChat } from "@kojyai/shared/ai";
  * LAYER: Intelligence — real-time and batch AI processing
  */
 
-import type { BotRelationship } from "@kojyai/shared/types";
 
 // ─── SKILL #8: Sentiment Radar ────────────────────────────────────────────────
 // Purpose: Scores each incoming message -1 to 1 in real time.

@@ -39,6 +39,7 @@ import { PageLoader }     from "../components/PageLoader";
 import { ErrorBoundary }  from "../components/ErrorBoundary";
 import { ToastProvider }  from "@kojyai/ui";
 import LoginPage from "../features/auth/LoginPage";
+import LandingPage from "../features/landing/LandingPage";
 
 // ─── Lazy-loaded routes ───────────────────────────────────────────────────────
 
@@ -98,14 +99,15 @@ export default function App() {
           <WsBootstrap />
           <ToastProvider />
           <Routes>
-            {/* Public routes */}
+            {/* Public routes — signed-out visitors see the landing page at "/";
+                signed-in users go straight to the studio. */}
+            <Route path="/"           element={<HomeRoute />} />
             <Route path="/login"      element={<LoginPage />} />
             <Route path="/auth/reset-password" element={<LoginPage />} />
             <Route path="/onboarding" element={<AuthGuard><OnboardingPage /></AuthGuard>} />
 
             {/* Protected app routes — all wrapped in AppShell */}
             <Route
-              path="/"
               element={
                 <AuthGuard>
                   <AppShell>
@@ -114,7 +116,6 @@ export default function App() {
                 </AuthGuard>
               }
             >
-              <Route index element={<Navigate to="/studio" replace />} />
 
 
               <Route path="bots">
@@ -232,6 +233,14 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   if (isLoading) return <PageLoader message="Authenticating…" />;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return <>{children}</>;
+}
+
+function HomeRoute() {
+  const { isAuthenticated, isLoading } = useAuthStore();
+
+  if (isLoading) return <PageLoader message="Loading…" />;
+  if (isAuthenticated) return <Navigate to="/studio" replace />;
+  return <LandingPage />;
 }
 
 // ─── WS Bootstrap ────────────────────────────────────────────────────────────

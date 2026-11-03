@@ -112,8 +112,11 @@ is fetched automatically on first visit (give it a minute).
 **Create your account:** click *Register*. The first account on a new
 server becomes the **owner** and can sign in right away, with no email needed.
 After that, sign-ups are closed (set `SIGNUPS=open` in `.env` to allow others).
-Codes for other people's sign-ups and password resets appear in
-`docker compose logs api` until you add a Resend key.
+Email verification for other people's sign-ups and password resets need a
+Resend key (`RESEND_API_KEY`). For safety the codes are not written to the
+logs. In an emergency, such as a server without email where you're locked out
+of a password, set `LOG_EMAIL_CODES=true` for a moment, read the code with
+`docker compose logs api`, then remove it.
 
 ## Your bots: Bot Studio
 
@@ -144,8 +147,14 @@ are my bots doing?", "restart all my bots", "is the server OK?".
 
 Each bot runs as its own process with Python 3.11 and `highrise-bot-sdk`
 25.1.0, restarts by itself if it crashes, and comes back after a server
-reboot. With **Auto-fix crashes** on, a bot that keeps crashing with an error
-is repaired by Kojy automatically (at most 3 times a day); **Daily check-up**
+reboot. A watchdog checks every few seconds that each bot's code still
+responds and every minute that the bot is still in the room, and restarts it
+when not (a frozen bot's stuck line is saved for Kojy). With **Auto-fix
+crashes** on, when a bot crashes with an error or freezes, Kojy fixes the code
+right away, tests it and restarts the bot — no approval needed, at most 3
+times a day. An automatic fix never deletes files, touches the bot's data,
+packages, secrets or entrypoint, or adds code for internet or secret access (crash
+output can contain text from room visitors); such a fix asks first. **Daily check-up**
 has Kojy look at each day's errors and suggest fixes (it asks before changing
 anything); **Undo AI changes** puts the code back to any earlier version; and
 **What Kojy knows** (Studio home) lists the lessons Kojy keeps — remove or add

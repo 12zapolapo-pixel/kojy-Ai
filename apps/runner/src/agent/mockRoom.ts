@@ -10,7 +10,7 @@
  * changes the real bot's files or database.
  */
 
-import { spawn } from "node:child_process";
+import { grantDir, spawnAs } from "../sandbox.js";
 import { cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -41,6 +41,8 @@ export interface RoomTestResult {
 }
 
 export interface RoomTestOptions {
+  /** The project's sandbox user (see sandbox.ts). */
+  uid: number;
   projectDir: string;
   python: string;
   launcher: string;
@@ -70,6 +72,7 @@ export async function runRoomTest(opts: RoomTestOptions): Promise<RoomTestResult
 
   const work = mkdtempSync(path.join(tmpdir(), "kojy-test-"));
   cpSync(opts.projectDir, work, { recursive: true, filter: (src) => !/[/\\](\.git|node_modules|__pycache__|\.venv)$/.test(src) });
+  grantDir(work, opts.uid);
 
   const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await new Promise<void>((r) => wss.once("listening", () => r()));
@@ -101,7 +104,9 @@ export async function runRoomTest(opts: RoomTestOptions): Promise<RoomTestResult
     }, delay + i * 2500));
   });
 
-  const child = spawn(opts.python, [opts.launcher], {
+  let started: ReturnType<typeof spawnAs>;
+  try {
+    started = spawnAs(opts.uid, opts.python, [opts.launcher], {
     cwd: work,
     env: {
       ...opts.env,
@@ -110,9 +115,17 @@ export async function runRoomTest(opts: RoomTestOptions): Promise<RoomTestResult
       HIGHRISE_ROOM_ID: opts.env.HIGHRISE_ROOM_ID ?? "test-room",
       HIGHRISE_BOT_TOKEN: opts.env.HIGHRISE_BOT_TOKEN ?? "test-token",
       PYTHONUNBUFFERED: "1",
+      KOJY_WATCHDOG: "off", // a short test run; the fake room doesn't answer room checks
     },
     stdio: ["ignore", "pipe", "pipe"],
-  });
+    });
+  } catch (err) {
+    wss.close();
+    rmSync(work, { recursive: true, force: true });
+    result.errors.push((err as Error).message);
+    return result;
+  }
+  const { child, kill } = started;
   const collect = (into: string[], isErr: boolean) => (chunk: Buffer) => {
     for (const line of chunk.toString("utf8").split("\n")) {
       if (!line.trim()) continue;
@@ -120,12 +133,12 @@ export async function runRoomTest(opts: RoomTestOptions): Promise<RoomTestResult
       if (isErr && /Traceback|Error|Exception/.test(line) && result.errors.length < 60) result.errors.push(line.slice(0, 400));
     }
   };
-  child.stdout.on("data", collect(result.output, false));
-  child.stderr.on("data", collect(result.output, true));
+  child.stdout?.on("data", collect(result.output, false));
+  child.stderr?.on("data", collect(result.output, true));
 
   await new Promise<void>((resolve) => {
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 3000); }, seconds * 1000);
+    const timer = setTimeout(() => { timedOut = true; kill("SIGTERM"); setTimeout(() => kill("SIGKILL"), 3000); }, seconds * 1000);
     child.once("exit", (code) => { clearTimeout(timer); result.exitCode = code; result.exitedEarly = !timedOut; resolve(); });
     child.once("error", (err) => { clearTimeout(timer); result.errors.push(err.message); resolve(); });
   });

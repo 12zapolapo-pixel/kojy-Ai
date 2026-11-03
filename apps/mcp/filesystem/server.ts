@@ -31,6 +31,7 @@ import { Server }               from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import fs   from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 
@@ -186,6 +187,46 @@ export function safePath(projectId: string, filePath: string): string {
   return resolved;
 }
 
+/**
+ * SECURITY FIX (V-06): safePath() is a purely lexical check, so a symlink
+ * inside the project (pointing anywhere) let read/write/update/delete reach
+ * files outside the workspace. This also:
+ *   - refuses when the target itself is a symlink (lstat), and
+ *   - resolves the deepest existing ancestor with realpath() and requires it
+ *     to stay inside the project's real root (catches symlinked folders).
+ * Reads and writes then open with O_NOFOLLOW, so a link swapped in after
+ * this check is refused by the kernel too.
+ */
+export async function resolveSafePath(projectId: string, filePath: string): Promise<string> {
+  const lexical = safePath(projectId, filePath);
+  const safeId = projectId.replace(/[^a-zA-Z0-9-]/g, "_").slice(0, 80);
+  const projectRoot = path.join(WORKSPACE_ROOT, safeId);
+  await fs.mkdir(projectRoot, { recursive: true });
+  const realRoot = await fs.realpath(projectRoot);
+
+  try {
+    if ((await fs.lstat(lexical)).isSymbolicLink()) throw new Error(`Refusing to follow a symbolic link: "${filePath}"`);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+
+  for (let probe = lexical; ; probe = path.dirname(probe)) {
+    let real: string;
+    try { real = await fs.realpath(probe); }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT" && probe !== path.dirname(probe)) continue;
+      throw err;
+    }
+    if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+      throw new Error(`Path traversal detected (via a symbolic link): "${filePath}"`);
+    }
+    return lexical;
+  }
+}
+
+const READ_NOFOLLOW  = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+const WRITE_NOFOLLOW = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
+
 // FIX-AUDIT / DESIGN NOTE for whoever wires this server into the live
 // orchestrator (per HighriseOrchestrator.ts: "Until the MCP deploy is wired,
 // the deploy stage returns immediately" — not yet connected as of this audit):
@@ -312,17 +353,17 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     switch (name) {
       case "read_file": {
-        const filePath = safePath(args!.project_id as string, args!.path as string);
+        const filePath = await resolveSafePath(args!.project_id as string, args!.path as string);
         const stat = await fs.stat(filePath);
         if (stat.size > MAX_FILE_SIZE) {
           return { content: [{ type: "text", text: `Error: file too large (${stat.size} bytes > ${MAX_FILE_SIZE} limit)` }] };
         }
-        const content = await fs.readFile(filePath, "utf8");
+        const content = await fs.readFile(filePath, { encoding: "utf8", flag: READ_NOFOLLOW });
         return { content: [{ type: "text", text: content }] };
       }
 
       case "write_file": {
-        const filePath = safePath(args!.project_id as string, args!.path as string);
+        const filePath = await resolveSafePath(args!.project_id as string, args!.path as string);
         const content  = args!.content as string;
         const size     = Buffer.byteLength(content);
         if (size > MAX_FILE_SIZE) {
@@ -331,14 +372,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         await withProjectLock(args!.project_id as string, async () => {
           await assertWorkspaceQuota(projectRootOf(args!.project_id as string), filePath, size); // L-13
           await fs.mkdir(path.dirname(filePath), { recursive: true });
-          await fs.writeFile(filePath, content, "utf8");
+          await resolveSafePath(args!.project_id as string, args!.path as string); // folders made above stay inside
+          await fs.writeFile(filePath, content, { encoding: "utf8", flag: WRITE_NOFOLLOW });
         });
         return { content: [{ type: "text", text: `Written ${size} bytes to ${args!.path}` }] };
       }
 
       case "update_file": {
-        const filePath = safePath(args!.project_id as string, args!.path as string);
-        const current  = await fs.readFile(filePath, "utf8");
+        const filePath = await resolveSafePath(args!.project_id as string, args!.path as string);
+        const current  = await fs.readFile(filePath, { encoding: "utf8", flag: READ_NOFOLLOW });
         const oldStr   = args!.old_str as string;
         const newStr   = args!.new_str as string;
         const occurrences = current.split(oldStr).length - 1;
@@ -358,7 +400,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         await withProjectLock(args!.project_id as string, async () => {
           await assertWorkspaceQuota(projectRootOf(args!.project_id as string), filePath, size); // L-13
-          await fs.writeFile(filePath, updated, "utf8");
+          await fs.writeFile(filePath, updated, { encoding: "utf8", flag: WRITE_NOFOLLOW });
         });
         return { content: [{ type: "text", text: `Updated ${args!.path} successfully` }] };
       }
@@ -373,7 +415,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
 
       case "delete_file": {
-        const filePath = safePath(args!.project_id as string, args!.path as string);
+        // unlink() removes a link itself (never its target), so a planted link
+        // may be deleted; but a symlinked parent folder would redirect the
+        // unlink elsewhere, so the parent must resolve inside the project.
+        const rel = String(args!.path ?? "");
+        await resolveSafePath(args!.project_id as string, path.posix.dirname(rel.replace(/\\/g, "/")) || ".");
+        const filePath = safePath(args!.project_id as string, rel);
         await fs.unlink(filePath);
         return { content: [{ type: "text", text: `Deleted ${args!.path}` }] };
       }

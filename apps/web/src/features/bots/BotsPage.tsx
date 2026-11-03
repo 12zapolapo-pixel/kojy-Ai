@@ -12,7 +12,6 @@ import { useBotStore }  from "../../state/botStore";
 import { BotCard }      from "../mission-control/BotCard";
 import { PageLoader }   from "../../components/PageLoader";
 import clsx             from "clsx";
-import type { BotStatus } from "@kojyai/shared/types";
 
 const STATUS_FILTERS = ["all","online","offline","error","connecting","suspended"] as const;
 
@@ -36,7 +35,7 @@ export default function BotsPage() {
   });
 
   useEffect(() => {
-    if (data?.bots) setBots(data.bots as any);
+    if (data?.bots) setBots(data.bots);
   }, [data, setBots]);
 
   const stopAllMutation = useMutation({
@@ -47,7 +46,8 @@ export default function BotsPage() {
   const toggleSelect = (id: string) => {
     setSelected((s) => {
       const next = new Set(s);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -93,7 +93,7 @@ export default function BotsPage() {
             {STATUS_FILTERS.map((s) => (
               <button
                 key={s}
-                onClick={() => setFilterStatus(s as BotStatus | "all")}
+                onClick={() => setFilterStatus(s)}
                 className={clsx(
                   "px-3 py-1 rounded-lg border text-xs capitalize transition-colors",
                   filterStatus === s
@@ -165,7 +165,7 @@ function CreateBotModal({ onClose, onCreated }: { onClose: () => void; onCreated
 
   const mutation = useMutation({
     mutationFn: () => trpcClient.bots.create.mutate({ name, highriseApiKey: apiKey, activeRoomId: roomId, runtimeMode: mode, language }),
-    onSuccess:  (bot) => { qc.invalidateQueries({ queryKey: getQueryKey(trpc.bots.list) }); onCreated((bot as any).uuid); },
+    onSuccess:  (bot) => { void qc.invalidateQueries({ queryKey: getQueryKey(trpc.bots.list) }); onCreated((bot as any).uuid); },
   });
 
   return (

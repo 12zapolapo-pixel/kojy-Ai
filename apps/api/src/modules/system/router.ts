@@ -16,7 +16,7 @@ import { getRedis } from "../../utils/redis.js";
 import { queueCounts } from "../../jobs/queues.js";
 
 const adminOnly = protectedProc.use(({ ctx, next }) => {
-  if (ctx.user!.role !== "admin" && ctx.user!.role !== "superadmin") throw new TRPCError({ code: "FORBIDDEN", message: "Administrator access required." });
+  if (ctx.user.role !== "admin" && ctx.user.role !== "superadmin") throw new TRPCError({ code: "FORBIDDEN", message: "Administrator access required." });
   return next({ ctx });
 });
 
@@ -64,7 +64,7 @@ export const systemRouter = router({
       runner: { ok: fresh(runner), heartbeat: runner },
       backup,
       queues,
-      bots: { js: tally(jsBots as { status: string; n: number }[]), python: tally(pyBots as { status: string; n: number }[]) },
+      bots: { js: tally(jsBots), python: tally(pyBots) },
       ai: { groq: !!process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.includes("placeholder"), alertsWebhook: !!process.env.ALERT_WEBHOOK_URL },
     };
   }),

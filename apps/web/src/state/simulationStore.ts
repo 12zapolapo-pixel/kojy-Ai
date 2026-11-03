@@ -62,7 +62,7 @@ export interface DecisionLogEntry {
 
 export const useSimulationStore = create<SimulationStore>()(
   subscribeWithSelector(
-    immer((set, get) => ({
+    immer((set) => ({
       activeSimulationId: null,
       status:             "draft",
       progress:           0,

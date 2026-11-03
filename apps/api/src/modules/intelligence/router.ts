@@ -4,15 +4,15 @@
  */
 
 import { z }         from "zod";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProc, permittedProc } from "../../trpc.js";
+import { router, permittedProc } from "../../trpc.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js"; // single canonical org resolution (M-08/M-13)
 import { schema }    from "../../db/client.js"; // FIX-2: schema re-exported from client.ts
 import { emitAuditLog } from "../../events/audit.js";
 import { enqueue }   from "../../jobs/queues.js";
 import { QUEUE_NAMES } from "@kojyai/shared/constants";
-import { createDefaultPersonalityProfile, buildPersonalityPrompt } from "@kojyai/engine/personality";
+import { createDefaultPersonalityProfile } from "@kojyai/engine/personality";
 import { evaluatePersonalityPolicy, checkInjection } from "@kojyai/shared/policy";
 
 const PersonalityUpdateInput = z.object({
@@ -180,15 +180,27 @@ export const intelligenceRouter = router({
     }),
 
   triggerMemoryCompression: permittedProc("intelligence:configure")
-    .input(z.object({ botId: z.string() }))
+    .input(z.object({ botId: z.string().min(1).max(64).optional() }))
     .mutation(async ({ input, ctx }) => {
-      await enqueue(QUEUE_NAMES.MEMORY_COMPRESSION, { botId: input.botId, type: "manual" });
+      // SECURITY FIX (V-05): this was the one procedure here without the org
+      // check — any org admin could compress another org's bot memories, and
+      // an empty or unknown botId made the worker compress across ALL orgs.
+      const orgId = await resolveOrgId(ctx);
+      if (!input.botId) {
+        // No bot given: the caller's own organisation only.
+        await enqueue(QUEUE_NAMES.MEMORY_COMPRESSION, { orgId, type: "manual_org" });
+        return { success: true, message: "Memory compression queued" };
+      }
+      const [bot] = await ctx.db.select({ uuid: schema.bots.uuid }).from(schema.bots)
+        .where(and(eq(schema.bots.uuid, input.botId), eq(schema.bots.orgId, orgId))).limit(1);
+      if (!bot) throw new TRPCError({ code: "NOT_FOUND", message: "Bot not found" });
+      await enqueue(QUEUE_NAMES.MEMORY_COMPRESSION, { botId: bot.uuid, type: "manual" });
       return { success: true, message: "Memory compression queued" };
     }),
 
   getChurnPredictions: permittedProc("intelligence:read")
     .input(z.object({ botId: z.string(), limit: z.number().min(1).max(100).default(20) }))
-    .query(async ({ input, ctx }) => {
+    .query(async () => {
       // L-22: no churn model or sweep job exists yet, so there are never any
       // predictions. Say so explicitly instead of returning an empty result that
       // looks like "we checked and nobody is at risk".

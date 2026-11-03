@@ -37,15 +37,15 @@ const log = createLogger("gdpr-router");
 
 export const gdprRouter = router({
   exportMyData: protectedProc.query(async ({ ctx }) => {
-    const data = await exportUserData(db, ctx.user!.id);
+    const data = await exportUserData(db, ctx.user.id);
 
     await emitAuditLog(db, {
       orgId:        null,
-      actorId:      ctx.user!.id,
+      actorId:      ctx.user.id,
       actorType:    "user",
       action:       "gdpr.export",
       resourceType: "user",
-      resourceId:   String(ctx.user!.id),
+      resourceId:   String(ctx.user.id),
       ip:           ctx.ip ?? null,
       userAgent:    ctx.req.headers.get("user-agent") ?? null,
     });
@@ -59,8 +59,8 @@ export const gdprRouter = router({
       // destructive, effectively irreversible action.
       confirm: z.literal("DELETE MY ACCOUNT"),
     }))
-    .mutation(async ({ ctx, input }) => {
-      const userId = ctx.user!.id;
+    .mutation(async ({ ctx }) => {
+      const userId = ctx.user.id;
 
       await emitAuditLog(db, {
         orgId:        null,
@@ -86,12 +86,12 @@ export const gdprRouter = router({
 
       await emitAuditLog(db, {
         orgId:        null,
-        actorId:      ctx.user!.id,
+        actorId:      ctx.user.id,
         actorType:    "user",
         action:       "gdpr.export.admin_assisted",
         resourceType: "user",
         resourceId:   String(input.userId),
-        afterState:   { requestedBy: ctx.user!.id },
+        afterState:   { requestedBy: ctx.user.id },
         ip:           ctx.ip ?? null,
         userAgent:    ctx.req.headers.get("user-agent") ?? null,
       });
@@ -107,19 +107,19 @@ export const gdprRouter = router({
     .mutation(async ({ ctx, input }) => {
       await emitAuditLog(db, {
         orgId:        null,
-        actorId:      ctx.user!.id,
+        actorId:      ctx.user.id,
         actorType:    "user",
         action:       "gdpr.erase.admin_assisted_requested",
         resourceType: "user",
         resourceId:   String(input.userId),
-        afterState:   { requestedBy: ctx.user!.id },
+        afterState:   { requestedBy: ctx.user.id },
         ip:           ctx.ip ?? null,
         userAgent:    ctx.req.headers.get("user-agent") ?? null,
       });
 
       await eraseUserData(db, input.userId);
 
-      log.info({ userId: input.userId, admin: ctx.user!.id }, "Admin-assisted GDPR erasure completed");
+      log.info({ userId: input.userId, admin: ctx.user.id }, "Admin-assisted GDPR erasure completed");
       return { success: true };
     }),
 });

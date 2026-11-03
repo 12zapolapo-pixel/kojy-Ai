@@ -22,6 +22,13 @@ import { connectDB, db, schema } from "./client.js";
 config();
 
 async function seed() {
+  // SECURITY FIX (V-11): this creates a superadmin admin@kojyai.dev /
+  // admin123 (plus dev123 / demo123 accounts). Never against production.
+  if (process.env.NODE_ENV === "production") {
+    console.error("Refusing to seed: NODE_ENV=production. The seed creates accounts with well-known passwords (admin123) and is for development only.");
+    process.exit(1);
+  }
+
   console.log("🌱 Starting database seed...\n");
 
   await connectDB();
@@ -126,7 +133,7 @@ async function seed() {
       }).catch(() => null);
 
       console.log(`  ✅ Org: ${org.name} (id: ${orgId})`);
-    } catch (err) {
+    } catch {
       console.log(`  ⏭️  Org ${org.slug} already exists`);
     }
   }

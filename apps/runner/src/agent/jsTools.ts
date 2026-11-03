@@ -7,17 +7,19 @@
  * write and test them, reload them into the running bot, or turn the whole
  * bot into a Python bot (convert_to_python), which can do far more.
  *
- * test_script runs a script in a separate Node process with an empty
- * environment and a time limit (like Python bots' tests), never inside the
- * runner itself.
+ * test_script runs a script inside an isolated-vm isolate (no Node APIs), in
+ * a separate Node process with an empty environment and a time limit — never
+ * inside the runner itself.
  */
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { and, asc, desc, eq } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import type { Database } from "@kojyai/db";
-import { bots, botScripts, botProjects, projectMessages } from "@kojyai/db/schema";
+import type { bots} from "@kojyai/db/schema";
+import { botScripts, botProjects, projectMessages } from "@kojyai/db/schema";
 import { signBotControlMessage } from "@kojyai/shared/crypto";
 import { ensureProjectDir } from "@kojyai/shared/projects";
 import type { ToolSpec } from "./groq.js";
@@ -62,50 +64,87 @@ async function publishControl(ctx: JsContext, action: string): Promise<void> {
   await ctx.redis.publish(`bot_control:${ctx.bot.uuid}`, signBotControlMessage(ctx.bot.uuid, action));
 }
 
-/** Child-process harness: strip types, wrap like the live runtime, feed events. */
+/**
+ * Child-process harness: strip types, then run the script inside an
+ * isolated-vm isolate — like the live runtime (apps/api runtime-manager.ts).
+ *
+ * SECURITY FIX (V-02): this used to run the script with `new Function` in a
+ * plain `node -e` process, where `require` and `process` are globals — so a
+ * script under test could read files, the runner's /proc entry and reach the
+ * network. Now the script gets its own V8 heap with no Node APIs at all; the
+ * child process stays as an extra wall (empty environment, hard kill).
+ */
 const HARNESS = `
 const { stripTypeScriptTypes } = require("node:module");
+const out = (o) => console.log(JSON.stringify(o));
 let input = "";
 process.stdin.on("data", (d) => (input += d));
 process.stdin.on("end", () => {
-  const { code, events } = JSON.parse(input);
+  const { code, events, ivmPath, timeoutMs, memoryMb } = JSON.parse(input);
   let js = code;
-  try { if (stripTypeScriptTypes) js = stripTypeScriptTypes(code, { mode: "strip" }); } catch (e) { console.log(JSON.stringify({ error: "Type syntax error: " + e.message })); return; }
+  try { if (stripTypeScriptTypes) js = stripTypeScriptTypes(code, { mode: "strip" }); } catch (e) { out({ error: "Type syntax error: " + e.message }); return; }
   js = js.replace(/^\\s*import\\s+type\\b.*$/gm, "")
     .replace(/^(\\s*)export\\s+default\\s+(async\\s+)?function\\s*\\(/m, "$1$2function handler(")
     .replace(/^(\\s*)export\\s+default\\s+(?=(async\\s+)?\\(|(async\\s+)?\\w+\\s*=>)/m, "$1const handler = ")
     .replace(/^(\\s*)export\\s+default\\s+function\\b/m, "$1function")
     .replace(/^\\s*export\\s+default\\s+\\w+\\s*;\\s*$/m, "")
     .replace(/^(\\s*)export\\s+(const|let|var|function)\\b/gm, "$1$2");
-  let fn;
-  try { fn = new Function(js + "\\n;return typeof handler === 'function' ? handler : null;")(); }
-  catch (e) { console.log(JSON.stringify({ error: "Syntax error: " + e.message })); return; }
-  if (typeof fn !== "function") { console.log(JSON.stringify({ error: "No handler function found (use: export default function handler(event, ctx) { … })" })); return; }
-  const ctx = { botUserId: "bot-test", userState: new Map(), scriptState: {}, emotes: null };
-  const out = [];
-  for (const ev of events) {
-    try {
-      const actions = fn(ev, ctx);
-      out.push({ event: ev._type === "ChatEvent" ? "tester says: " + ev.message : ev._type, actions: Array.isArray(actions) ? actions : [] });
-    } catch (e) { out.push({ event: ev._type, error: String(e && e.stack || e).slice(0, 500) }); }
+  let ivm;
+  try { ivm = require(ivmPath); } catch (e) { out({ error: "The script sandbox isn't available: " + e.message }); return; }
+  const isolate = new ivm.Isolate({ memoryLimit: memoryMb });
+  const context = isolate.createContextSync();
+  const wrapped = js + \`
+;const __fn__ = typeof handler === "function" ? handler : null;
+const __userState__ = new Map();
+const __scriptState__ = {};
+function __hasHandler__() { return typeof __fn__ === "function"; }
+function __invoke__(eventJson) {
+  const r = __fn__(JSON.parse(eventJson), { botUserId: "bot-test", userState: __userState__, scriptState: __scriptState__, emotes: null });
+  return JSON.stringify(Array.isArray(r) ? r : []);
+}\`;
+  const timedOut = (e) => /timed out/i.test(String(e && e.message));
+  try { isolate.compileScriptSync(wrapped).runSync(context, { timeout: timeoutMs }); }
+  catch (e) { out({ error: timedOut(e) ? "Timed out (does the script loop forever?)" : "Syntax error: " + e.message }); return; }
+  if (!context.global.getSync("__hasHandler__", { reference: true }).applySync(undefined, [], { timeout: timeoutMs })) {
+    out({ error: "No handler function found (use: export default function handler(event, ctx) { … })" }); return;
   }
-  console.log(JSON.stringify({ results: out }));
+  const invoke = context.global.getSync("__invoke__", { reference: true });
+  const results = [];
+  for (const ev of events) {
+    const label = ev._type === "ChatEvent" ? "tester says: " + ev.message : ev._type;
+    try {
+      const actions = JSON.parse(invoke.applySync(undefined, [JSON.stringify(ev)], { timeout: timeoutMs }));
+      results.push({ event: label, actions: Array.isArray(actions) ? actions : [] });
+    } catch (e) {
+      if (timedOut(e)) { out({ error: "Timed out (does the script loop forever?)" }); return; }
+      results.push({ event: ev._type, error: String((e && e.stack) || e).slice(0, 500) });
+    }
+  }
+  out({ results });
 });`;
+
+/** Where isolated-vm lives for this build (resolved here, loaded by the child). */
+function isolatedVmPath(): string | null {
+  try { return createRequire(import.meta.url).resolve("isolated-vm"); } catch { return null; }
+}
 
 export function runHarness(code: string, events: unknown[]): Promise<{ error?: string; results?: { event: string; actions?: unknown[]; error?: string }[] }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ["--no-warnings", "-e", HARNESS], { env: {}, stdio: ["pipe", "pipe", "pipe"] });
+    const ivmPath = isolatedVmPath();
+    if (!ivmPath) { resolve({ error: "The script sandbox (isolated-vm) isn't installed in the runner." }); return; }
+    // --no-node-snapshot: required by isolated-vm on Node 20+.
+    const child = spawn(process.execPath, ["--no-node-snapshot", "--no-warnings", "-e", HARNESS], { env: {}, stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (d: Buffer) => { if (out.length < 200_000) out += d.toString(); });
     child.stderr.on("data", (d: Buffer) => { if (out.length < 200_000) out += d.toString(); });
-    const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+    const timer = setTimeout(() => child.kill("SIGKILL"), 8000);
     child.once("exit", (code) => {
       clearTimeout(timer);
       const line = out.trim().split("\n").reverse().find((l) => l.startsWith("{"));
       try { resolve(line ? JSON.parse(line) : { error: code === null ? "Timed out (does the script loop forever?)" : out.slice(0, 1000) || "No output" }); }
       catch { resolve({ error: out.slice(0, 1000) }); }
     });
-    child.stdin.end(JSON.stringify({ code, events }));
+    child.stdin.end(JSON.stringify({ code, events, ivmPath, timeoutMs: 1000, memoryMb: 32 }));
   });
 }
 

@@ -54,7 +54,7 @@ import { schema }        from "../../db/client.js";
 import { createLogger }  from "../../utils/logger.js";
 import { enqueue }       from "../../jobs/queues.js";
 import { QUEUE_NAMES }   from "@kojyai/shared/constants";
-import { encryptApiKey, decryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
+import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
 import { hasPermission } from "@kojyai/shared/permissions";
 import { HIGHRISE_BOT_TEMPLATES } from "@kojyai/engine/highrise";
 import { getRedisPublisher }      from "../../utils/redis.js";
@@ -361,7 +361,7 @@ export const composerRouter = router({
       let encryptedToken: string;
       try {
         encryptedToken = encryptApiKey(input.token);
-      } catch (err) {
+      } catch {
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Server is not configured to store Highrise tokens securely (ENCRYPTION_KEY missing). Contact your administrator.",
