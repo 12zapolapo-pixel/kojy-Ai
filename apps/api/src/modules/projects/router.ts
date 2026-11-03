@@ -173,6 +173,7 @@ export const projectsRouter = router({
     await ctx.db.delete(projectSecrets).where(eq(projectSecrets.projectId, project.id));
     await ctx.db.delete(projectMessages).where(eq(projectMessages.projectId, project.id));
     await ctx.db.delete(schema.agentMemories).where(eq(schema.agentMemories.projectId, project.id));
+    await ctx.db.delete(schema.agentWorkLog).where(eq(schema.agentWorkLog.thread, `project:${project.id}`));
     await ctx.db.delete(botProjects).where(eq(botProjects.id, project.id));
     removeProjectDir(project.uuid);
     removeSnapshots(project.uuid);
@@ -325,6 +326,21 @@ export const projectsRouter = router({
    * circle). Platform-wide, so admins only. Counts come from the runner.
    */
   aiUsage: adminProc.query(async () => readAiUsage(getRedis())),
+
+  /**
+   * Kojy's work log for this bot, newest first: each request, how it ended,
+   * the files it changed and its result. Kept when the chat is cleared.
+   */
+  workLog: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
+    const project = await loadProject(ctx, input.id);
+    const rows = await ctx.db.select().from(schema.agentWorkLog)
+      .where(eq(schema.agentWorkLog.thread, `project:${project.id}`))
+      .orderBy(desc(schema.agentWorkLog.updatedAt)).limit(50);
+    return rows.map((r) => ({
+      id: r.id, request: r.request, status: r.status, summary: r.summary, files: r.files,
+      steps: r.actions.length, failed: r.failed, startedAt: r.startedAt, updatedAt: r.updatedAt,
+    }));
+  }),
 
   chatStop: permittedProc("bots:update").input(projectId).mutation(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);

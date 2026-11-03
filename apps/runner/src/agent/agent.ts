@@ -31,6 +31,7 @@ import { chat, estimateTokens, AiUnavailableError, RequestTooLargeError, type Ch
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
 import { taskMemory, taskMemoryPrompt, continuesAutomatically, type PartOutcome } from "./taskMemory.js";
+import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
@@ -191,10 +192,15 @@ export class Agent {
     await scope.setState("working");
     let finalState: "idle" | "waiting" | "working" = "idle";
     let outcome: PartOutcome = "limit";
+    let ended: "error" | "stopped" | null = null;
+    // Every chat can look back at its own work log and earlier messages.
+    const tools = [...scope.tools, ...MEMORY_TOOL_SPECS];
+    const runTool = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
+      MEMORY_TOOL_NAMES.has(name) ? runMemoryTool(name, args, { db: this.db, thread: scope.thread }) : scope.runTool(name, args);
 
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
-        if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); outcome = "done"; break; }
+        if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); outcome = "done"; ended = "stopped"; break; }
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
 
         let message: ChatMessage | undefined;
@@ -202,7 +208,7 @@ export class Agent {
         for (let budget = HISTORY_TOKENS; !message; budget = Math.floor(budget / 2)) {
           try {
             ({ message } = await chat({
-              messages: await this.buildMessages(scope, budget), tools: scope.tools, signal,
+              messages: await this.buildMessages(scope, budget), tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`),
             }));
           } catch (err) {
@@ -220,7 +226,7 @@ export class Agent {
           await this.progress(uuid, describeCall(call.function.name, args));
           const result: ToolResult = automated && NEEDS_OWNER.has(call.function.name)
             ? { ok: false, output: OWNER_APPROVAL_NEEDED, summary: "Needs the owner's approval first" }
-            : await scope.runTool(call.function.name, args);
+            : await runTool(call.function.name, args);
           await this.add(scope, "tool", result.output, result.cardKind ?? (result.card ? "secret_request" : "tool"), {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
           });
@@ -241,9 +247,17 @@ export class Agent {
       const text = err instanceof AiUnavailableError ? err.message : `Something went wrong: ${(err as Error).message}`;
       if (!(err instanceof AiUnavailableError)) log.error({ err, uuid }, "Agent run failed");
       outcome = "done"; // an error is not a step limit: don't restart the request by itself
+      ended = "error";
       await this.add(scope, "assistant", text, "error");
     } finally {
       await scope.setState(finalState);
+      // Keep the work log current after every part (one row per request).
+      const status: WorkStatus = ended === "error" ? "error"
+        : ended === "stopped" ? "stopped"
+        : outcome === "waiting" ? "waiting_for_owner"
+        : outcome === "done" ? "done"
+        : finalState === "working" ? "in_progress" : "paused";
+      await recordWork(this.db, scope.thread, scope.projectId, status);
     }
     return outcome;
   }
@@ -266,10 +280,11 @@ export class Agent {
    * user message so tool calls and their results stay paired.
    */
   private async buildMessages(scope: Scope, historyTokens: number): Promise<ChatMessage[]> {
-    const [rowsDesc, system] = await Promise.all([
+    const [rowsDesc, system, log] = await Promise.all([
       // More than the history window: the task memory looks further back for the owner's request.
       this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(300),
       scope.system(),
+      recentWork(this.db, scope.thread, 8).catch(() => []),
     ]);
     const stored = rowsDesc.reverse().filter((r) => r.kind !== "error");
     const memory = taskMemory(stored.map((r) => {
@@ -316,7 +331,7 @@ export class Agent {
     const history = pairToolCalls(picked.slice(start));
 
     // The request and finished steps are part of the system prompt, which is never cut to fit the budget.
-    return [{ role: "system", content: system + taskMemoryPrompt(memory) }, ...history];
+    return [{ role: "system", content: system + recentWorkPrompt(log, memory.task) + taskMemoryPrompt(memory) }, ...history];
   }
 
   // ── stabilizer ─────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
 import { AiUsageCircle } from "./AiUsage";
+import { WorkHistoryButton } from "./WorkHistory";
 
 type Project = RouterOutputs["projects"]["get"];
 type Msg = RouterOutputs["projects"]["chatList"]["messages"][number];
@@ -274,9 +275,10 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
       <div className="ml-auto flex items-center gap-2">
         <AiUsageCircle />
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working} onClick={onIdeas}>💡 Ideas</button>
+        <WorkHistoryButton projectId={project.id} />
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working} onClick={() => setShowUndo((v) => !v)}>↶ Undo AI changes</button>
         <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending}
-          onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot.")) clear.mutate({ id: project.id }); }}>New chat</button>
+          onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot and the work history.")) clear.mutate({ id: project.id }); }}>New chat</button>
       </div>
       {showUndo && (
         <div className="absolute right-4 top-9 z-10 w-80 bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">

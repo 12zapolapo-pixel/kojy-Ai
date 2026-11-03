@@ -30,13 +30,18 @@ export const TASK_MAX_CHARS = 1200;
 export const DONE_MAX_ITEMS = 25;
 export const ITEM_MAX_CHARS = 120;
 
-/** `rows` are oldest first. Works on the whole stored conversation, not only what fits the budget. */
-export function taskMemory(rows: TaskRow[]): TaskMemory {
-  let start = -1;
+/** Index of the owner's message that started the current request (-1 if none). Oldest-first rows. */
+export function requestIndex(rows: { role: string; kind: string; content: string }[]): number {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
-    if (r.role === "user" && r.kind !== "event" && !CONTINUE.test(r.content)) { start = i; break; }
+    if (r.role === "user" && r.kind !== "event" && !CONTINUE.test(r.content)) return i;
   }
+  return -1;
+}
+
+/** `rows` are oldest first. Works on the whole stored conversation, not only what fits the budget. */
+export function taskMemory(rows: TaskRow[]): TaskMemory {
+  const start = requestIndex(rows);
   if (start < 0) return { task: null, done: [], failed: [] };
 
   const done: string[] = [];
