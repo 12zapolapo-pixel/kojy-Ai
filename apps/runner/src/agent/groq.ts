@@ -57,8 +57,10 @@ const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1
 const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,mistral-large-2512").split(",").map((s) => s.trim()).filter(Boolean);
 const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY!.trim() : "";
 
-/** Mistral's free plan allows about one request per second. */
+/** Mistral's free plan: about one request per second… */
 const MISTRAL_MIN_INTERVAL_MS = Number(process.env.MISTRAL_MIN_INTERVAL_MS ?? 1100);
+/** …and 20,000 tokens a minute (its x-ratelimit-limit-tokens-minute header), so about one long Kojy step a minute. */
+const MISTRAL_TOKENS_PER_MINUTE = Number(process.env.MISTRAL_TOKENS_PER_MINUTE ?? 20000);
 
 const GROQ_BASE = (process.env.GROQ_BASE_URL ?? "https://api.groq.com/openai/v1").replace(/\/$/, "");
 const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY!.trim() : "";
@@ -72,6 +74,8 @@ interface Lane {
   order: number;
   /** Largest request (estimated tokens) this lane can take at all. */
   maxRequestTokens: number;
+  /** The plan's tokens-per-minute budget (Infinity: limited by cooldowns only). */
+  tokensPerMinute: number;
   /** 1-based number of the key within its provider, for display only. */
   keyNo: number;
   provider: "gemini" | "mistral" | "groq";
@@ -87,18 +91,18 @@ function buildLanes(): Lane[] {
   // can't take a request over its tokens-per-minute limit at all.
   const gemini = GEMINI_MODELS.flatMap((model) =>
     GEMINI_KEYS.map((key, i): Lane => ({
-      id: `gemini:${model}:${i}`, order: 0, maxRequestTokens: Infinity, keyNo: i + 1, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
+      id: `gemini:${model}:${i}`, order: 0, maxRequestTokens: Infinity, tokensPerMinute: Infinity, keyNo: i + 1, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
     })),
   );
   const mistral = MISTRAL_KEY
     ? MISTRAL_MODELS.map((model): Lane => ({
-        id: `mistral:${model}`, order: 0, maxRequestTokens: Infinity, keyNo: 1, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
+        id: `mistral:${model}`, order: 0, maxRequestTokens: MISTRAL_TOKENS_PER_MINUTE, tokensPerMinute: MISTRAL_TOKENS_PER_MINUTE, keyNo: 1, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
       }))
     : [];
   if (!GROQ_KEY) return [...mistral, ...gemini];
   const groqModels = [...new Set([GROQ_SMART, GROQ_FAST])];
   const groq = groqModels.map((model): Lane => ({
-    id: `groq:${model}`, order: 0, maxRequestTokens: TOKENS_PER_MINUTE, keyNo: 1, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
+    id: `groq:${model}`, order: 0, maxRequestTokens: TOKENS_PER_MINUTE, tokensPerMinute: TOKENS_PER_MINUTE, keyNo: 1, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
   }));
   return [...mistral, ...gemini, ...groq];
 }
@@ -109,16 +113,28 @@ LANES.forEach((l, i) => { l.order = i; });
 /** Rough size of a request: ~4 characters per token. */
 export const estimateTokens = (text: string) => Math.ceil(text.length / 4);
 
-// Groq's free plan limits tokens per minute per model; Gemini's are per request, handled by cooldowns.
+// Groq's and Mistral's free plans limit tokens per minute; Gemini's limits are handled by cooldowns.
+/** Requests sent in the last minute, per lane. */
 const recent = new Map<string, { at: number; tokens: number }[]>();
 const coolUntil = new Map<string, number>();
 
-function usedLastMinute(model: string): number {
+/** When the lane's per-minute budget can take `size` more tokens (0: now). */
+function budgetFreeAt(lane: Lane, size: number): number {
+  if (!Number.isFinite(lane.tokensPerMinute)) return 0;
   const now = Date.now();
-  const list = (recent.get(model) ?? []).filter((r) => now - r.at < 60_000);
-  recent.set(model, list);
-  return list.reduce((n, r) => n + r.tokens, 0);
+  const list = (recent.get(lane.id) ?? []).filter((r) => now - r.at < 60_000);
+  recent.set(lane.id, list);
+  let used = list.reduce((n, r) => n + r.tokens, 0);
+  if (used + size <= lane.tokensPerMinute) return 0;
+  // Older requests leave the window one by one.
+  for (const r of list) {
+    used -= r.tokens;
+    if (used + size <= lane.tokensPerMinute) return r.at + 60_000;
+  }
+  return now + 60_000;
 }
+/** When the lane can take a request of `size`: after its cooldown and once its minute budget allows. */
+const readyAt = (lane: Lane, size: number) => Math.max(coolUntil.get(lane.id) ?? 0, budgetFreeAt(lane, size));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let lastMistralAt = 0;
@@ -244,25 +260,36 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
   const fits = (l: Lane) => size <= l.maxRequestTokens && !tooBig.has(l.id);
   let firstRejection = "";
 
-  for (let attempt = 0; attempt < 12; attempt++) {
+  /** Each lane gets a couple of tries per request; waiting for one doesn't use them up. */
+  const maxAttempts = LANES.length * 2 + 4;
+  /** Waiting on rate limits stops here; then a shorter request (Groq) or an error. */
+  const deadline = Date.now() + 150_000;
+  let waits = 0;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
 
-    const lane = LANES.find((l) => !isCooling(l) && !skip.has(l.id) && fits(l));
+    const now = Date.now();
+    const lane = LANES.find((l) => !skip.has(l.id) && fits(l) && readyAt(l, size) <= now);
     if (!lane) {
-      // Lanes that could take this request once their cooldown ends: wait for
-      // the soonest if it's short (better than cutting the history for Groq).
+      // Lanes that could take this request once their cooldown or minute budget allows.
       const later = LANES.filter((l) => !skip.has(l.id) && fits(l));
-      const soonest = later.length ? Math.min(...later.map((l) => coolUntil.get(l.id) ?? 0)) - Date.now() : Infinity;
-      if (soonest <= 65_000) {
+      const soonest = later.length ? Math.min(...later.map((l) => readyAt(l, size))) - now : Infinity;
+      // A lane free right now that's only too small for it (Groq): a shorter history goes at once.
+      const smallerNow = LANES.some((l) => !skip.has(l.id) && !fits(l) && !isCooling(l));
+      // Waiting for a lane that takes the whole chat beats cutting it — but only
+      // once when a shorter request could go right away.
+      if (soonest <= 65_000 && now + soonest <= deadline && (!smallerNow || waits === 0)) {
+        waits++;
+        attempt--; // a wait isn't a try
         const wait = Math.max(1, Math.ceil(soonest / 1000));
         opts.onWait?.(wait, "AI rate limit");
         await sleep(wait * 1000);
         continue;
       }
-      // A ready lane is only too small for it: the caller retries with less history.
-      if (LANES.some((l) => !isCooling(l) && !skip.has(l.id))) {
+      if (smallerNow) {
         throw new RequestTooLargeError(later.length
-          ? `The AIs that can take a chat this long are at their limit for about ${Math.ceil(soonest / 60_000)} min, and the free Groq AI is too small for it. Try again then, or start a new chat.`
+          ? `The AIs that can take a chat this long are busy for about ${Math.max(1, Math.ceil(soonest / 60_000))} min, and the free Groq AI is too small for it. Try again then, or start a new chat.`
           : "The conversation got too big for the AI. Start a new chat or ask about one thing at a time.");
       }
       // Every ready lane rejected this request itself: say why, don't call it "busy".
@@ -270,17 +297,6 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
         throw new AiUnavailableError(`The AI rejected this request: ${firstRejection.slice(0, 300) || "unknown reason"}`);
       }
       throw new AiUnavailableError("The AI keys are all at their limit right now. They reset within a few hours, or add another key.");
-    }
-
-    if (lane.provider === "groq") {
-      const used = usedLastMinute(lane.model);
-      if (used > 0 && used + size > TOKENS_PER_MINUTE) {
-        const oldest = recent.get(lane.model)![0]!;
-        const wait = Math.max(1, Math.ceil((60_000 - (Date.now() - oldest.at)) / 1000));
-        opts.onWait?.(wait, "pacing for the free AI plan");
-        await sleep(wait * 1000);
-        continue;
-      }
     }
 
     if (lane.provider === "mistral") {
@@ -310,10 +326,10 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       return null;
     });
     if (!res) continue;
-    if (lane.provider === "groq") {
-      const list = recent.get(lane.model) ?? [];
+    if (Number.isFinite(lane.tokensPerMinute)) {
+      const list = recent.get(lane.id) ?? [];
       list.push({ at: Date.now(), tokens: size });
-      recent.set(lane.model, list);
+      recent.set(lane.id, list);
     }
 
     if (res.ok) {
@@ -342,7 +358,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
     if (res.status === 429) {
       if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`, "out_of_quota");
-      else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || (lane.provider === "mistral" ? 8 : 30)) * 1000, `${lane.label} is rate limited`, "rate_limited");
+      // Mistral's limits are per minute: a 429 means its minute is used up.
+      else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || (lane.provider === "mistral" ? 60 : 30)) * 1000, `${lane.label} is rate limited`, "rate_limited");
       continue;
     }
     if (res.status === 400 && /tool_use_failed|failed_generation/i.test(text) && badRequests++ < 2) {
@@ -359,10 +376,14 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       skip.add(lane.id);
       recordUsage(lane, { fail: 1 });
       firstRejection ||= `${lane.label}: ${text.replace(/\s+/g, " ")}`;
-      log.warn({ lane: lane.label, status: res.status }, `${lane.label} rejected this request — trying the next AI`);
+      log.warn({ lane: lane.label, status: res.status, detail: text.replace(/\s+/g, " ").slice(0, 300) }, `${lane.label} rejected this request — trying the next AI`);
       continue;
     }
     cool(lane, 2 * 60_000, `${lane.label} failed (${res.status}): ${text.slice(0, 160)}`);
+  }
+  // Out of tries: a shorter request may still fit the AI that's free (Groq).
+  if (LANES.some((l) => !skip.has(l.id) && !fits(l) && !isCooling(l))) {
+    throw new RequestTooLargeError("The AIs that can take a chat this long are busy right now. Try again in a minute, or start a new chat.");
   }
   throw new AiUnavailableError("The AI is busy right now — try again in a minute.");
 }

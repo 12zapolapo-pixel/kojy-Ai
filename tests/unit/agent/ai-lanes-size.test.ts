@@ -11,7 +11,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-type MistralMode = "ok" | "chunks" | "thinking-only-with-tools" | "thinking-only" | "quota" | "busy-1s" | "too-big";
+type MistralMode = "ok" | "chunks" | "thinking-only-with-tools" | "thinking-only" | "quota" | "busy-1s" | "busy-always" | "too-big";
 let mistralMode: MistralMode = "ok";
 let seen: string[] = [];
 let server: http.Server;
@@ -28,8 +28,13 @@ beforeAll(async () => {
         res.end(JSON.stringify(data));
       };
       const answer = (message: Record<string, unknown>) => json(200, { choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 5, completion_tokens: 3 } });
+      if (model.startsWith("reject-")) {
+        // What Gemini answered on 2026-11-03 to a history that opened with a tool call.
+        return json(400, [{ error: { code: 400, message: "Please ensure that function call turn comes immediately after a user turn or after a function response turn.", status: "INVALID_ARGUMENT" } }]);
+      }
       if (model.startsWith("mistral")) {
         if (mistralMode === "quota") return json(429, { message: "Monthly quota exceeded for this plan" });
+        if (mistralMode === "busy-always") return json(429, { message: "Rate limit exceeded" }, { "retry-after": "1" });
         if (mistralMode === "busy-1s") { mistralMode = "ok"; return json(429, { message: "Rate limit exceeded" }, { "retry-after": "1" }); }
         if (mistralMode === "too-big") return json(400, { message: "Prompt contains 300000 tokens, too large for model with 131072 maximum context length" });
         if (mistralMode === "chunks") {
@@ -51,6 +56,7 @@ beforeAll(async () => {
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   process.env.MISTRAL_BASE_URL = base;
   process.env.GROQ_BASE_URL = base;
+  process.env.GEMINI_BASE_URL = base;
   process.env.MISTRAL_API_KEY = "mstrl_fake-test-key";
   process.env.MISTRAL_MODELS = "mistral-large-4";
   process.env.MISTRAL_MIN_INTERVAL_MS = "0";
@@ -67,10 +73,14 @@ afterAll(async () => {
   for (const k of ["GROQ_API_KEY", "GROQ_BASE_URL", "AGENT_MODEL", "AGENT_FALLBACK_MODEL", "AGENT_TOKENS_PER_MINUTE", "MISTRAL_API_KEY"]) delete process.env[k];
 });
 
-async function load() {
+/** Loads the client with `env` set while it reads its configuration. */
+async function load(env: Record<string, string> = {}) {
+  const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, env);
   vi.resetModules();
   const ai = await import("../../../apps/runner/src/agent/groq.js");
   ai._resetAiStateForTests();
+  for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   return ai;
 }
 
@@ -119,7 +129,7 @@ describe("requests too big for Groq's free plan", () => {
     const ai = await load();
     const err = await ask(ai, 2000).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ai.RequestTooLargeError);
-    expect(String((err as Error).message)).toMatch(/at their limit for about \d+ min/);
+    expect(String((err as Error).message)).toMatch(/busy for about \d+ min/);
     expect(seen).toEqual(["mistral-large-4"]); // Groq was never called with it
     // The shortened retry fits Groq and gets an answer.
     const out = await ask(ai, 100);
@@ -148,5 +158,35 @@ describe("requests too big for Groq's free plan", () => {
     mistralMode = "too-big";
     const ai = await load();
     await expect(ask(ai, 2000)).rejects.toThrow(/too big for the AI/);
+  });
+});
+
+describe("2026-11-03: \"The AI is busy right now\" while an AI was free", () => {
+  const twelveRejecting = { AGENT_API_KEYS: "AQ.k1,AQ.k2", GEMINI_MODELS: "reject-1,reject-2,reject-3,reject-4,reject-5,reject-6" };
+
+  it("Mistral rate limited and 12 Gemini lanes rejecting: it still gets to Groq instead of giving up after 12 tries", async () => {
+    mistralMode = "busy-always";
+    const ai = await load(twelveRejecting);
+    const out = await ask(ai, 100);
+    expect(out.message.content).toBe("hello from groq-small");
+    expect(seen.filter((m) => m.startsWith("reject-"))).toHaveLength(12);
+  });
+
+  it("a chat too long for Groq waits once for Mistral, then asks for a shorter request instead of 'busy'", async () => {
+    mistralMode = "busy-always";
+    const ai = await load(twelveRejecting);
+    const err = await ask(ai, 2000).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ai.RequestTooLargeError);
+    expect(seen.filter((m) => m === "mistral-large-4")).toHaveLength(2); // tried, waited once, tried again
+    expect(seen).not.toContain("groq-small");
+  }, 10_000);
+
+  it("Mistral's 20,000 tokens a minute: once its minute is used up, the next request goes to Gemini at once", async () => {
+    const ai = await load({ AGENT_API_KEYS: "AQ.k1", GEMINI_MODELS: "gem-ok", MISTRAL_TOKENS_PER_MINUTE: "3000" });
+    expect((await ask(ai, 2000)).message.content).toBe("hello from mistral-large-4");
+    const started = Date.now();
+    expect((await ask(ai, 2000)).message.content).toBe("hello from gem-ok");
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(seen.filter((m) => m === "mistral-large-4")).toHaveLength(1); // not hit again only to be refused
   });
 });

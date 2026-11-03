@@ -45,11 +45,12 @@ const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
 /** How many parts of MAX_STEPS one request may take before it asks the owner to continue. */
 const AUTO_PARTS = Number(process.env.AGENT_AUTO_PARTS ?? 4);
 /**
- * History sent with each step. Mistral and Gemini take far more; at 3000 one
- * file read pushed the previous one out and Kojy kept re-reading the same
- * file. A request too big for the AI that's free (Groq) is retried smaller.
+ * History sent with each step. At 3000 one file read pushed the previous one
+ * out and Kojy kept re-reading the same file; much more than 8000 and
+ * Mistral's free plan (20,000 tokens a minute) takes one step a minute at
+ * best. A request too big for the AI that's free (Groq) is retried smaller.
  */
-const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 12000);
+const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 8000);
 const AUTOFIX_PER_DAY = 3;
 /** Another automatic fix for the same bot waits at least this long after the last one started. */
 const AUTOFIX_GAP_MS = 5 * 60_000;
@@ -412,7 +413,7 @@ export class Agent {
     // Start at a user message so no tool result is left without its call.
     let start = 0;
     if (cut > 0) { while (start < picked.length && picked[start]!.role !== "user") start++; }
-    const history = pairToolCalls(picked.slice(start));
+    const history = normalizeTurns(pairToolCalls(picked.slice(start)));
 
     // The request and finished steps are part of the system prompt, which is never cut to fit the budget.
     return [{ role: "system", content: system + recentWorkPrompt(log, memory.task) + taskMemoryPrompt(memory) }, ...history];
@@ -464,6 +465,30 @@ export class Agent {
       void sendAlert(`🛠️ ${title}: ${summary}`);
     }).catch((err) => log.warn({ err, uuid }, "Auto-fix follow-up failed"));
   }
+}
+
+/**
+ * Turn order every AI accepts. The history starts with a user turn: Gemini
+ * refuses a chat that opens with a tool call ("function call turn comes
+ * immediately after a user turn or after a function response turn"), which
+ * the history window can start on. Two assistant turns in a row (an app note,
+ * then a step) become one.
+ */
+export function normalizeTurns(msgs: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of msgs) {
+    if (!out.length && m.role !== "user") {
+      if (m.role === "tool") continue; // a result whose call is out of view
+      out.push({ role: "user", content: "[app] (Earlier messages of this chat are left out here; the notes above say what was asked and done.)" });
+    }
+    const last = out[out.length - 1];
+    if (last && last.role === "assistant" && !last.tool_calls?.length && m.role === "assistant") {
+      out[out.length - 1] = { ...m, content: [last.content, m.content].filter((c) => c?.trim()).join("\n\n") || null };
+      continue;
+    }
+    out.push(m);
+  }
+  return out;
 }
 
 /**

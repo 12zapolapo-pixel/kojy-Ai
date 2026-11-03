@@ -21,7 +21,7 @@ describe("coder AI history", () => {
   });
 });
 
-import { supersededResults } from "../../../apps/runner/src/agent/agent.js";
+import { normalizeTurns, supersededResults } from "../../../apps/runner/src/agent/agent.js";
 import { isNetworkFailure } from "../../../apps/runner/src/agent/autoFix.js";
 
 describe("reading the same thing twice (2026-11-03: Kojy re-read bot.py in a loop)", () => {
@@ -61,5 +61,29 @@ describe("auto-fix after a crash", () => {
       '  File "/app/projects/x/highrise_bot/bot.py", line 302, in on_user_join',
       "TypeError: '<=' not supported between instances of 'float' and 'NoneType'",
     ])).toBe(false);
+  });
+});
+
+describe("turn order (2026-11-03: Gemini refused every request)", () => {
+  it("a history that opens with Kojy's tool call gets a user turn first", () => {
+    const out = normalizeTurns([call("1"), result("1"), user("go on")]);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "tool", "user"]);
+    expect(String(out[0]!.content)).toMatch(/^\[app\] \(Earlier messages/);
+  });
+
+  it("a leading result whose call is out of view is dropped", () => {
+    expect(normalizeTurns([result("0"), user("hi")])).toEqual([user("hi")]);
+  });
+
+  it("an app note right before a step becomes one assistant turn", () => {
+    const note: ChatMessage = { role: "assistant", content: "Still on it — part 2 of 4." };
+    const out = normalizeTurns([user("fix !tp"), note, call("1"), result("1")]);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "tool"]);
+    expect(out[1]).toMatchObject({ content: "Still on it — part 2 of 4.", tool_calls: [{ id: "1" }] });
+  });
+
+  it("a normal history is left as it is", () => {
+    const msgs = [user("a"), call("1"), result("1"), { role: "assistant", content: "done" } as ChatMessage, user("b")];
+    expect(normalizeTurns(msgs)).toEqual(msgs);
   });
 });
