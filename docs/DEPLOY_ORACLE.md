@@ -1,8 +1,9 @@
 # Put KojyAI on Oracle Cloud (free)
 
 This guide gets KojyAI running 24/7 on Oracle Cloud's **Always Free** Arm
-server: up to 4 CPU cores and 24 GB of RAM, which is far more than KojyAI and
-a handful of bots need. Everything (website, API, worker, database, Redis)
+server: 2 CPU cores and 12 GB of RAM (Oracle halved the free allowance from
+4 cores and 24 GB in 2026), which is still far more than KojyAI and a handful
+of bots need. Everything (website, API, worker, database, Redis)
 runs on that one machine with Docker.
 
 Time needed: about 30–45 minutes the first time.
@@ -16,7 +17,7 @@ Time needed: about 30–45 minutes the first time.
 2. In the console: **Compute → Instances → Create instance**.
 3. **Image:** Canonical **Ubuntu 24.04** (or 22.04).
 4. **Shape:** click *Change shape* → **Ampere** → `VM.Standard.A1.Flex`.
-   Pick **2 OCPUs and 12 GB** (you can go up to 4 / 24 GB for free).
+   Pick **2 OCPUs and 12 GB** — the most the free tier allows.
 5. **SSH keys:** let Oracle *generate a key pair* and **download the private
    key** — you need it to log in.
 6. **Boot volume:** 50–100 GB is fine (200 GB total is free).
