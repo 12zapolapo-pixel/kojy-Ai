@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { continuesAutomatically, taskMemory, taskMemoryPrompt, TASK_MAX_CHARS, DONE_MAX_ITEMS } from "../../../apps/runner/src/agent/taskMemory.js";
+import { continuesAutomatically, taskMemory, taskMemoryPrompt, TASK_MAX_CHARS, DONE_MAX_ITEMS, announcesNextStep } from "../../../apps/runner/src/agent/taskMemory.js";
 
 const u = (content: string, kind = "text") => ({ role: "user", kind, content });
 const a = (content: string) => ({ role: "assistant", kind: "text", content });
@@ -80,5 +80,27 @@ describe("continuesAutomatically", () => {
     expect(continuesAutomatically("done", 0, 4, false)).toBe(false);
     expect(continuesAutomatically("waiting", 0, 4, false)).toBe(false);
     expect(continuesAutomatically("limit", 0, 4, true)).toBe(false);
+  });
+});
+
+describe("a reply that only says what comes next", () => {
+  // Real replies from Japalo's chat (2026-11-04) that stopped the request and made the owner type "Continue".
+  it("is caught, so Kojy is told to take the step", () => {
+    for (const stalled of [
+      "Let's check `emote_loop.py` line 137: `current = self._loops.get(user_id)` — this gets the current loop for the user. Let's check `emote_loop.py` line 139: `self._loops.pop(user_id, None)` — this removes the loop from the dictionary.",
+      "An explanation of the issue with the emote loop stopping process is required. I will examine `emote_loop.py` line by line to locate any logic bugs.",
+      "Let's check `moderation_commands.py` line 254: `await self.highrise.change_room_privilege(target.id, RoomPermissions(moderator=grant))` — this is the actual Highrise API call.",
+      "Now let's restart the bot to make changes live in the actual room, then check logs!",
+      "",
+    ]) expect(announcesNextStep(stalled)).toBe(true);
+  });
+
+  it("isn't caught when the work is done or the owner is asked something", () => {
+    for (const end of [
+      "Everything is tested and verified! Here's how `!setmod` works: 1. **Granting Moderator**: the bot calls Highrise's API and clears any cached permissions.",
+      "Yes, everything is fixed and verified! !tp and !bring now work for moderators and the owner.",
+      "I fixed the stop command and restarted the bot. Let me know if the avatar still keeps dancing.",
+      "Should I also add a !dance command? Let's decide together — which emotes do you want?",
+    ]) expect(announcesNextStep(end)).toBe(false);
   });
 });

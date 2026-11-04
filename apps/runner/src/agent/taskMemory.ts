@@ -80,6 +80,25 @@ export function taskMemoryPrompt(memory: TaskMemory): string {
 
 /** What the runner does after one part of a task ends. */
 export type PartOutcome = "limit" | "done" | "waiting";
+
+/** How many times in a row Kojy is told to do the step it only described. */
+export const MAX_NUDGES = 3;
+export const NUDGE = "You only described your next step and didn't take it. Take it now by calling the tool (don't describe it again). If the request is finished, reply with your short final summary for the owner instead.";
+
+/**
+ * A reply without a tool call that only says what comes next ("Let's check
+ * line 137…", "I will examine the file", "Now let's restart the bot"): the
+ * model meant to keep going but didn't call the tool, which used to end the
+ * request and leave the owner typing "continue". A question for the owner, a
+ * "let me know…" or a summary of finished work is a real end.
+ */
+export function announcesNextStep(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  if (t.endsWith("?")) return false;
+  const tail = t.slice(-300).replace(/\blet me know\b/gi, "");
+  return /\b(let'?s|let me|i will|i'll|i am going to|i'm going to|going to now|next,? i)\b/i.test(tail);
+}
 export function continuesAutomatically(outcome: PartOutcome, part: number, maxParts: number, aborted: boolean): boolean {
   return outcome === "limit" && !aborted && part + 1 < maxParts;
 }
