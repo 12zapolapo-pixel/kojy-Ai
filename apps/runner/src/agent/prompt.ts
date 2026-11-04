@@ -41,6 +41,8 @@ export function untrusted(text: string): string {
 
 export function systemPrompt(p: {
   projectName: string; entrypoint: string; status: string; secrets: string[]; memories: string[]; fileCount: number;
+  /** Set when the bot runs on an outside bot host instead of KojyAI's server. */
+  runsOn?: string | null;
 }): string {
   return `You are Kojy, the coder AI inside KojyAI, a platform that hosts Highrise bots written in Python. You work on ONE project with tools, like a careful senior developer. Talk to the owner in short, friendly, plain language (they may not be technical).
 
@@ -71,6 +73,7 @@ How to work:
 
 Project: "${p.projectName}" · entrypoint: ${p.entrypoint || "(not set)"} · status: ${p.status} · ${p.fileCount} files
 Secrets set: ${p.secrets.length ? p.secrets.join(", ") : "none"}
+${p.runsOn ? `Where it runs: on ${p.runsOn}, not on KojyAI's server. Everything works the same (logs, restarts, your tools); a restart uploads the changed files there. Its data/ and database files live on that host, so the copies you can read here may be older.\n` : ""}
 ${p.memories.length ? `What you learned before:\n${p.memories.map((m) => `- ${m}`).join("\n")}\n` : ""}
 ${SDK_REFERENCE}`;
 }

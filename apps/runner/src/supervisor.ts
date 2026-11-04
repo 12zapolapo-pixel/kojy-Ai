@@ -11,13 +11,17 @@
  * Restarts a crashed bot with backoff (5s, 15s, 30s, 60s, then every 60s); a
  * run that lasted 2+ minutes resets the backoff — the same policy Japalo's
  * own main.py used on Replit.
+ *
+ * A project with a bot host and a server there runs on that host instead
+ * (hostRunner.ts): the same start/stop/restart, console log, crash policy and
+ * Kojy's fixes, but the process lives on the host.
  */
 
 import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, renameSync, appendFileSync, rmSync } from "node:fs";
 import path from "node:path";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import type { Database } from "@kojyai/db";
 import { botProjects, projectSecrets } from "@kojyai/db/schema";
 import { decryptApiKey } from "@kojyai/shared/crypto";
@@ -25,6 +29,7 @@ import { ActivityRecorder, notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger } from "./logger.js";
 import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./sandbox.js";
 import { NOT_MODERATOR_MARK, PLATFORM_RESTART_LINE, ROOM_RIGHTS_PREFIX } from "./agent/botHealth.js";
+import { HostRunner, type HostRef, type HostRunnerOptions, type RunProject } from "./hostRunner.js";
 
 const log = createLogger("supervisor");
 
@@ -34,6 +39,8 @@ const PYTHON_BIN  = process.env.PYTHON_BIN ?? "python3";
 export const LAUNCHER = path.join(path.dirname(new URL(import.meta.url).pathname), "launcher.py");
 /** check_code's loader check (see botcheck.py). */
 export const BOTCHECK = path.join(path.dirname(new URL(import.meta.url).pathname), "botcheck.py");
+/** What a bot host runs (uploaded as kojy_start.py, see hoststart.py). */
+export const HOSTSTART = path.join(path.dirname(new URL(import.meta.url).pathname), "hoststart.py");
 const LOG_DIR     = path.join(PROJECTS_DIR, ".logs");
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
 const RESTART_DELAYS_S = [5, 15, 30, 60];
@@ -42,11 +49,14 @@ const START_RETRY_DELAYS_S = [30, 120, 600, 1800];
 const HEALTHY_RUN_MS = 120_000;
 const STOP_GRACE_MS = 10_000;
 const NO_MODERATOR_STATUS = "Not a moderator in its room: commands that move, kick, mute or ban people won't work";
+/** How often bots waiting for a free server on their bot host try again. */
+const PENDING_HOST_EVERY_MS = 30 * 60_000;
 
 /** Always installed next to the project's own requirements.txt. */
 const BASE_REQUIREMENTS = ["highrise-bot-sdk==25.1.0", "setuptools<82"];
 
-type Status = typeof botProjects.$inferSelect["status"];
+type ProjectRow = typeof botProjects.$inferSelect;
+type Status = ProjectRow["status"];
 
 /**
  * Host settings passed through to bots and pip (proxies, CA bundles). Nothing
@@ -61,13 +71,21 @@ function baseEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** {hostId, server} from a control message (moving a bot or deleting it). */
+function hostRef(v: unknown): HostRef | null {
+  if (!v || typeof v !== "object") return null;
+  const { hostId, server } = v as { hostId?: unknown; server?: unknown };
+  return typeof hostId === "number" && Number.isInteger(hostId) && typeof server === "string" && /^[A-Za-z0-9-]{4,64}$/.test(server)
+    ? { hostId, server } : null;
+}
+
 interface Running {
   child: ChildProcess;
   /** Signals the bot (works when it runs as its own sandbox user). */
   signal: Sandboxed["kill"];
   startedAt: number;
   stopping: boolean;
-  project: { id: number; orgId: number; ownerId: number; name: string };
+  project: RunProject;
 }
 
 const ACTIVITY_KINDS = new Set(["chat", "whisper", "reply", "join", "leave", "tip", "emote"]);
@@ -88,11 +106,33 @@ export class Supervisor {
   private alerted = new Map<string, number>();
   /** Bots whose owner was told the bot isn't a moderator in its room (once per runner run). */
   private rightsWarned = new Set<string>();
+  /** Bots running on an outside bot host. */
+  private hosts: HostRunner;
+  private pendingTimer: NodeJS.Timeout | null = null;
 
-  constructor(private db: Database) {
+  constructor(private db: Database, hostTesting?: Pick<HostRunnerOptions, "makeClient" | "makeConsole">) {
     this.activity = new ActivityRecorder(db, 5000, (err) => log.warn({ err }, "Could not save bot activity"));
     mkdirSync(LOG_DIR, { recursive: true });
     mkdirSync(VENVS_DIR, { recursive: true });
+    this.hosts = new HostRunner(db, {
+      console: (uuid, stream, line) => this.console(uuid, stream, line),
+      setStatus: (uuid, status, message) => this.setStatus(uuid, status, message),
+      started: (uuid, project) => {
+        this.startFailures.delete(uuid);
+        this.tails.set(uuid, this.tails.get(uuid) ?? []);
+        this.record(project, "start");
+        void this.db.update(botProjects).set({ lastStartedAt: new Date() }).where(eq(botProjects.uuid, uuid));
+      },
+      stopped: (_uuid, project) => this.record(project, "stop"),
+      crashed: (uuid, project, ranFor, how, exitCode) => void this.hostCrashed(uuid, project, ranFor, how, exitCode),
+      startFailed: (uuid, message) => this.startFailed(uuid, message),
+      later: (uuid, seconds) => this.startLater(uuid, seconds),
+      activity: (project, kind, actorId, actorName) => this.record(project, kind, actorId, actorName),
+      roomRights: (uuid, project, line) => this.onRoomRights(uuid, project, line),
+    }, {
+      launcherPath: LAUNCHER, starterPath: HOSTSTART, baseRequirements: BASE_REQUIREMENTS,
+      secrets: (row) => this.secrets(row), ...hostTesting,
+    });
   }
 
   /** On boot: start everything the owner left running. */
@@ -100,7 +140,13 @@ export class Supervisor {
     const rows = await this.db.select({ uuid: botProjects.uuid }).from(botProjects)
       .where(eq(botProjects.desiredState, "running"));
     log.info({ count: rows.length }, "Restoring running projects");
+    // Bots on a bot host kept running: start() only reattaches to them.
     for (const { uuid } of rows) void this.start(uuid, "back after a KojyAI restart");
+    if (!this.pendingTimer) {
+      this.pendingTimer = setInterval(() => void this.sweepPendingHosts(), PENDING_HOST_EVERY_MS);
+      this.pendingTimer.unref();
+      setTimeout(() => void this.sweepPendingHosts(), 60_000).unref();
+    }
   }
 
   async handle(uuid: string, action: string, payload?: Record<string, unknown>): Promise<void> {
@@ -109,7 +155,8 @@ export class Supervisor {
       case "stop":    return this.stop(uuid);
       case "restart": await this.stop(uuid); return this.start(uuid);
       case "stdin":   return this.stdin(uuid, String(payload?.["text"] ?? ""));
-      case "purge":   return this.purge(uuid);
+      case "purge":   return this.purge(uuid, payload);
+      case "rehost":  return this.rehost(uuid, payload);
       default:        log.warn({ uuid, action }, "Unknown control action");
     }
   }
@@ -117,6 +164,9 @@ export class Supervisor {
   /** Runner stopping: bots stop too, but stay "running" as desired so they come back on boot. */
   async shutdown(): Promise<void> {
     for (const t of this.restartTimers.values()) clearTimeout(t);
+    if (this.pendingTimer) clearInterval(this.pendingTimer);
+    // Bots on a bot host keep running there; only their live consoles close.
+    this.hosts.detachAll();
     const uuids = [...this.procs.keys()];
     // Says why in each bot's console, so the owner and Kojy don't hunt for a bug.
     for (const uuid of uuids) this.console(uuid, "system", PLATFORM_RESTART_LINE);
@@ -134,6 +184,10 @@ export class Supervisor {
     try {
       const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
       if (!project) return;
+      if (project.hostId && project.hostServer) {
+        this.busy.delete(uuid);
+        return await this.hosts.start(project, reason);
+      }
       const dir = path.join(PROJECTS_DIR, uuid);
       if (!existsSync(dir)) return this.setStatus(uuid, "error", "Project files are missing.");
       if (!project.entrypoint) return this.setStatus(uuid, "error", "No bot entrypoint set (module.path:BotClass).");
@@ -163,39 +217,47 @@ export class Supervisor {
 
       child.once("spawn", () => {
         this.startFailures.delete(uuid);
-        this.record(run, "start");
+        this.record(run.project, "start");
         void this.setStatus(uuid, "running", null);
         void this.db.update(botProjects).set({ lastStartedAt: new Date() }).where(eq(botProjects.uuid, uuid));
       });
       child.once("exit", (code, signal) => void this.onExit(uuid, run, code, signal));
     } catch (err) {
-      // Usually passing (PyPI or the network unreachable, the database busy right
-      // after a restart): try again with backoff while the owner wants it running,
-      // instead of leaving the bot offline until someone presses Start.
-      const message = err instanceof Error ? err.message : String(err);
-      const failures = (this.startFailures.get(uuid) ?? 0) + 1;
-      this.startFailures.set(uuid, failures);
-      const delay = START_RETRY_DELAYS_S[Math.min(failures - 1, START_RETRY_DELAYS_S.length - 1)]!;
-      let retry = true;
-      try {
-        const [p] = await this.db.select({ desiredState: botProjects.desiredState }).from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
-        retry = p?.desiredState === "running";
-      } catch { /* database unreachable: keep trying */ }
-      const note = retry ? ` — trying again in ${delay}s` : "";
-      this.console(uuid, "system", `✖ ${message}${note}`);
-      await this.setStatus(uuid, "error", `${message.slice(0, 450)}${note}`).catch(() => undefined);
-      if (retry) {
-        this.clearRestart(uuid);
-        this.restartTimers.set(uuid, setTimeout(() => { this.restartTimers.delete(uuid); void this.start(uuid); }, delay * 1000));
-      }
+      await this.startFailed(uuid, err instanceof Error ? err.message : String(err));
     } finally {
       this.busy.delete(uuid);
     }
   }
 
+  /**
+   * A start that failed before the bot ran. Usually passing (PyPI, the network
+   * or the bot host unreachable, the database busy right after a restart): try
+   * again with backoff while the owner wants it running, instead of leaving the
+   * bot offline until someone presses Start.
+   */
+  private async startFailed(uuid: string, message: string): Promise<void> {
+    const failures = (this.startFailures.get(uuid) ?? 0) + 1;
+    this.startFailures.set(uuid, failures);
+    const delay = START_RETRY_DELAYS_S[Math.min(failures - 1, START_RETRY_DELAYS_S.length - 1)]!;
+    let retry = true;
+    try {
+      const [p] = await this.db.select({ desiredState: botProjects.desiredState }).from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+      retry = p?.desiredState === "running";
+    } catch { /* database unreachable: keep trying */ }
+    const note = retry ? ` — trying again in ${delay}s` : "";
+    this.console(uuid, "system", `✖ ${message}${note}`);
+    await this.setStatus(uuid, "error", `${message.slice(0, 450)}${note}`).catch(() => undefined);
+    if (retry) this.startLater(uuid, delay);
+  }
+
+  /** Start again after `seconds` (after a crash, a failed start, a server still being set up). */
+  private startLater(uuid: string, seconds: number): void {
+    this.clearRestart(uuid);
+    this.restartTimers.set(uuid, setTimeout(() => { this.restartTimers.delete(uuid); void this.start(uuid); }, seconds * 1000));
+  }
+
   /** Environment for the bot's process: its secrets plus Python settings. */
-  async botEnv(project: typeof botProjects.$inferSelect, python: string, dir: string): Promise<NodeJS.ProcessEnv> {
-    const secrets = await this.db.select().from(projectSecrets).where(eq(projectSecrets.projectId, project.id));
+  async botEnv(project: ProjectRow, python: string, dir: string): Promise<NodeJS.ProcessEnv> {
     const env: NodeJS.ProcessEnv = {
       ...baseEnv(),
       PATH: `${path.dirname(python)}:${process.env.PATH ?? ""}`,
@@ -206,15 +268,22 @@ export class Supervisor {
       KOJY_ENTRY: project.entrypoint,
       ...(process.env.HR_BOTAPI_URL ? { HR_BOTAPI_URL: process.env.HR_BOTAPI_URL } : {}),
     };
-    for (const s of secrets) {
-      try { env[s.key] = decryptApiKey(s.valueVault); }
-      catch { this.console(project.uuid, "system", `Secret ${s.key} could not be decrypted (was ENCRYPTION_KEY changed?).`); }
-    }
-    return env;
+    return Object.assign(env, await this.secrets(project));
   }
 
-  private record(run: Running, kind: string, actorId?: string | null, actorName?: string | null): void {
-    this.activity.record({ orgId: run.project.orgId, source: "project", sourceId: run.project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null });
+  /** The bot's secrets, decrypted; one that can't be is left out, with a note in its console. */
+  async secrets(project: ProjectRow): Promise<Record<string, string>> {
+    const rows = await this.db.select().from(projectSecrets).where(eq(projectSecrets.projectId, project.id));
+    const out: Record<string, string> = {};
+    for (const s of rows) {
+      try { out[s.key] = decryptApiKey(s.valueVault); }
+      catch { this.console(project.uuid, "system", `Secret ${s.key} could not be decrypted (was ENCRYPTION_KEY changed?).`); }
+    }
+    return out;
+  }
+
+  private record(project: Pick<RunProject, "id" | "orgId">, kind: string, actorId?: string | null, actorName?: string | null): void {
+    this.activity.record({ orgId: project.orgId, source: "project", sourceId: project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null });
   }
 
   private readActivity(run: Running): void {
@@ -228,7 +297,7 @@ export class Supervisor {
       for (const line of lines) {
         try {
           const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null };
-          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n);
+          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run.project, e.k, e.id, e.n);
         } catch { /* not ours */ }
       }
     });
@@ -241,11 +310,22 @@ export class Supervisor {
   }
 
   runningCount(): number {
-    return this.procs.size;
+    return this.procs.size + this.hosts.runningCount();
   }
 
   isRunning(uuid: string): boolean {
-    return this.procs.has(uuid);
+    return this.procs.has(uuid) || this.hosts.isRunning(uuid);
+  }
+
+  /** Where a bot on a bot host runs (for get_logs); null for a bot running here. */
+  hostNote(uuid: string): string | null {
+    return this.hosts.note(uuid);
+  }
+
+  /** The project's row when it runs on a bot host. */
+  private async remoteRow(uuid: string): Promise<ProjectRow | null> {
+    const [row] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+    return row?.hostId && row.hostServer ? row : null;
   }
 
   private async stop(uuid: string): Promise<void> {
@@ -256,14 +336,67 @@ export class Supervisor {
       this.console(uuid, "system", "■ Stopping");
       await this.kill(uuid);
     }
+    const remote = await this.remoteRow(uuid);
+    if (remote) return this.hosts.stop(remote);
     await this.setStatus(uuid, "stopped", null);
   }
 
-  /** Project deleted: stop it and remove its Python environment. */
-  private async purge(uuid: string): Promise<void> {
+  /**
+   * The owner moved the bot: onto a bot host, back here, or to another
+   * server. It stops where it ran (a host's data/ files are copied back),
+   * then starts in its new place if the owner wants it running.
+   */
+  private async rehost(uuid: string, payload?: Record<string, unknown>): Promise<void> {
+    const from = hostRef(payload?.["from"]);
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
     this.startFailures.delete(uuid);
+    const [row] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+    if (!row) return;
+    if (this.procs.has(uuid)) {
+      this.console(uuid, "system", "■ Stopping here to move the bot");
+      await this.kill(uuid);
+    }
+    if (from && !(row.hostId === from.hostId && row.hostServer === from.server)) {
+      await this.hosts.release(uuid, row.orgId, from).catch((err: unknown) =>
+        this.console(uuid, "system", `✖ Couldn't finish moving off the old bot host: ${err instanceof Error ? err.message : String(err)}`));
+    }
+    if (row.desiredState === "running") await this.start(uuid, row.hostId && row.hostServer ? "moved to its bot host" : "moved back to KojyAI");
+    else await this.setStatus(uuid, "stopped", null);
+  }
+
+  /** Bots waiting for a free server on their bot host: make one once the host has room, then move them there. */
+  private async sweepPendingHosts(): Promise<void> {
+    let rows: ProjectRow[];
+    try {
+      rows = await this.db.select().from(botProjects).where(and(isNotNull(botProjects.hostId), isNull(botProjects.hostServer)));
+    } catch { return; }
+    for (const row of rows) {
+      try {
+        const server = await this.hosts.createServerFor(row);
+        if (!server) continue;
+        await this.db.update(botProjects).set({ hostServer: server, hostSync: null })
+          .where(and(eq(botProjects.id, row.id), isNull(botProjects.hostServer)));
+        this.console(row.uuid, "system", `The bot host had room again and made a free server (${server}) for this bot — moving it there.`);
+        void notifyUser(this.db, row.ownerId, "system", `${row.name} got its free server`,
+          `The bot host made a free server for ${row.name}, and KojyAI is moving the bot there now.`, `/studio/p/${row.uuid}`);
+        await this.rehost(row.uuid, {});
+      } catch (err) {
+        log.warn({ err, uuid: row.uuid }, "Couldn't make a free server on the bot host");
+      }
+    }
+  }
+
+  /** Project deleted: stop it (here or on its bot host) and remove its Python environment. */
+  private async purge(uuid: string, payload?: Record<string, unknown>): Promise<void> {
+    this.clearRestart(uuid);
+    this.crashStreak.delete(uuid);
+    this.startFailures.delete(uuid);
+    const host = hostRef(payload?.["host"]);
+    const orgId = payload?.["orgId"];
+    if (host && typeof orgId === "number") {
+      await this.hosts.purge(uuid, orgId, host).catch((err: unknown) => log.warn({ err, uuid }, "Couldn't clean up the bot on its bot host"));
+    }
     await this.kill(uuid);
     const venv = path.join(VENVS_DIR, uuid);
     try {
@@ -293,41 +426,60 @@ export class Supervisor {
     });
   }
 
-  private stdin(uuid: string, text: string): void {
+  private async stdin(uuid: string, text: string): Promise<void> {
     const run = this.procs.get(uuid);
-    if (!run?.child.stdin?.writable) return;
-    run.child.stdin.write(text.endsWith("\n") ? text : `${text}\n`);
-    this.console(uuid, "stdin", text);
+    if (run?.child.stdin?.writable) {
+      run.child.stdin.write(text.endsWith("\n") ? text : `${text}\n`);
+      this.console(uuid, "stdin", text);
+      return;
+    }
+    const remote = this.hosts.has(uuid) ? await this.remoteRow(uuid) : null;
+    if (remote) await this.hosts.command(remote, text);
   }
 
   private async onExit(uuid: string, run: Running, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     if (this.procs.get(uuid) === run) this.procs.delete(uuid);
     await this.db.update(botProjects).set({ lastExitCode: code }).where(eq(botProjects.uuid, uuid));
-    if (run.stopping) { this.record(run, "stop"); return; }
-    this.record(run, "crash");
+    if (run.stopping) { this.record(run.project, "stop"); return; }
+    const delay = await this.crashed(uuid, run.project, Date.now() - run.startedAt, signal ?? `code ${code}`);
+    if (delay !== null) this.startLater(uuid, delay);
+  }
 
-    const ranFor = Date.now() - run.startedAt;
+  /** A bot on its bot host stopped by itself. */
+  private async hostCrashed(uuid: string, project: RunProject, ranFor: number, how: string, exitCode: number | null): Promise<void> {
+    if (exitCode !== null) await this.db.update(botProjects).set({ lastExitCode: exitCode }).where(eq(botProjects.uuid, uuid)).catch(() => undefined);
+    const delay = await this.crashed(uuid, project, ranFor, how);
+    if (delay !== null) this.startLater(uuid, delay);
+  }
+
+  /**
+   * A bot stopped by itself (here or on its bot host): it is counted, Kojy is
+   * told (onCrash), and so is the owner after 3 in a row. Returns when to
+   * start it again in seconds, or null when the owner no longer wants it on.
+   */
+  private async crashed(uuid: string, project: RunProject, ranFor: number, how: string): Promise<number | null> {
+    this.record(project, "crash");
     const streak = ranFor >= HEALTHY_RUN_MS ? 1 : (this.crashStreak.get(uuid) ?? 0) + 1;
     if (streak === 1) this.alerted.delete(uuid);
     this.crashStreak.set(uuid, streak);
     const delay = RESTART_DELAYS_S[Math.min(streak - 1, RESTART_DELAYS_S.length - 1)]!;
-    this.console(uuid, "system", `✖ Bot exited (${signal ?? `code ${code}`}) after ${Math.round(ranFor / 1000)}s — restarting in ${delay}s`);
+    this.console(uuid, "system", `✖ Bot exited (${how}) after ${Math.round(ranFor / 1000)}s — restarting in ${delay}s`);
 
-    const [project] = await this.db.select({ desiredState: botProjects.desiredState, restartCount: botProjects.restartCount })
+    const [p] = await this.db.select({ desiredState: botProjects.desiredState, restartCount: botProjects.restartCount })
       .from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
-    if (project?.desiredState !== "running") return this.setStatus(uuid, "stopped", null);
+    if (p?.desiredState !== "running") { await this.setStatus(uuid, "stopped", null); return null; }
 
-    await this.db.update(botProjects).set({ restartCount: project.restartCount + 1 }).where(eq(botProjects.uuid, uuid));
-    await this.setStatus(uuid, "crashed", `Exited with ${signal ?? `code ${code}`}; restarting in ${delay}s`);
+    await this.db.update(botProjects).set({ restartCount: p.restartCount + 1 }).where(eq(botProjects.uuid, uuid));
+    await this.setStatus(uuid, "crashed", `Exited with ${how}; restarting in ${delay}s`);
     this.onCrash?.(uuid, streak, this.tail(uuid));
     if (streak >= 3 && this.alerted.get(uuid) !== streak && !this.alerted.has(uuid)) {
       this.alerted.set(uuid, streak);
       const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";
-      const body = `${run.project.name} has crashed ${streak} times in a row and keeps restarting. Last output: ${last.slice(0, 200)}`;
-      void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} keeps crashing`, body, `/projects/${uuid}`);
+      const body = `${project.name} has crashed ${streak} times in a row and keeps restarting. Last output: ${last.slice(0, 200)}`;
+      void notifyUser(this.db, project.ownerId, "bot_error", `${project.name} keeps crashing`, body, `/projects/${uuid}`);
       void sendAlert(`⚠️ ${body}`);
     }
-    this.restartTimers.set(uuid, setTimeout(() => { this.restartTimers.delete(uuid); void this.start(uuid); }, delay * 1000));
+    return delay;
   }
 
   private clearRestart(uuid: string): void {
@@ -385,9 +537,7 @@ export class Supervisor {
    * rights Highrise refuses teleports, kicks, mutes and bans: say so on the
    * bot's page and tell the owner (once), since no code change can fix it.
    */
-  private onRoomRights(uuid: string, line: string): void {
-    const run = this.procs.get(uuid);
-    if (!run) return;
+  private onRoomRights(uuid: string, project: RunProject, line: string): void {
     const missing = line.includes(NOT_MODERATOR_MARK);
     void this.db.update(botProjects).set({ statusMessage: missing ? NO_MODERATOR_STATUS : null })
       .where(and(eq(botProjects.uuid, uuid), eq(botProjects.status, "running")))
@@ -395,7 +545,7 @@ export class Supervisor {
     if (!missing) { this.rightsWarned.delete(uuid); return; }
     if (this.rightsWarned.has(uuid)) return;
     this.rightsWarned.add(uuid);
-    void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} isn't a moderator in its room`,
+    void notifyUser(this.db, project.ownerId, "bot_error", `${project.name} isn't a moderator in its room`,
       "Commands that move, kick, mute or ban people (like !tp and !bring) can't work until you make the bot a moderator in the Highrise room's settings.",
       `/studio/p/${uuid}`);
   }
@@ -411,7 +561,8 @@ export class Supervisor {
         partial = lines.pop() ?? "";
         for (const line of lines) {
           this.console(uuid, stream, line);
-          if (stream === "stdout" && line.startsWith(ROOM_RIGHTS_PREFIX)) this.onRoomRights(uuid, line);
+          const run = stream === "stdout" && line.startsWith(ROOM_RIGHTS_PREFIX) ? this.procs.get(uuid) : undefined;
+          if (run) this.onRoomRights(uuid, run.project, line);
         }
       });
       src?.on("end", () => { if (partial) this.console(uuid, stream, partial); });

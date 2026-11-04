@@ -427,8 +427,10 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           .from(botProjects).where(eq(botProjects.id, ctx.project.id));
         const now = Date.now();
         const up = p?.status === "running" && p.lastStartedAt ? `, up ${duration((now - p.lastStartedAt.getTime()) / 1000)} (process started ${stamp(p.lastStartedAt.getTime())})` : "";
+        const host = ctx.supervisor.hostNote(uuid);
         const output = [
           `Now: ${stamp(now)} UTC. Status: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}${up}. Restarts so far: ${p?.restartCount}.`,
+          ...(host ? [host] : []),
           connectionReport(lines, now),
           "Console, newest line last (times in UTC):",
           lines.length ? formatConsole(lines.slice(-600), { maxLines: n, maxChars: 6000 }) : "(no output yet)",

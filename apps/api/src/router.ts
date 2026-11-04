@@ -38,6 +38,7 @@ import { delegationRouter }   from "./modules/delegation/router.js";
 import { composerRouter }     from "./modules/composer/router.js";
 import { gdprRouter }         from "./modules/gdpr/router.js";
 import { projectsRouter }     from "./modules/projects/router.js";
+import { botHostsRouter }     from "./modules/projects/hosts.js";
 import { systemRouter }       from "./modules/system/router.js";
 import { studioRouter }       from "./modules/studio/router.js";
 
@@ -45,6 +46,7 @@ export const appRouter = router({
   auth:         authRouter,
   bots:         botsRouter,
   projects:     projectsRouter,
+  botHosts:     botHostsRouter,
   system:       systemRouter,
   studio:       studioRouter,
   rooms:        roomsRouter,

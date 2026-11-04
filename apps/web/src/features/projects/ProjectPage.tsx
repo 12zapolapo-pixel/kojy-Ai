@@ -15,6 +15,7 @@ import { StatusBadge } from "./StatusBadge";
 import { languageFor } from "./monaco";
 import { DataTab } from "./DataTab";
 import { ChatTab } from "./ChatTab";
+import { HostSection } from "./HostSection";
 
 type Project = RouterOutputs["projects"]["get"];
 type LogLine = RouterOutputs["projects"]["getLogs"]["lines"][number];
@@ -56,7 +57,7 @@ export default function ProjectPage() {
         {tab === "chat" && <ChatTab project={p} />}
         {tab === "code" && <CodeTab project={p} />}
         {tab === "console" && <ConsoleTab project={p} />}
-        {tab === "data" && <DataTab projectId={p.id} />}
+        {tab === "data" && <DataTab projectId={p.id} hostLabel={p.hostServer ? p.host?.label ?? "its bot host" : null} />}
         {tab === "secrets" && <SecretsTab project={p} />}
         {tab === "settings" && <SettingsTab project={p} />}
       </div>
@@ -374,6 +375,8 @@ export function SettingsTab({ project }: { project: Project }) {
           {update.isSuccess && <p className="text-xs text-[#49dcb5]">Saved. Restart the bot to use a new entrypoint.</p>}
           <button className={primaryBtn} disabled={update.isPending || !name.trim()}>{update.isPending ? "Saving…" : "Save"}</button>
         </form>
+
+        <HostSection project={project} />
 
         <section className="space-y-2">
           <h2 className="text-sm font-medium text-white">Backup</h2>

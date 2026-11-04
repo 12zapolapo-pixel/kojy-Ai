@@ -34,23 +34,36 @@ REPORTED_EVENTS = {
 }
 
 
+# On a bot host there is no fd 3: activity goes to the console with this mark,
+# and KojyAI takes those lines out of the console it saves.
+ACTIVITY_PREFIX = "[kojy:activity] "
+
+
 def install_activity_reporter(bot) -> None:
     """Report room activity to the runner on fd 3 (one JSON line per event).
 
-    Only hooks the bot itself implements are wrapped, on the instance, so the
-    SDK subscribes to exactly the same events as before (it looks at the
-    class). Reporting can never break the bot: errors are swallowed and the
-    bot's own handler always runs.
+    On a bot host (KOJY_ACTIVITY=stdout) the lines go to stdout instead,
+    marked with ACTIVITY_PREFIX. Only hooks the bot itself implements are
+    wrapped, on the instance, so the SDK subscribes to exactly the same
+    events as before (it looks at the class). Reporting can never break the
+    bot: errors are swallowed and the bot's own handler always runs.
     """
-    try:
-        os.fstat(3)
-    except OSError:
-        return  # not started by the KojyAI runner
-    out = os.fdopen(3, "w", buffering=1)
+    if os.environ.get("KOJY_ACTIVITY", "").strip().lower() == "stdout":
+        def write(text: str) -> None:
+            print(ACTIVITY_PREFIX + text, flush=True)
+    else:
+        try:
+            os.fstat(3)
+        except OSError:
+            return  # not started by the KojyAI runner
+        out = os.fdopen(3, "w", buffering=1)
+
+        def write(text: str) -> None:
+            out.write(text + "\n")
 
     def emit(kind, user=None):
         try:
-            out.write(json.dumps({"k": kind, "id": getattr(user, "id", None), "n": getattr(user, "username", None)}) + "\n")
+            write(json.dumps({"k": kind, "id": getattr(user, "id", None), "n": getattr(user, "username", None)}))
         except Exception:
             pass
 

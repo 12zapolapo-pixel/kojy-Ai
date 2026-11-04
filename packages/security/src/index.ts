@@ -162,6 +162,8 @@ export const RATE_LIMITS = {
   WS_CONNECT:     { windowMs: 60_000,      maxHits: 10,    keyPrefix: "rl:ws:connect" },
   // V-04: zip upload/download/restore unpack or pack up to 200 MB each.
   PROJECT_ZIP:    { windowMs: 60_000,      maxHits: 6,     keyPrefix: "rl:project:zip" },
+  // Connecting a bot host sends the key to the host: not a way to try many keys.
+  BOT_HOST:       { windowMs: 3_600_000,   maxHits: 10,    keyPrefix: "rl:bothost:connect" },
 } as const;
 
 // ─── SKILL #79: Toxicity Filter ──────────────────────────────────────────────

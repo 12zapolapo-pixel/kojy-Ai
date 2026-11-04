@@ -28,8 +28,10 @@ import {
 } from "@kojyai/shared/projects";
 import { listDatabases, describeDatabase, readTable } from "./data.js";
 import { listThread, addToThread, agentProgress } from "./chat.js";
+import { hostError, loadHost } from "./hosts.js";
+import { HostApiError, botHostProvider } from "@kojyai/shared/bothost";
 
-const { botProjects, projectSecrets, projectMessages } = schema;
+const { botProjects, projectSecrets, projectMessages, botHosts } = schema;
 
 const MAX_PROJECTS_PER_ORG = 20;
 /** Set by the runner itself — a secret with one of these names would break the bot's environment. */
@@ -89,7 +91,12 @@ const publicProject = (p: typeof botProjects.$inferSelect) => ({
   id: p.uuid, name: p.name, entrypoint: p.entrypoint, desiredState: p.desiredState, status: p.status,
   statusMessage: p.statusMessage, lastExitCode: p.lastExitCode, restartCount: p.restartCount,
   lastStartedAt: p.lastStartedAt, agentState: p.agentState, autoFix: p.autoFix, dailyCheckup: p.dailyCheckup, lastCheckupAt: p.lastCheckupAt, createdAt: p.createdAt, updatedAt: p.updatedAt,
+  // Where it runs: no hostId = KojyAI's server; a hostId without a server = waiting for a free one.
+  hostId: p.hostId, hostServer: p.hostServer,
 });
+
+/** Where the bot ran before a move, for the runner to stop it there. */
+const placement = (p: typeof botProjects.$inferSelect) => (p.hostId && p.hostServer ? { hostId: p.hostId, server: p.hostServer } : null);
 
 async function saveSecret(db: any, projectId: number, key: string, value: string) {
   const valueVault = encryptApiKey(value);
@@ -111,7 +118,13 @@ export const projectsRouter = router({
     const project = await loadProject(ctx, input.id);
     const secrets = await ctx.db.select({ key: projectSecrets.key, updatedAt: projectSecrets.updatedAt })
       .from(projectSecrets).where(eq(projectSecrets.projectId, project.id)).orderBy(asc(projectSecrets.key));
-    return { ...publicProject(project), secrets };
+    let host: { id: number; provider: string; label: string; account: string; server: string | null } | null = null;
+    if (project.hostId) {
+      const [h] = await ctx.db.select({ id: botHosts.id, provider: botHosts.provider, account: botHosts.account }).from(botHosts)
+        .where(and(eq(botHosts.id, project.hostId), eq(botHosts.orgId, project.orgId))).limit(1);
+      if (h) host = { ...h, label: botHostProvider(h.provider)?.label ?? h.provider, server: project.hostServer };
+    }
+    return { ...publicProject(project), secrets, host };
   }),
 
   /** Starter bots for the Studio's "New bot" page. */
@@ -168,8 +181,9 @@ export const projectsRouter = router({
 
   delete: permittedProc("bots:delete").input(projectId).mutation(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
-    // Stops the bot and removes its Python environment on the runner.
-    await control(project.uuid, "purge").catch(() => undefined);
+    // Stops the bot (here or on its bot host) and removes its Python environment on the runner.
+    const where = placement(project);
+    await control(project.uuid, "purge", where ? { host: where, orgId: project.orgId } : undefined).catch(() => undefined);
     await ctx.db.delete(projectSecrets).where(eq(projectSecrets.projectId, project.id));
     await ctx.db.delete(projectMessages).where(eq(projectMessages.projectId, project.id));
     await ctx.db.delete(schema.agentMemories).where(eq(schema.agentMemories.projectId, project.id));
@@ -388,6 +402,74 @@ export const projectsRouter = router({
         content: `The owner undid code changes: the code is back to how it was at ${when} UTC (${count} files). Restart the bot to use it.`,
       });
       return { success: true, files: count };
+    }),
+
+  // ── where it runs ──────────────────────────────────────────────────────────
+
+  /**
+   * Moves the bot: back to KojyAI's own server (hostId null), or onto a
+   * server of a connected bot host — an existing Python server, or "new" for
+   * a free one. With no free server left, a bot running here keeps running
+   * here and KojyAI makes the server and moves it once the host has room.
+   * The runner stops the bot where it was (copying a host's data/ files back)
+   * and starts it in the new place if it was running.
+   */
+  setHost: permittedProc("bots:deploy")
+    .input(projectId.extend({
+      hostId: z.number().int().positive().nullable(),
+      // A server's identifier, or "new" for a free one.
+      server: z.string().regex(/^(new|[A-Za-z0-9-]{4,64})$/).nullable(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const project = await loadProject(ctx, input.id);
+      const from = placement(project);
+      if (input.hostId === null) {
+        if (!project.hostId) return { moved: "kojyai" as const, waiting: false, message: "The bot already runs on KojyAI." };
+        await ctx.db.update(botProjects).set({ hostId: null, hostServer: null, hostSync: null }).where(eq(botProjects.id, project.id));
+        if (from) await control(project.uuid, "rehost", { from });
+        await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.move", resourceType: "project", resourceId: project.uuid, afterState: { to: "kojyai" } });
+        return { moved: "kojyai" as const, waiting: false, message: from ? "Moving the bot back to KojyAI; its data is copied back from the host." : "The bot stays on KojyAI." };
+      }
+      if (!input.server) throw new TRPCError({ code: "BAD_REQUEST", message: "Pick a server, or make a free one." });
+      const { host, provider, client } = await loadHost(ctx, input.hostId);
+      let server = input.server;
+      try {
+        if (server === "new") {
+          if (!provider.freeServers) throw new TRPCError({ code: "BAD_REQUEST", message: `${provider.label} doesn't make free servers through KojyAI. Pick one of your servers.` });
+          try {
+            server = (await client.createFreeServer({ name: project.name.slice(0, 60), description: "Highrise bot run by KojyAI", runtime: "python" })).id;
+          } catch (err) {
+            const full = err instanceof HostApiError && (err.status === 503 || err.status === 409);
+            if (!full) throw err;
+            if (from) throw new TRPCError({ code: "CONFLICT", message: `${provider.label} has no free servers right now (${err.message}) Try again later.` });
+            await ctx.db.update(botProjects).set({ hostId: host.id, hostServer: null, hostSync: null }).where(eq(botProjects.id, project.id));
+            return {
+              moved: "waiting" as const, waiting: true,
+              message: `${provider.label} has no free servers right now. The bot keeps running on KojyAI; KojyAI checks every 30 minutes, makes the server as soon as there's room and moves the bot there.`,
+            };
+          }
+        } else {
+          const found = await client.getServer(server);
+          if (!/python/i.test(found.dockerImage)) throw new TRPCError({ code: "BAD_REQUEST", message: `That server runs ${found.dockerImage || "something else"}, not Python. Pick a Python server.` });
+          if (found.suspended) throw new TRPCError({ code: "BAD_REQUEST", message: "That server is suspended by the host." });
+          server = found.id;
+        }
+      } catch (err) {
+        throw hostError(err);
+      }
+      if (from && from.hostId === host.id && from.server === server) return { moved: "host" as const, waiting: false, message: "The bot already runs there." };
+      const [other] = await ctx.db.select({ name: botProjects.name }).from(botProjects)
+        .where(and(eq(botProjects.hostId, host.id), eq(botProjects.hostServer, server))).limit(1);
+      if (other) throw new TRPCError({ code: "CONFLICT", message: `${other.name} already runs on that server.` });
+      await ctx.db.update(botProjects).set({ hostId: host.id, hostServer: server, hostSync: null }).where(eq(botProjects.id, project.id));
+      await control(project.uuid, "rehost", { from });
+      await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.move", resourceType: "project", resourceId: project.uuid, afterState: { to: provider.id, server } });
+      return {
+        moved: "host" as const, waiting: false, server,
+        message: project.desiredState === "running"
+          ? `Moving the bot to ${provider.label} (server ${server}). The first start there installs its packages, which takes a minute or two.`
+          : `The bot will run on ${provider.label} (server ${server}) the next time you start it.`,
+      };
     }),
 
   // ── run control ────────────────────────────────────────────────────────────

@@ -25,7 +25,8 @@ import { readFileSync } from "node:fs";
 import { and, desc, eq, gt } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
-import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
+import { botHosts, botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
+import { botHostProvider } from "@kojyai/shared/bothost";
 import { listFiles, resolveInside } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
@@ -235,8 +236,11 @@ export class Agent {
           this.db.select({ key: projectSecrets.key }).from(projectSecrets).where(eq(projectSecrets.projectId, project.id)),
           loadMemories(this.db, project),
         ]);
+        const [where] = await this.db.select({ hostId: botProjects.hostId, hostServer: botProjects.hostServer, provider: botHosts.provider })
+          .from(botProjects).leftJoin(botHosts, eq(botHosts.id, botProjects.hostId)).where(eq(botProjects.id, project.id)).limit(1);
+        const runsOn = where?.hostServer ? `${botHostProvider(where.provider ?? "")?.label ?? "a bot host"} (server ${where.hostServer})` : null;
         return systemPrompt({
-          projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status,
+          projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status, runsOn,
           secrets: secrets.map((x) => x.key), memories, fileCount: listFiles(project.uuid).filter((f) => !f.isDir).length,
         });
       },
