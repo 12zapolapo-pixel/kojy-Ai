@@ -120,6 +120,8 @@ describe("Mistral's chunked answers", () => {
   it("contentText handles every shape", async () => {
     const ai = await load();
     expect(ai.contentText("plain")).toBe("plain");
+    expect(ai.contentText("<think>Let me look at the file.</think>\nThe bug is on line 3.")).toBe("The bug is on line 3.");
+    expect(ai.contentText("<think>only thinking, cut off")).toBeNull();
     expect(ai.contentText(null)).toBeNull();
     expect(ai.contentText([{ type: "text", text: "a" }, { type: "thinking", thinking: [] }, { type: "text", text: "b" }])).toBe("ab");
     expect(ai.contentText([{ type: "thinking", thinking: [{ type: "text", text: "x" }] }])).toBeNull();

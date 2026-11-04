@@ -85,6 +85,7 @@ export const GATEWAYS: { name: string; label: string; base?: string }[] = [
   { name: "SAMBANOVA", label: "SambaNova", base: "https://api.sambanova.ai/v1" },
   { name: "GITHUB_MODELS", label: "GitHub Models", base: "https://models.github.ai/inference" },
   { name: "OPENROUTER", label: "OpenRouter", base: "https://openrouter.ai/api/v1" },
+  { name: "GONKAROUTER", label: "GonkaRouter", base: "https://api.gonkarouter.io/v1" },
 ];
 
 interface Lane {
@@ -277,13 +278,17 @@ export interface ChatOptions {
  * the owner, and stored as it came it showed up in the chat as raw JSON.
  */
 export function contentText(content: unknown): string | null {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return null;
-  const text = content.map((c) => {
-    if (typeof c === "string") return c;
-    if (c && typeof c === "object" && (c as { type?: unknown }).type === "text") return String((c as { text?: unknown }).text ?? "");
-    return "";
-  }).join("");
+  let text: string;
+  if (typeof content === "string") text = content;
+  else if (Array.isArray(content)) {
+    text = content.map((c) => {
+      if (typeof c === "string") return c;
+      if (c && typeof c === "object" && (c as { type?: unknown }).type === "text") return String((c as { text?: unknown }).text ?? "");
+      return "";
+    }).join("");
+  } else return null;
+  // Some models (MiniMax, GLM) put their thinking in the answer as <think>…</think>: the owner sees only the answer.
+  text = text.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
   return text || null;
 }
 
@@ -291,7 +296,7 @@ const TOO_LARGE = /context_length|context length|maximum context|too large|too l
 
 export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
   if (LANES.length === 0) {
-    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter key and model list in the server's .env.");
+    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter/GonkaRouter key and model list in the server's .env.");
   }
   const maxTokens = opts.maxTokens ?? Number(process.env.AGENT_MAX_OUTPUT_TOKENS ?? 1200);
   const size = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools)) + maxTokens;
