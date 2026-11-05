@@ -71,13 +71,26 @@ class FakeHost {
   state: PowerState = "offline";
   startupValue = "bot.py";
   async getServer() {
-    return { id: "abcd1234", uuid: "u", name: "Japalo", node: "London 3", memoryMb: 256, diskMb: 512, cpuPercent: 25, dockerImage: "ghcr.io/pterodactyl/yolks:python_3.12", invocation: "", installing: false, suspended: false, transferring: false };
+    return { id: "abcd1234", uuid: "u", name: "Japalo", node: "London 3", memoryMb: 256, diskMb: 512, cpuPercent: 25, dockerImage: this.image, invocation: "", installing: false, suspended: false, transferring: false };
   }
   async resources() { return { state: this.state, memoryBytes: 0, diskBytes: 0, uptimeMs: 60_000 }; }
+  requirementsValue = "requirements.txt";
+  image = "ghcr.io/ptero-eggs/yolks:python_3.13";
   async startup() {
-    return { variables: [{ name: "Bot file", env: "BOT_PY_FILE", value: this.startupValue, defaultValue: "bot.py", editable: true }], rawCommand: "python /home/container/{{BOT_PY_FILE}}", dockerImages: {} };
+    return {
+      variables: [
+        { name: "Bot file", env: "BOT_PY_FILE", value: this.startupValue, defaultValue: "bot.py", editable: true },
+        { name: "Requirements file", env: "REQUIREMENTS_FILE", value: this.requirementsValue, defaultValue: "requirements.txt", editable: true },
+      ],
+      rawCommand: "pip install -r ${REQUIREMENTS_FILE}; python /home/container/{{BOT_PY_FILE}}",
+      dockerImages: { "Python 3.13": "ghcr.io/ptero-eggs/yolks:python_3.13", "Python 3.11": "ghcr.io/ptero-eggs/yolks:python_3.11" },
+    };
   }
-  async setStartupVariable(_id: string, key: string, value: string) { this.startupValue = value; this.calls.push(`startup ${key}=${value}`); }
+  async setDockerImage(_id: string, image: string) { this.image = image; this.calls.push(`image ${image}`); }
+  async setStartupVariable(_id: string, key: string, value: string) {
+    if (key === "BOT_PY_FILE") this.startupValue = value; else this.requirementsValue = value;
+    this.calls.push(`startup ${key}=${value}`);
+  }
   async writeFile(_id: string, file: string, content: string | Uint8Array) { this.files.set(file, Buffer.from(content)); this.calls.push(`write ${file}`); }
   async deleteFiles(_id: string, names: string[]) {
     for (const n of names) for (const k of [...this.files.keys()]) if (k === n || k.startsWith(`${n}/`)) this.files.delete(k);
@@ -140,7 +153,7 @@ beforeAll(async () => {
     { projectId: 5, key: "HIGHRISE_BOT_TOKEN", valueVault: encryptApiKey("hr-token-123") },
     { projectId: 5, key: "HIGHRISE_ROOM_ID", valueVault: encryptApiKey("room-1") },
   ];
-});
+}, 30_000); // loading the runner's modules takes a while when every test file runs at once
 afterEach(() => { vi.useRealTimers(); });
 afterAll(() => { rmSync(root, { recursive: true, force: true }); });
 
@@ -164,6 +177,10 @@ describe("a bot on a bot host", () => {
     expect(fake.files.get("kojy_launcher.py")!.toString()).toContain("class Watchdog");
     expect(fake.files.get("kojy_start.py")!.toString()).toContain("def install_packages");
     expect(fake.startupValue).toBe("kojy_start.py");
+    // Python 3.11 like the runner (the SDK doesn't install on 3.13), and the panel's own install off.
+    expect(fake.image).toBe("ghcr.io/ptero-eggs/yolks:python_3.11");
+    expect(fake.requirementsValue).toBe("kojy-no-requirements.txt");
+    expect(consoleLines()).toContain("Switched Silly Development, server abcd1234 to Python 3.11, the version KojyAI runs bots on.");
     expect(fake.calls.at(-1)).toBe("power start");
     expect(project.hostSync).toMatchObject({ server: "abcd1234", dataUploaded: true });
     expect(Object.keys(project.hostSync!.files)).not.toContain("data/players.json");

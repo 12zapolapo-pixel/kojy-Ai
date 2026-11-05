@@ -241,6 +241,11 @@ export class BotHostClient {
     await this.request("PUT", `${this.server(id)}/startup/variable`, { json: { key, value } });
   }
 
+  /** One of the images the startup settings offer (a Python version); used from the next start. */
+  async setDockerImage(id: string, image: string): Promise<void> {
+    await this.request("PUT", `${this.server(id)}/settings/docker-image`, { json: { docker_image: image } });
+  }
+
   // ── files ──────────────────────────────────────────────────────────────────
 
   async listDir(id: string, directory = "/"): Promise<HostFileEntry[]> {

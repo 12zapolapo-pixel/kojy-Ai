@@ -43,6 +43,14 @@ export interface HostRef { hostId: number; server: string }
 
 /** What the host runs, and KojyAI's own files next to the bot's code. */
 export const START_FILE = "kojy_start.py";
+/**
+ * The Python version bots run on here (the runner image's). Newer ones break
+ * the Highrise SDK: on 3.13 its pendulum 2.x dependency doesn't build
+ * (2026-11-05, Japalo's first start on Silly Development).
+ */
+export const HOST_PYTHON = "3.11";
+/** Points the panel's own requirements install at nothing: kojy_start.py installs the packages. */
+const NO_REQUIREMENTS = "kojy-no-requirements.txt";
 const LAUNCHER_FILE = "kojy_launcher.py";
 const REQUIREMENTS_FILE = ".kojy/requirements.txt";
 const ENV_FILE = ".kojy/env.json";
@@ -230,6 +238,15 @@ export class HostRunner {
       const variable = pythonFileVariable(startup);
       if (!variable) throw new Error("Couldn't find which Python file this server starts (its startup settings have none).");
       if (startup.variables.find((v) => v.env === variable)?.value !== START_FILE) await s.client.setStartupVariable(s.ref.server, variable, START_FILE);
+      // The panel's own install would put the packages in twice on a small disk.
+      for (const v of startup.variables) {
+        if (v.editable && /REQUIREMENTS/i.test(v.env) && v.value !== NO_REQUIREMENTS) await s.client.setStartupVariable(s.ref.server, v.env, NO_REQUIREMENTS);
+      }
+      const python = Object.values(startup.dockerImages).find((image) => image.endsWith(`python_${HOST_PYTHON}`));
+      if (python && server.dockerImage !== python) {
+        await s.client.setDockerImage(s.ref.server, python);
+        this.hooks.console(uuid, "system", `Switched ${s.label} to Python ${HOST_PYTHON}, the version KojyAI runs bots on.`);
+      }
 
       this.hooks.console(uuid, "system", `▶ Starting ${row.entrypoint} on ${s.label}${reason ? ` (${reason})` : ""}`);
       await this.hooks.setStatus(uuid, "starting", `Starting on ${s.client.provider.label}…`);
