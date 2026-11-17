@@ -22,7 +22,7 @@ const RANGES = [{ days: 1, label: "24h" }, { days: 7, label: "7 days" }, { days:
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 function downloadCsv(data: Data) {
-  const rows = [["day", "chats", "replies", "joins", "visitors"], ...data.daily.map((d) => [d.day, d.chats, d.replies, d.joins, d.visitors])];
+  const rows = [["day", "chats", "replies", "joins", "visitors", "gold"], ...data.daily.map((d) => [d.day, d.chats, d.replies, d.joins, d.visitors, d.gold])];
   const url = URL.createObjectURL(new Blob([rows.map((r) => r.join(",")).join("\n")], { type: "text/csv" }));
   Object.assign(document.createElement("a"), { href: url, download: `kojyai-activity-${new Date().toISOString().slice(0, 10)}.csv` }).click();
   URL.revokeObjectURL(url);
@@ -30,8 +30,11 @@ function downloadCsv(data: Data) {
 
 export default function AnalyticsPage() {
   const [days, setDays] = useState(7);
+  const [botKey, setBotKey] = useState("");
+  const bots = trpc.studio.bots.useQuery(undefined, { staleTime: 60_000 });
   const tzOffsetMin = new Date().getTimezoneOffset();
-  const input = { days, tzOffsetMin };
+  const picked = bots.data?.find((b) => `${b.kind}:${b.id}` === botKey);
+  const input = { days, tzOffsetMin, ...(picked ? { bot: { kind: picked.kind, id: picked.id } } : {}) };
   const { data, isLoading, isError, error } = useQuery({
     queryKey: getQueryKey(trpc.analytics.activity, input, "query"),
     queryFn: () => trpcClient.analytics.activity.query(input),
@@ -51,7 +54,12 @@ export default function AnalyticsPage() {
           <h1 className="text-lg font-semibold text-white/90">Analytics</h1>
           <p className="text-xs text-white/35 mt-0.5">Real activity in your bots' rooms — JavaScript and Python bots</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <select value={botKey} onChange={(e) => setBotKey(e.target.value)} aria-label="Bot"
+            className="bg-[#0d1525] border border-white/10 rounded-lg px-2 py-1 text-xs text-white/70 focus:outline-none focus:border-[#49dcb5]/40">
+            <option value="">All bots</option>
+            {bots.data?.map((b) => <option key={`${b.kind}:${b.id}`} value={`${b.kind}:${b.id}`}>{b.name}</option>)}
+          </select>
           {RANGES.map((r) => (
             <button key={r.days} onClick={() => setDays(r.days)}
               className={clsx("px-3 py-1 rounded-lg border text-xs transition-colors",
@@ -70,25 +78,43 @@ export default function AnalyticsPage() {
             <p className="text-white/70">No activity in this period yet.</p>
             <p className="text-xs text-white/40">Numbers appear as soon as a running bot sees people chat, join or tip in its room.</p>
           </div>
-        ) : data && <Dashboard data={data} chats={chats} />}
+        ) : data && <Dashboard data={data} chats={chats} days={days} oneBot={!!picked} />}
       </div>
     </div>
   );
 }
 
-function Stat({ label, value, hint }: { label: string; value: number | string; hint?: string | undefined }) {
+/** "+25%" / "−10%" against the previous period, or "new" when it was 0. Null: nothing to compare with. */
+export function change(now: number, before: number | null | undefined): { text: string; up: boolean } | null {
+  if (before === null || before === undefined) return null;
+  if (before === 0) return now > 0 ? { text: "new", up: true } : null;
+  const pct = Math.round(((now - before) / before) * 100);
+  if (pct === 0) return { text: "same", up: true };
+  return { text: `${pct > 0 ? "+" : "−"}${Math.abs(pct)}%`, up: pct > 0 };
+}
+
+function Stat({ label, value, hint, delta, goodWhenUp = true }: {
+  label: string; value: number | string; hint?: string | undefined; delta?: { text: string; up: boolean } | null; goodWhenUp?: boolean;
+}) {
   return (
     <div className="bg-white/[0.03] border border-white/8 rounded-xl p-4">
       <p className="text-[11px] uppercase tracking-wide text-white/35">{label}</p>
-      <p className="text-2xl font-semibold text-white mt-1">{typeof value === "number" ? value.toLocaleString() : value}</p>
+      <p className="text-2xl font-semibold text-white mt-1">
+        {typeof value === "number" ? value.toLocaleString() : value}
+        {delta && delta.text !== "same" && (
+          <span title="Compared with the period before" className={clsx("ml-2 text-xs font-normal", delta.up === goodWhenUp ? "text-[#49dcb5]" : "text-amber-300")}>{delta.text}</span>
+        )}
+      </p>
       {hint && <p className="text-[11px] text-white/35 mt-1">{hint}</p>}
     </div>
   );
 }
 
-function Dashboard({ data, chats }: { data: Data; chats: number }) {
+function Dashboard({ data, chats, days, oneBot }: { data: Data; chats: number; days: number; oneBot: boolean }) {
   const navigate = useNavigate();
   const t = data.totals;
+  const p = data.previous;
+  const prevChats = p ? (p.chat ?? 0) + (p.whisper ?? 0) : null;
   const replyRate = chats ? Math.round(((t.reply ?? 0) / chats) * 100) : 0;
 
   const grid = useMemo(() => {
@@ -102,13 +128,15 @@ function Dashboard({ data, chats }: { data: Data; chats: number }) {
 
   return (
     <>
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-6">
-        <Stat label="Messages" value={chats} hint={t.whisper ? `${t.whisper} whispers` : undefined} />
-        <Stat label="Bot replies" value={t.reply ?? 0} hint={chats ? (replyRate > 100 ? `about ${Math.round(replyRate / 100)} per message` : `${replyRate}% of messages`) : undefined} />
-        <Stat label="Visitors" value={data.visitors} hint="different people" />
+      {p && <p className="text-[11px] text-white/35 -mb-3">Coloured numbers compare with the {days === 1 ? "24 hours" : `${days} days`} before.</p>}
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-7">
+        <Stat label="Messages" value={chats} hint={t.whisper ? `${t.whisper} whispers` : undefined} delta={change(chats, prevChats)} />
+        <Stat label="Bot replies" value={t.reply ?? 0} hint={chats ? (replyRate > 100 ? `about ${Math.round(replyRate / 100)} per message` : `${replyRate}% of messages`) : undefined} delta={change(t.reply ?? 0, p ? p.reply ?? 0 : null)} />
+        <Stat label="Visitors" value={data.visitors} hint="different people" delta={change(data.visitors, p ? data.previousVisitors : null)} />
         <Stat label="Returning" value={data.returning} hint="came back on 2+ days" />
-        <Stat label="Joins" value={t.join ?? 0} hint={t.tip ? `${t.tip} tips` : undefined} />
-        <Stat label="Crashes" value={t.crash ?? 0} hint={`${t.start ?? 0} starts`} />
+        <Stat label="Joins" value={t.join ?? 0} delta={change(t.join ?? 0, p ? p.join ?? 0 : null)} />
+        <Stat label="Tips" value={data.gold ? `${data.gold.toLocaleString()} g` : t.tip ?? 0} hint={t.tip ? `${t.tip} tip${t.tip === 1 ? "" : "s"}${data.gold ? " of gold" : ""}` : "no tips yet"} delta={change(data.gold, p ? data.previousGold : null)} />
+        <Stat label="Crashes" value={t.crash ?? 0} hint={`${t.start ?? 0} starts`} delta={change(t.crash ?? 0, p ? p.crash ?? 0 : null)} goodWhenUp={false} />
       </div>
 
       <section className="bg-white/[0.02] border border-white/8 rounded-xl p-4">
@@ -150,20 +178,49 @@ function Dashboard({ data, chats }: { data: Data; chats: number }) {
         </table>
       </section>
 
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className="bg-white/[0.02] border border-white/8 rounded-xl p-4">
+          <h2 className="text-sm text-white/70 mb-1">Most used commands</h2>
+          <p className="text-[11px] text-white/35 mb-3">Messages starting with ! or / (only the command word is counted).</p>
+          {data.topCommands.length === 0 && <p className="text-xs text-white/35">No commands used yet.</p>}
+          <ol className="space-y-1.5 text-xs">
+            {data.topCommands.map((c) => {
+              const top = data.topCommands[0]!.uses;
+              return (
+                <li key={c.command} className="flex items-center gap-2 text-white/75">
+                  <span className="font-mono w-28 truncate">{c.command}</span>
+                  <span className="flex-1 h-1.5 rounded bg-white/5"><span className="block h-full rounded bg-[#49dcb5]/60" style={{ width: `${Math.max(4, (c.uses / top) * 100)}%` }} /></span>
+                  <span className="text-white/40 w-28 text-right">{c.uses}× · {c.people} {c.people === 1 ? "person" : "people"}</span>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+        <section className="bg-white/[0.02] border border-white/8 rounded-xl p-4">
+          <h2 className="text-sm text-white/70 mb-3">Top tippers</h2>
+          {data.topTippers.length === 0 && <p className="text-xs text-white/35">No gold tips yet.</p>}
+          <ol className="space-y-1.5 text-xs">
+            {data.topTippers.map((v, i) => (
+              <li key={i} className="flex justify-between text-white/75"><span>{i + 1}. {v.name}</span><span className="text-white/40">{v.gold.toLocaleString()} gold · {v.tips} tip{v.tips === 1 ? "" : "s"}</span></li>
+            ))}
+          </ol>
+        </section>
+      </div>
+
       <div className="grid gap-6 lg:grid-cols-3">
-        <section className="lg:col-span-2 bg-white/[0.02] border border-white/8 rounded-xl p-4 overflow-x-auto">
+        <section className={clsx(oneBot ? "lg:col-span-3" : "lg:col-span-2", "bg-white/[0.02] border border-white/8 rounded-xl p-4 overflow-x-auto")} hidden={oneBot}>
           <h2 className="text-sm text-white/70 mb-3">By bot</h2>
           <table className="w-full text-xs">
             <thead className="text-white/35 text-left">
-              <tr><th className="py-1 pr-3">Bot</th><th className="pr-3">Messages</th><th className="pr-3">Replies</th><th className="pr-3">Visitors</th><th className="pr-3">Joins</th><th className="pr-3">Tips</th><th className="pr-3">Crashes</th><th>Last activity</th></tr>
+              <tr><th className="py-1 pr-3">Bot</th><th className="pr-3">Messages</th><th className="pr-3">Replies</th><th className="pr-3">Visitors</th><th className="pr-3">Joins</th><th className="pr-3">Tips</th><th className="pr-3">Gold</th><th className="pr-3">Crashes</th><th>Last activity</th></tr>
             </thead>
             <tbody className="text-white/75">
               {data.bots.map((b) => (
                 <tr key={`${b.kind}-${b.id ?? b.name}`} className="border-t border-white/5 hover:bg-white/[0.03] cursor-pointer"
-                  onClick={() => b.id && navigate(b.kind === "python" ? `/projects/${b.id}` : `/bots/${b.id}`)}>
+                  onClick={() => b.id && navigate(`/studio/${b.kind === "python" ? "p" : "j"}/${b.id}`)}>
                   <td className="py-1.5 pr-3">{b.name} <span className="text-white/30">{b.kind === "python" ? "🐍" : "JS"}</span></td>
                   <td className="pr-3">{b.chats}</td><td className="pr-3">{b.replies}</td><td className="pr-3">{b.visitors}</td>
-                  <td className="pr-3">{b.joins}</td><td className="pr-3">{b.tips}</td>
+                  <td className="pr-3">{b.joins}</td><td className="pr-3">{b.tips}</td><td className="pr-3">{b.gold ? b.gold.toLocaleString() : "—"}</td>
                   <td className={clsx("pr-3", b.crashes > 0 && "text-amber-300")}>{b.crashes}</td>
                   <td className="text-white/40">{b.lastActivity ? new Date(b.lastActivity).toLocaleString() : "—"}</td>
                 </tr>
@@ -171,7 +228,7 @@ function Dashboard({ data, chats }: { data: Data; chats: number }) {
             </tbody>
           </table>
         </section>
-        <section className="bg-white/[0.02] border border-white/8 rounded-xl p-4">
+        <section className={clsx(oneBot && "lg:col-span-3", "bg-white/[0.02] border border-white/8 rounded-xl p-4")}>
           <h2 className="text-sm text-white/70 mb-3">Most active people</h2>
           {data.topVisitors.length === 0 && <p className="text-xs text-white/35">Nobody has chatted yet.</p>}
           <ol className="space-y-1.5 text-xs">

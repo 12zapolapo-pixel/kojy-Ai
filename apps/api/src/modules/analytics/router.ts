@@ -58,20 +58,45 @@ export const analyticsRouter = router({
    * getTimezoneOffset(), so days and the hour heatmap are in local time.
    */
   activity: permittedProc("analytics:read")
-    .input(z.object({ days: z.number().int().min(1).max(90).default(7), tzOffsetMin: z.number().int().min(-840).max(840).default(0) }))
+    .input(z.object({
+      days: z.number().int().min(1).max(90).default(7),
+      tzOffsetMin: z.number().int().min(-840).max(840).default(0),
+      /** Only this bot (its uuid; Python bots are "python", JS bots "javascript"). */
+      bot: z.object({ kind: z.enum(["python", "javascript"]), id: z.string().min(1).max(64) }).optional(),
+    }))
     .query(async ({ input, ctx }) => {
       const orgId = await tryResolveOrgId(ctx);
-      const empty = { totals: {} as Record<string, number>, visitors: 0, returning: 0, daily: [], heatmap: [], bots: [], topVisitors: [] };
+      const empty = {
+        totals: {} as Record<string, number>, previous: null as null | Record<string, number>, visitors: 0, previousVisitors: 0, returning: 0, gold: 0, previousGold: 0,
+        daily: [], heatmap: [], bots: [], topVisitors: [], topCommands: [], topTippers: [],
+      };
       if (orgId === null) return empty;
       const a = schema.botActivity;
-      const since = new Date(Date.now() - input.days * 86_400_000);
-      const scope = and(eq(a.orgId, orgId), gte(a.createdAt, since));
+      const now = Date.now();
+      const since = new Date(now - input.days * 86_400_000);
+      const before = new Date(now - 2 * input.days * 86_400_000);
+      let botScope = sql`true`;
+      if (input.bot) {
+        const table = input.bot.kind === "python" ? schema.botProjects : schema.bots;
+        const [row] = await ctx.db.select({ id: table.id }).from(table).where(and(eq(table.uuid, input.bot.id), eq(table.orgId, orgId))).limit(1);
+        if (!row) return empty;
+        botScope = and(eq(a.source, input.bot.kind === "python" ? "project" : "bot"), eq(a.sourceId, row.id))!;
+      }
+      const scope = and(eq(a.orgId, orgId), gte(a.createdAt, since), botScope);
       // Local time = UTC minus the browser's offset.
       const local = sql`(${a.createdAt} - make_interval(mins => ${input.tzOffsetMin}))`;
       const roomEvents = sql`${a.kind} in ('chat','whisper','join','tip','emote')`;
+      const current = sql`${a.createdAt} >= ${since}`;
 
-      const [totals, visitorRows, daily, heat, perBot, top] = await Promise.all([
-        ctx.db.select({ kind: a.kind, n: count() }).from(a).where(scope).groupBy(a.kind),
+      const [totals, visitorRows, daily, heat, perBot, top, commands, tippers, prevVisitors] = await Promise.all([
+        // This period and the one before it, per kind, plus tip gold.
+        ctx.db.select({
+          kind: a.kind,
+          n: sql<number>`count(*) filter (where ${current})`.mapWith(Number),
+          prev: sql<number>`count(*) filter (where not ${current})`.mapWith(Number),
+          gold: sql<number>`coalesce(sum(${a.amount}) filter (where ${current}), 0)`.mapWith(Number),
+          prevGold: sql<number>`coalesce(sum(${a.amount}) filter (where not ${current}), 0)`.mapWith(Number),
+        }).from(a).where(and(eq(a.orgId, orgId), gte(a.createdAt, before), botScope)).groupBy(a.kind),
         ctx.db.select({ actor: a.actorId, days: sql<number>`count(distinct date(${local}))`.mapWith(Number) })
           .from(a).where(and(scope, roomEvents, sql`${a.actorId} is not null`)).groupBy(a.actorId),
         ctx.db.select({
@@ -80,6 +105,7 @@ export const analyticsRouter = router({
           replies: sql<number>`count(*) filter (where ${a.kind} = 'reply')`.mapWith(Number),
           joins: sql<number>`count(*) filter (where ${a.kind} = 'join')`.mapWith(Number),
           visitors: sql<number>`count(distinct ${a.actorId}) filter (where ${roomEvents})`.mapWith(Number),
+          gold: sql<number>`coalesce(sum(${a.amount}) filter (where ${a.kind} = 'tip'), 0)`.mapWith(Number),
         }).from(a).where(scope).groupBy(sql`1`).orderBy(sql`1`),
         ctx.db.select({
           dow: sql<number>`extract(isodow from ${local})::int - 1`.mapWith(Number),
@@ -92,6 +118,7 @@ export const analyticsRouter = router({
           replies: sql<number>`count(*) filter (where ${a.kind} = 'reply')`.mapWith(Number),
           joins: sql<number>`count(*) filter (where ${a.kind} = 'join')`.mapWith(Number),
           tips: sql<number>`count(*) filter (where ${a.kind} = 'tip')`.mapWith(Number),
+          gold: sql<number>`coalesce(sum(${a.amount}) filter (where ${a.kind} = 'tip'), 0)`.mapWith(Number),
           crashes: sql<number>`count(*) filter (where ${a.kind} = 'crash')`.mapWith(Number),
           visitors: sql<number>`count(distinct ${a.actorId}) filter (where ${roomEvents})`.mapWith(Number),
           last: sql<string>`max(${a.createdAt})`,
@@ -99,6 +126,13 @@ export const analyticsRouter = router({
         ctx.db.select({ name: sql<string>`max(${a.actorName})`, n: count() }).from(a)
           .where(and(scope, sql`${a.kind} in ('chat','whisper')`, sql`${a.actorId} is not null`))
           .groupBy(a.actorId).orderBy(desc(count())).limit(10),
+        ctx.db.select({ command: a.detail, n: count(), people: sql<number>`count(distinct ${a.actorId})`.mapWith(Number) }).from(a)
+          .where(and(scope, sql`${a.detail} is not null`)).groupBy(a.detail).orderBy(desc(count())).limit(10),
+        ctx.db.select({ name: sql<string>`max(${a.actorName})`, gold: sql<number>`sum(${a.amount})`.mapWith(Number), tips: count() }).from(a)
+          .where(and(scope, eq(a.kind, "tip"), sql`${a.amount} is not null`, sql`${a.actorId} is not null`))
+          .groupBy(a.actorId).orderBy(desc(sql`sum(${a.amount})`)).limit(10),
+        ctx.db.select({ n: sql<number>`count(distinct ${a.actorId})`.mapWith(Number) }).from(a)
+          .where(and(eq(a.orgId, orgId), gte(a.createdAt, before), sql`not ${current}`, botScope, roomEvents)),
       ]);
 
       // Names for the per-bot table.
@@ -109,19 +143,27 @@ export const analyticsRouter = router({
         pyIds.length ? ctx.db.select({ id: schema.botProjects.id, uuid: schema.botProjects.uuid, name: schema.botProjects.name }).from(schema.botProjects).where(inArray(schema.botProjects.id, pyIds)) : [],
       ]);
       const names = new Map<string, { uuid: string; name: string }>([...jsNames.map((b) => [`bot:${b.id}`, b] as const), ...pyNames.map((b) => [`project:${b.id}`, b] as const)]);
+      // No activity at all before this period (a new bot, or the first week): nothing to compare with.
+      const hadBefore = totals.some((t) => t.prev > 0);
 
       return {
-        totals: Object.fromEntries(totals.map((t) => [t.kind, Number(t.n)])),
+        totals: Object.fromEntries(totals.map((t) => [t.kind, t.n])),
+        previous: hadBefore ? Object.fromEntries(totals.map((t) => [t.kind, t.prev])) : null,
         visitors: visitorRows.length,
+        previousVisitors: prevVisitors[0]?.n ?? 0,
         returning: visitorRows.filter((v) => v.days >= 2).length,
+        gold: totals.reduce((n, t) => n + t.gold, 0),
+        previousGold: totals.reduce((n, t) => n + t.prevGold, 0),
         daily,
         heatmap: heat.map((h) => ({ dow: h.dow, hour: h.hour, n: Number(h.n) })),
         bots: perBot.map((b) => {
           const meta = names.get(`${b.source}:${b.sourceId}`);
           return { kind: b.source === "bot" ? "javascript" as const : "python" as const, id: meta?.uuid ?? null, name: meta?.name ?? "(deleted bot)",
-            chats: b.chats, replies: b.replies, joins: b.joins, tips: b.tips, crashes: b.crashes, visitors: b.visitors, lastActivity: b.last };
+            chats: b.chats, replies: b.replies, joins: b.joins, tips: b.tips, gold: b.gold, crashes: b.crashes, visitors: b.visitors, lastActivity: b.last };
         }).sort((x, y) => y.chats + y.joins - (x.chats + x.joins)),
         topVisitors: top.map((t) => ({ name: t.name ?? "unknown", messages: Number(t.n) })),
+        topCommands: commands.map((c) => ({ command: c.command ?? "", uses: Number(c.n), people: c.people })),
+        topTippers: tippers.map((t) => ({ name: t.name ?? "unknown", gold: t.gold, tips: Number(t.tips) })),
       };
     }),
 

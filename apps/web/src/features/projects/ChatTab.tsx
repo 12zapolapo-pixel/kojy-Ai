@@ -11,6 +11,7 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
 import { AiUsageCircle } from "./AiUsage";
+import { useWsStore } from "../../state/wsStore";
 import { WorkHistoryButton } from "./WorkHistory";
 
 type Project = RouterOutputs["projects"]["get"];
@@ -60,27 +61,49 @@ export function ChatTab({ project, jsBot, onPanel }: {
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const lastId = useRef(0);
+  /** Older messages: the oldest one shown, and whether there are more before it. */
+  const [older, setOlder] = useState<{ firstId: number | null; hasMore: boolean; loading: boolean }>({ firstId: null, hasMore: false, loading: false });
+  /** Set while older messages are put on top, so the view doesn't jump to the bottom. */
+  const keepScroll = useRef<number | null>(null);
   const box = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const textArea = useRef<HTMLTextAreaElement>(null);
   const onPanelRef = useRef(onPanel);
   onPanelRef.current = onPanel;
   const pid = project?.id ?? null;
   const jid = jsBot?.id ?? null;
 
-  // Poll for new messages: fast while the AI works, slow otherwise.
+  // New messages: fetched right away when the runner announces a change over
+  // the WebSocket (chat_update), and polled as a fallback — fast while Kojy
+  // works, slower when the WebSocket is up.
+  const pollNow = useRef<() => void>(() => undefined);
+  const wsConnected = useWsStore((st) => st.connected);
+  const wsConnectedRef = useRef(wsConnected);
+  wsConnectedRef.current = wsConnected;
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
+    let inFlight = false;
+    let again = false;
     lastId.current = 0;
     setMessages([]);
     const poll = async () => {
+      if (inFlight) { again = true; return; }
+      inFlight = true;
+      clearTimeout(timer);
+      let next = 5000;
       try {
         const afterId = lastId.current || undefined;
-        const res: { agentState: string; progress: string | null; lastId: number; messages: Msg[] } = pid
+        const res: { agentState: string; progress: string | null; lastId: number; messages: Msg[]; hasMore: boolean; firstId: number | null; orgId: number } = pid
           ? await trpcClient.projects.chatList.query({ id: pid, afterId })
           : jid ? await trpcClient.studio.jsChatList.query({ id: jid, afterId })
           : await trpcClient.studio.chatList.query({ afterId });
         if (stopped) return;
+        if (!afterId) {
+          setOlder({ firstId: res.firstId, hasMore: res.hasMore, loading: false });
+          const ws = useWsStore.getState();
+          if (res.orgId && !ws.subscribedOrgs.has(String(res.orgId))) ws.subscribeOrg(String(res.orgId));
+        }
         const fresh = res.messages.filter((m) => m.id > lastId.current);
         if (fresh.length) setMessages((prev) => [...prev, ...fresh]);
         // A new "show the console" card from Kojy switches the panel (old ones don't).
@@ -90,16 +113,50 @@ export function ChatTab({ project, jsBot, onPanel }: {
           if (prev.agentState === "working" && res.agentState !== "working") { void utils.projects.invalidate(); void utils.studio.invalidate(); }
           return { agentState: res.agentState, progress: res.progress };
         });
-        timer = setTimeout(() => void poll(), res.agentState === "working" ? 1200 : 4000);
-      } catch {
-        if (!stopped) timer = setTimeout(() => void poll(), 5000);
-      }
+        const live = wsConnectedRef.current;
+        next = res.agentState === "working" ? (live ? 4000 : 1200) : (live ? 15_000 : 4000);
+      } catch { /* try again below */ }
+      finally { inFlight = false; }
+      if (stopped) return;
+      if (again) { again = false; void poll(); return; }
+      timer = setTimeout(() => void poll(), next);
     };
+    pollNow.current = () => void poll();
     void poll();
-    return () => { stopped = true; clearTimeout(timer); };
+    return () => { stopped = true; clearTimeout(timer); pollNow.current = () => undefined; };
   }, [pid, jid, utils]);
 
-  useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [messages.length, state.progress]);
+  const chatUpdate = useWsStore((st) => st.lastChatUpdate);
+  useEffect(() => {
+    if (!chatUpdate) return;
+    const mine = pid ? chatUpdate.thread === pid : jid ? chatUpdate.thread === `jsbot-${jid}` : chatUpdate.thread.startsWith("studio-");
+    if (mine) pollNow.current();
+  }, [chatUpdate, pid, jid]);
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    // After loading older messages, stay where the reader was.
+    if (keepScroll.current !== null) { el.scrollTop = el.scrollHeight - keepScroll.current; keepScroll.current = null; return; }
+    el.scrollTo({ top: el.scrollHeight });
+  }, [messages.length, state.progress]);
+
+  const loadOlder = async () => {
+    if (!older.firstId || older.loading) return;
+    setOlder((o) => ({ ...o, loading: true }));
+    try {
+      const beforeId = older.firstId;
+      const res = pid ? await trpcClient.projects.chatList.query({ id: pid, beforeId })
+        : jid ? await trpcClient.studio.jsChatList.query({ id: jid, beforeId })
+        : await trpcClient.studio.chatList.query({ beforeId });
+      keepScroll.current = box.current ? box.current.scrollHeight - box.current.scrollTop : null;
+      setMessages((prev) => [...res.messages.filter((m) => !prev.some((p) => p.id === m.id)), ...prev]);
+      setOlder({ firstId: res.firstId, hasMore: res.hasMore, loading: false });
+    } catch (e) {
+      setError((e as Error).message);
+      setOlder((o) => ({ ...o, loading: false }));
+    }
+  };
 
   const send = async (msg: string) => {
     if (!msg.trim()) return;
@@ -110,6 +167,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
       else await trpcClient.studio.chatSend.mutate({ text: msg.trim() });
       setText("");
       setState((s) => ({ ...s, agentState: "working", progress: "Thinking…" }));
+      pollNow.current();
     } catch (e) { setError((e as Error).message); }
   };
 
@@ -130,7 +188,9 @@ export function ChatTab({ project, jsBot, onPanel }: {
   const stop = () => void (pid ? trpcClient.projects.chatStop.mutate({ id: pid })
     : jid ? trpcClient.studio.jsChatStop.mutate({ id: jid }) : trpcClient.studio.chatStop.mutate());
   const working = state.agentState === "working";
-  const cleared = () => { lastId.current = 0; setMessages([]); };
+  const cleared = () => { lastId.current = 0; setMessages([]); setOlder({ firstId: null, hasMore: false, loading: false }); };
+  /** Puts text in the message box (e.g. "Change the plan: ") and focuses it. */
+  const draft = (t: string) => { setText(t); setTimeout(() => { const el = textArea.current; if (el) { el.focus(); el.setSelectionRange(t.length, t.length); } }, 0); };
   const openBot = (kind: string, id: string) => navigate(`/studio/${kind === "javascript" ? "j" : "p"}/${id}`);
 
   return (
@@ -142,6 +202,13 @@ export function ChatTab({ project, jsBot, onPanel }: {
 
       {project && <BuildProgress messages={messages} working={working} />}
       <div ref={box} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3">
+        {older.hasMore && (
+          <div className="text-center">
+            <button onClick={() => void loadOlder()} disabled={older.loading} className="text-xs text-white/45 hover:text-white/75 disabled:opacity-50">
+              {older.loading ? "Loading…" : "↑ Load earlier messages"}
+            </button>
+          </div>
+        )}
         {messages.length === 0 && !working && (
           <div className="max-w-xl mx-auto text-center space-y-4 pt-8">
             {project ? (
@@ -161,8 +228,8 @@ export function ChatTab({ project, jsBot, onPanel }: {
             </div>
           </div>
         )}
-        {messages.map((m) => <Fragment key={m.id}><MessageView m={m} projectId={pid} onPanel={onPanel} onOpenBot={openBot} onResolved={(id, saved) =>
-          setMessages((prev) => prev.map((x) => (x.id === id && x.card ? { ...x, card: { ...x.card, resolved: true, saved } } : x)))} /></Fragment>)}
+        {messages.map((m) => <Fragment key={m.id}><MessageView m={m} projectId={pid} onPanel={onPanel} onOpenBot={openBot} onDraft={draft} onResolved={(id, saved, extra) =>
+          setMessages((prev) => prev.map((x) => (x.id === id && x.card ? { ...x, card: { ...x.card, ...extra, resolved: true, saved } } : x)))} /></Fragment>)}
         {working && (
           <div className="flex items-center gap-2 text-xs text-white/50">
             <span className="inline-block w-2 h-2 rounded-full bg-[#49dcb5] animate-pulse" />
@@ -182,7 +249,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
                 className="px-3 py-2 border border-white/10 rounded-lg text-white/60 hover:bg-white/5 disabled:opacity-50">{uploading ? "…" : "📎"}</button>
             </>
           )}
-          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={Math.min(6, Math.max(1, text.split("\n").length))}
+          <textarea ref={textArea} value={text} onChange={(e) => setText(e.target.value)} rows={Math.min(6, Math.max(1, text.split("\n").length))}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(text); } }}
             placeholder={working ? "Kojy is working — you can still add a message" : project || jsBot ? "Ask Kojy to build, fix or explain something…" : "Ask Kojy about your bots…"}
             className="flex-1 resize-none bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white/85 focus:outline-none focus:border-[#49dcb5]/40" maxLength={8000} />
@@ -254,6 +321,8 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
   const utils = trpc.useUtils();
   const [showUndo, setShowUndo] = useState(false);
   const snapshots = trpc.projects.snapshots.useQuery({ id: project.id }, { enabled: showUndo });
+  const [preview, setPreview] = useState<string | null>(null);
+  const diff = trpc.projects.snapshotDiff.useQuery({ id: project.id, snapshotId: preview ?? "0" }, { enabled: showUndo && !!preview, retry: false });
   const restore = trpc.projects.restoreSnapshot.useMutation({ onSuccess: () => { setShowUndo(false); void utils.projects.invalidate(); } });
   const autoFix = trpc.projects.setAutoFix.useMutation({ onSuccess: () => void utils.projects.get.invalidate({ id: project.id }) });
   const checkup = trpc.projects.setDailyCheckup.useMutation({ onSuccess: () => void utils.projects.get.invalidate({ id: project.id }) });
@@ -264,7 +333,7 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
 
   return (
     <div className="px-4 py-2 border-b border-white/5 flex flex-wrap items-center gap-3 text-xs relative">
-      <label className="flex items-center gap-1.5 text-white/60 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — no approval needed (up to 3 times a day). A fix that would delete files, touch the bot's data, packages or secrets, or add internet or secret access asks you first.">
+      <label className="flex items-center gap-1.5 text-white/60 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — no approval needed (up to 3 times a day). A fix that would delete files, touch the bot's data, packages or secrets, or add internet or secret access asks you first. If the bot crashes again within 15 minutes of a fix, Kojy puts the code back as it was and tells you.">
         <input type="checkbox" checked={autoFixOn} onChange={(e) => autoFix.mutate({ id: project.id, autoFix: e.target.checked })} />
         Auto-fix crashes
       </label>
@@ -281,16 +350,41 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
           onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot and the work history.")) clear.mutate({ id: project.id }); }}>New chat</button>
       </div>
       {showUndo && (
-        <div className="absolute right-4 top-9 z-10 w-80 bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">
-          <p className="text-white/40 px-1 pb-1">Put the code back to how it was before a change (your bot's data is never touched):</p>
+        <div className="absolute right-4 top-full mt-1 z-10 w-[26rem] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1"
+          onKeyDown={(e) => { if (e.key === "Escape") setShowUndo(false); }}>
+          <div className="flex items-start gap-2 px-1 pb-1">
+            <p className="flex-1 text-white/40">Put the code back to how it was before a change (your bot's data is never touched). Preview first to see what would change.</p>
+            <button onClick={() => setShowUndo(false)} title="Close" aria-label="Close" className="text-white/40 hover:text-white">✕</button>
+          </div>
           {snapshots.isLoading && <p className="px-1 text-white/40">Loading…</p>}
           {snapshots.data?.length === 0 && <p className="px-1 text-white/40">No saved versions yet.</p>}
           {snapshots.data?.map((s) => (
-            <button key={s.id} disabled={restore.isPending}
-              onClick={() => { if (window.confirm(`Restore the code from ${new Date(s.createdAt).toLocaleString()}?`)) restore.mutate({ id: project.id, snapshotId: s.id }); }}
-              className="w-full text-left px-2 py-1.5 rounded hover:bg-white/5 text-white/70">
-              {new Date(s.createdAt).toLocaleString()} <span className="text-white/30">· {s.files} files</span>
-            </button>
+            <div key={s.id} className="rounded hover:bg-white/[0.03]">
+              <button onClick={() => setPreview(preview === s.id ? null : s.id)} className="w-full text-left px-2 py-1.5 text-white/70">
+                <span className="block truncate">{s.reason || "Saved version"}</span>
+                <span className="text-white/30">{new Date(s.createdAt).toLocaleString()} · {s.files} file{s.files === 1 ? "" : "s"} · {preview === s.id ? "hide" : "preview"}</span>
+              </button>
+              {preview === s.id && (
+                <div className="px-2 pb-2 space-y-2">
+                  {diff.isLoading && <p className="text-white/40">Comparing…</p>}
+                  {diff.isError && <p className="text-red-400">{diff.error.message}</p>}
+                  {diff.data && diff.data.files.length === 0 && <p className="text-white/40">The code is the same as this version — nothing would change.</p>}
+                  {diff.data?.files.map((f) => (
+                    <details key={f.path} className="text-white/60">
+                      <summary className="cursor-pointer font-mono">
+                        {f.change === "added" ? "＋ brings back " : f.change === "removed" ? "✕ removes " : "✎ "}{f.path}
+                        {f.change === "modified" && <span className="text-white/30"> (restoring: +{f.added} −{f.removed} lines)</span>}
+                      </summary>
+                      {f.diff && <div className="mt-1"><DiffView diff={f.diff} /></div>}
+                    </details>
+                  ))}
+                  {!!diff.data?.more && <p className="text-white/30">…and {diff.data.more} more files</p>}
+                  <button disabled={restore.isPending || (diff.data?.files.length === 0)}
+                    onClick={() => { if (window.confirm(`Restore the code from ${new Date(s.createdAt).toLocaleString()}?`)) restore.mutate({ id: project.id, snapshotId: s.id }); }}
+                    className="px-3 py-1 rounded bg-[#49dcb5] text-black font-semibold disabled:opacity-40">{restore.isPending ? "Restoring…" : "Restore this version"}</button>
+                </div>
+              )}
+            </div>
           ))}
           {restore.isError && <p className="px-1 text-red-400">{restore.error.message}</p>}
         </div>
@@ -301,15 +395,91 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
 
 // ── messages ─────────────────────────────────────────────────────────────────
 
-/** Renders text with ``` code blocks; everything else as plain text. */
+/**
+ * Kojy's replies as light markdown: ``` code blocks, `inline code`, **bold**,
+ * *italic*, "- " and "1. " lists, "#" headings and [links](https://…).
+ * Built from React elements — never raw HTML — and only http(s) links.
+ */
 function RichText({ text }: { text: string }) {
-  const parts = text.split(/```(?:\w+)?\n?/);
+  const parts = text.split(/```(?:[\w+-]+)?\n?/);
   return (
     <>
       {parts.map((p, i) => i % 2
         ? <pre key={i} className="my-2 p-2 bg-black/40 rounded text-xs overflow-x-auto font-mono">{p.replace(/\n$/, "")}</pre>
-        : <span key={i} className="whitespace-pre-wrap">{p}</span>)}
+        : <MarkdownBlocks key={i} text={p} />)}
     </>
+  );
+}
+
+function MarkdownBlocks({ text }: { text: string }) {
+  const blocks: React.ReactNode[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length) blocks.push(<p key={`p${blocks.length}`} className="whitespace-pre-wrap">{inline(para.join("\n"))}</p>);
+    para = [];
+  };
+  const flushList = () => {
+    if (!list) return;
+    const items = list.items.map((it, n) => <li key={n}>{inline(it)}</li>);
+    blocks.push(list.ordered
+      ? <ol key={`l${blocks.length}`} className="list-decimal pl-5 space-y-0.5">{items}</ol>
+      : <ul key={`l${blocks.length}`} className="list-disc pl-5 space-y-0.5">{items}</ul>);
+    list = null;
+  };
+  for (const line of text.split("\n")) {
+    const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    const heading = /^\s*#{1,4}\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      flushPara();
+      const ordered = !!numbered;
+      if (list && list.ordered !== ordered) flushList();
+      list ??= { ordered, items: [] };
+      list.items.push((bullet ?? numbered)![1]!);
+    } else if (heading) {
+      flushPara(); flushList();
+      blocks.push(<p key={`h${blocks.length}`} className="font-semibold text-white/95">{inline(heading[1]!)}</p>);
+    } else if (!line.trim()) {
+      flushPara(); flushList();
+    } else {
+      flushList();
+      para.push(line);
+    }
+  }
+  flushPara(); flushList();
+  return <div className="space-y-2">{blocks}</div>;
+}
+
+/** `code`, **bold**, *italic* and [text](https://link) inside one paragraph. */
+export function inline(text: string): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  const re = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|(?<![\w*])\*([^*\n]+)\*(?!\w)|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const k = out.length;
+    if (m[1] !== undefined) out.push(<code key={k} className="px-1 rounded bg-black/40 font-mono text-[0.85em]">{m[1]}</code>);
+    else if (m[2] !== undefined) out.push(<strong key={k} className="font-semibold text-white">{m[2]}</strong>);
+    else if (m[3] !== undefined) out.push(<em key={k}>{m[3]}</em>);
+    else out.push(<a key={k} href={m[5]} target="_blank" rel="noopener noreferrer nofollow" className="text-[#49dcb5] underline">{m[4]}</a>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+/** A line diff ("@@ line N @@", " kept", "-removed", "+added") with colours. */
+export function DiffView({ diff }: { diff: string }) {
+  return (
+    <pre className="max-h-80 overflow-auto bg-black/30 rounded p-2 font-mono text-[11px] leading-snug">
+      {diff.split("\n").map((l, i) => (
+        <div key={i} className={clsx("whitespace-pre-wrap break-all",
+          l.startsWith("@@") ? "text-sky-300/60 pt-1" : l.startsWith("+") ? "text-emerald-300 bg-emerald-500/10" : l.startsWith("-") ? "text-red-300 bg-red-500/10" : "text-white/45")}>
+          {l || " "}
+        </div>
+      ))}
+    </pre>
   );
 }
 
@@ -319,9 +489,9 @@ const PANEL_LABEL: Record<string, string> = {
 // Studio cards that point at a whole page rather than a bot panel.
 const PANEL_PAGE: Record<string, string> = { analytics: "/analytics", status: "/infrastructure" };
 
-function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
-  m: Msg; projectId: string | null; onResolved: (id: number, saved: string[]) => void;
-  onPanel?: ((panel: string) => void) | undefined; onOpenBot: (kind: string, id: string) => void;
+function MessageView({ m, projectId, onResolved, onPanel, onOpenBot, onDraft }: {
+  m: Msg; projectId: string | null; onResolved: (id: number, saved: string[], extra?: Record<string, unknown>) => void;
+  onPanel?: ((panel: string) => void) | undefined; onOpenBot: (kind: string, id: string) => void; onDraft?: ((text: string) => void) | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
@@ -367,17 +537,19 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
   }
   if (m.role === "user") {
     // App events ("secrets saved", "code restored"): shown small, without the AI-facing instructions.
-    return <p className="text-center text-[11px] text-white/35">{m.content.replace(/ (Test them|Restart the bot).*$/, "")}</p>;
+    return <p className="text-center text-[11px] text-white/35">{m.content.replace(/ (Test them|Restart the bot|Read it again|Files you read|Go ahead|Stop and).*$/, "")}</p>;
   }
-  if (m.kind === "plan" && m.card && projectId) return <PlanCardView m={m} projectId={projectId} onResolved={onResolved} />;
+  if (m.kind === "plan" && m.card && projectId) return <PlanCardView m={m} projectId={projectId} onResolved={onResolved} onDraft={onDraft} />;
   if (m.kind === "secret_request" && m.card && projectId) return <SecretCard m={m} projectId={projectId} onResolved={onResolved} />;
   if (m.role === "tool") {
     return (
       <div className="text-xs">
         <button onClick={() => setOpen((v) => !v)} className={`text-left ${m.ok === false ? "text-amber-300/80" : "text-white/45"} hover:text-white/70`}>
-          {m.ok === false ? "✗" : "✓"} {m.summary ?? m.tool} {open ? "▾" : "▸"}
+          {m.ok === false ? "✗" : "✓"} {m.summary ?? m.tool} {m.diff ? <span className="text-white/30">· {open ? "hide" : "see"} the change</span> : null} {open ? "▾" : "▸"}
         </button>
-        {open && <pre className="mt-1 ml-4 max-h-80 overflow-auto whitespace-pre-wrap bg-black/30 rounded p-2 font-mono text-[11px] text-white/60">{m.content}</pre>}
+        {open && (m.diff
+          ? <div className="mt-1 ml-4"><DiffView diff={m.diff} /></div>
+          : <pre className="mt-1 ml-4 max-h-80 overflow-auto whitespace-pre-wrap bg-black/30 rounded p-2 font-mono text-[11px] text-white/60">{m.content}</pre>)}
       </div>
     );
   }
@@ -386,9 +558,13 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
   return <div className="max-w-[85%] text-sm text-white/85 leading-relaxed"><RichText text={m.content} /></div>;
 }
 
-function PlanCardView({ m, projectId, onResolved }: { m: Msg; projectId: string; onResolved: (id: number, saved: string[]) => void }) {
+function PlanCardView({ m, projectId, onResolved, onDraft }: {
+  m: Msg; projectId: string; onResolved: (id: number, saved: string[], extra?: Record<string, unknown>) => void; onDraft?: ((text: string) => void) | undefined;
+}) {
   const card = m.card!;
   const approve = trpc.projects.chatApprovePlan.useMutation({ onSuccess: () => onResolved(m.id, []) });
+  const reject = trpc.projects.chatRejectPlan.useMutation({ onSuccess: () => onResolved(m.id, [], { rejected: true }) });
+  const busy = approve.isPending || reject.isPending;
   return (
     <div className="max-w-lg border border-white/15 bg-white/[0.03] rounded-xl p-4 space-y-3">
       <p className="text-sm text-white/85">📋 {card.title ?? "Plan"}</p>
@@ -396,15 +572,20 @@ function PlanCardView({ m, projectId, onResolved }: { m: Msg; projectId: string;
         {(card.steps ?? []).map((s, i) => <li key={i}>{s}</li>)}
       </ol>
       {card.resolved ? (
-        <p className="text-xs text-[#49dcb5]">✓ Approved</p>
+        card.rejected ? <p className="text-xs text-white/40">✕ Declined</p> : <p className="text-xs text-[#49dcb5]">✓ Approved</p>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
-          <button disabled={approve.isPending} onClick={() => approve.mutate({ id: projectId, messageId: m.id })}
+          <button disabled={busy} onClick={() => approve.mutate({ id: projectId, messageId: m.id })}
             className="px-4 py-1.5 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg disabled:opacity-40">{approve.isPending ? "…" : "Approve"}</button>
-          <span className="text-xs text-white/40">or type what to change below</span>
+          {onDraft && (
+            <button disabled={busy} onClick={() => onDraft("Change the plan: ")}
+              className="px-3 py-1.5 border border-white/15 text-white/70 text-sm rounded-lg hover:bg-white/5 disabled:opacity-40">Change…</button>
+          )}
+          <button disabled={busy} onClick={() => reject.mutate({ id: projectId, messageId: m.id })}
+            className="px-3 py-1.5 text-white/45 text-sm rounded-lg hover:text-red-300 disabled:opacity-40">{reject.isPending ? "…" : "Decline"}</button>
         </div>
       )}
-      {approve.isError && <p className="text-xs text-red-400">{approve.error.message}</p>}
+      {(approve.error ?? reject.error) && <p className="text-xs text-red-400">{(approve.error ?? reject.error)!.message}</p>}
     </div>
   );
 }

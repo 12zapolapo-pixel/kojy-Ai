@@ -192,9 +192,21 @@ function lineColor(l: LogLine): string {
 
 const STREAM_COLOR: Record<string, string> = { stderr: "text-red-300/90", system: "text-[#49dcb5]", stdin: "text-sky-300", stdout: "text-white/75" };
 
-export function ConsoleTab({ project }: { project: Project }) {
+const isErrorLine = (l: LogLine) => l.stream === "stderr" && /(traceback|error|exception|critical|^\s+(file|raise)\b|^\s*[|+])/i.test(l.line);
+/** The exception that ends a traceback, e.g. "KeyError: 'amy'" → "KeyError". */
+const EXCEPTION = /^\s*[|+ ]*([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt))\b/;
+
+/**
+ * The bot's console. onAskKojy: the "Ask Kojy" button on an error sends a
+ * chat message. It names only the error type and the time — never the bot's
+ * text — and Kojy reads the lines itself with get_logs, where they're data.
+ */
+export function ConsoleTab({ project, onAskKojy }: { project: Project; onAskKojy?: ((text: string) => void) | undefined }) {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [text, setText] = useState("");
+  const [filter, setFilter] = useState("");
+  const [errorsOnly, setErrorsOnly] = useState(false);
+  const [asked, setAsked] = useState<number | null>(null);
   const cursor = useRef<number | undefined>(undefined);
   const box = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -217,21 +229,57 @@ export function ConsoleTab({ project }: { project: Project }) {
     return () => { stopped = true; clearTimeout(timer); };
   }, [project.id]);
 
+  const shown = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return lines.filter((l) => (!errorsOnly || isErrorLine(l)) && (!q || l.line.toLowerCase().includes(q)));
+  }, [lines, filter, errorsOnly]);
+
   useEffect(() => {
     if (stick.current && box.current) box.current.scrollTop = box.current.scrollHeight;
-  }, [lines]);
+  }, [shown]);
+
+  const download = () => {
+    const body = lines.map((l) => `${new Date(l.ts).toISOString()} [${l.stream}] ${l.line}`).join("\n");
+    const url = URL.createObjectURL(new Blob([body], { type: "text/plain" }));
+    Object.assign(document.createElement("a"), { href: url, download: `${project.name.replace(/[^\w.-]+/g, "_") || "bot"}-console.txt` }).click();
+    URL.revokeObjectURL(url);
+  };
+
+  const ask = (l: LogLine, type: string) => {
+    if (!onAskKojy) return;
+    setAsked(l.ts);
+    const at = new Date(l.ts).toISOString().slice(11, 19);
+    onAskKojy(`The console showed a ${type} at ${at} UTC. Read it with get_logs, tell me what causes it, and how we can fix it.`);
+  };
 
   return (
     <div className="h-full flex flex-col min-h-0 p-3 gap-2">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <input className={`${input} py-1 text-xs flex-1 min-w-[8rem]`} placeholder="Search the console" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <label className="flex items-center gap-1.5 text-white/60 cursor-pointer">
+          <input type="checkbox" checked={errorsOnly} onChange={(e) => setErrorsOnly(e.target.checked)} /> Errors only
+        </label>
+        <button className={`${ghostBtn} text-xs py-1`} type="button" onClick={download} disabled={!lines.length} title="Download what's shown here as a text file">⬇ Download</button>
+      </div>
       <div ref={box} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
         className="flex-1 min-h-0 overflow-y-auto bg-black/40 border border-white/5 rounded-lg p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">
         {lines.length === 0 && <span className="text-white/30">No output yet. Press Run to start the bot.</span>}
-        {lines.map((l, i) => (
-          <div key={i} className={lineColor(l)}>
-            <span className="text-white/20 select-none">{new Date(l.ts).toLocaleTimeString()} </span>
-            {l.stream === "stdin" ? "> " : ""}{l.line}
-          </div>
-        ))}
+        {lines.length > 0 && shown.length === 0 && <span className="text-white/30">Nothing matches.</span>}
+        {shown.map((l, i) => {
+          const ex = l.stream === "stderr" ? EXCEPTION.exec(l.line)?.[1] : undefined;
+          return (
+            <div key={i} className={lineColor(l)}>
+              <span className="text-white/20 select-none">{new Date(l.ts).toLocaleTimeString()} </span>
+              {l.stream === "stdin" ? "> " : ""}{l.line}
+              {ex && onAskKojy && (
+                <button type="button" onClick={() => ask(l, ex)} disabled={asked === l.ts}
+                  className="ml-2 px-1.5 rounded border border-[#49dcb5]/40 text-[#49dcb5] text-[10px] font-sans hover:bg-[#49dcb5]/10 disabled:opacity-40 select-none">
+                  {asked === l.ts ? "Asked ✓" : "Ask Kojy"}
+                </button>
+              )}
+            </div>
+          );
+        })}
       </div>
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (!text) return; send.mutate({ id: project.id, text }); setText(""); }}>
         <input className={`${input} font-mono`} placeholder={project.status === "running" ? "Type into the bot's console and press Enter" : "The bot isn't running"}
@@ -249,9 +297,19 @@ export function SecretsTab({ project }: { project: Project }) {
   const utils = trpc.useUtils();
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
+  const [changed, setChanged] = useState(false);
   const refresh = () => void utils.projects.get.invalidate({ id: project.id });
-  const set = trpc.projects.setSecret.useMutation({ onSuccess: () => { setKey(""); setValue(""); refresh(); } });
-  const del = trpc.projects.deleteSecret.useMutation({ onSuccess: refresh });
+  const restart = trpc.projects.restart.useMutation({ onSuccess: () => { setChanged(false); refresh(); } });
+  const running = project.desiredState === "running";
+  const [thenRestart, setThenRestart] = useState(false);
+  const set = trpc.projects.setSecret.useMutation({
+    onSuccess: () => {
+      setKey(""); setValue(""); refresh();
+      // The running bot only reads its secrets when it starts.
+      if (thenRestart && running) restart.mutate({ id: project.id }); else setChanged(true);
+    },
+  });
+  const del = trpc.projects.deleteSecret.useMutation({ onSuccess: () => { refresh(); setChanged(true); } });
   const missing = ["HIGHRISE_ROOM_ID", "HIGHRISE_BOT_TOKEN"].filter((k) => !project.secrets.some((s) => s.key === k));
 
   return (
@@ -268,8 +326,22 @@ export function SecretsTab({ project }: { project: Project }) {
           <input className={`${input} font-mono`} placeholder="NAME (e.g. GROQ_API_KEY)" value={key} onChange={(e) => setKey(e.target.value)} maxLength={100} />
           <input className={`${input} font-mono`} type="password" placeholder="value" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="off" />
           {set.isError && <p className="text-xs text-red-400">{set.error.message}</p>}
-          <button className={primaryBtn} disabled={!key.trim() || set.isPending}>{set.isPending ? "Saving…" : "Save secret"}</button>
+          <div className="flex flex-wrap gap-2">
+            <button className={primaryBtn} disabled={!key.trim() || set.isPending} onClick={() => setThenRestart(false)}>{set.isPending && !thenRestart ? "Saving…" : "Save secret"}</button>
+            {running && (
+              <button className={ghostBtn} disabled={!key.trim() || set.isPending || restart.isPending} onClick={() => setThenRestart(true)}>
+                {(set.isPending && thenRestart) || restart.isPending ? "Saving…" : "Save & restart bot"}
+              </button>
+            )}
+          </div>
         </form>
+        {changed && running && (
+          <div className="flex items-center gap-3 text-xs text-amber-300/80 border border-amber-400/20 rounded-lg px-3 py-2">
+            <span className="flex-1">The running bot still uses the old secrets until it restarts.</span>
+            <button className={`${ghostBtn} text-xs`} disabled={restart.isPending} onClick={() => restart.mutate({ id: project.id })}>{restart.isPending ? "Restarting…" : "Restart now"}</button>
+          </div>
+        )}
+        {restart.isError && <p className="text-xs text-red-400">{restart.error.message}</p>}
         <ul className="divide-y divide-white/5 border border-white/5 rounded-lg">
           {project.secrets.length === 0 && <li className="p-3 text-sm text-white/40">No secrets yet.</li>}
           {project.secrets.map((s) => (
@@ -284,6 +356,40 @@ export function SecretsTab({ project }: { project: Project }) {
         </ul>
       </div>
     </div>
+  );
+}
+
+// ── saved tests ──────────────────────────────────────────────────────────────
+
+/** Fake-room tests Kojy keeps for this bot and runs again after changes. */
+function SavedTests({ projectId }: { projectId: string }) {
+  const utils = trpc.useUtils();
+  const tests = trpc.projects.roomTests.useQuery({ id: projectId }, { refetchInterval: 15_000 });
+  const del = trpc.projects.deleteRoomTest.useMutation({ onSuccess: () => void utils.projects.roomTests.invalidate({ id: projectId }) });
+  return (
+    <section className="space-y-2">
+      <h2 className="text-sm font-medium text-white">Saved tests</h2>
+      <p className="text-xs text-white/40">When a feature works, Kojy saves a short test for it and runs them all again after every change, so features that worked keep working. Ask Kojy to “save a test for …” or “run the saved tests”.</p>
+      {tests.data?.length === 0 && <p className="text-xs text-white/35">No saved tests yet.</p>}
+      <ul className="divide-y divide-white/5 border border-white/5 rounded-lg empty:hidden">
+        {tests.data?.map((t) => (
+          <li key={t.id} className="p-3 flex items-start gap-3 text-sm">
+            <span className={t.lastResult === "passed" ? "text-[#49dcb5]" : t.lastResult === "failed" ? "text-red-300" : "text-white/30"} title={t.lastResult ?? "not run yet"}>
+              {t.lastResult === "passed" ? "✓" : t.lastResult === "failed" ? "✗" : "•"}
+            </span>
+            <span className="flex-1 min-w-0">
+              <span className="text-white/80">{t.name}</span>
+              <span className="block text-[11px] text-white/35 truncate">
+                {t.events} event{t.events === 1 ? "" : "s"}{t.expect.length ? ` · expects “${t.expect.join("”, “")}”` : ""}{t.moderator ? "" : " · without moderator rights"}
+                {t.lastRunAt ? ` · last run ${new Date(t.lastRunAt).toLocaleString()}` : ""}
+              </span>
+            </span>
+            <button className="text-xs text-red-400/70 hover:text-red-400" disabled={del.isPending}
+              onClick={() => { if (window.confirm(`Delete the test “${t.name}”?`)) del.mutate({ id: projectId, testId: t.id }); }}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -334,6 +440,7 @@ export function SettingsTab({ project }: { project: Project }) {
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="max-w-xl space-y-8">
+        <SavedTests projectId={project.id} />
         <section className="space-y-2">
           <h2 className="text-sm font-medium text-white">Upload code</h2>
           <p className="text-xs text-white/40">

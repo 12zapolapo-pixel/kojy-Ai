@@ -125,9 +125,15 @@ const activeLoops = new Map<string, BotLoopState>();
 
 // Room activity for the analytics pages (batched writes to bot_activity).
 let activity: ActivityRecorder | null = null;
-function recordActivity(state: BotLoopState, kind: string, user?: { id: string; username: string } | null): void {
+/** "!dance now" → "!dance": only the command word is kept, never the rest of the message. */
+export function commandWord(message: string): string | null {
+  const m = /^([!/])([A-Za-z][A-Za-z0-9_-]{0,30})(?:\s|$)/.exec(message.trim());
+  return m ? `${m[1]}${m[2]!.toLowerCase()}` : null;
+}
+
+function recordActivity(state: BotLoopState, kind: string, user?: { id: string; username: string } | null, extra?: { amount?: number | null; detail?: string | null }): void {
   activity ??= new ActivityRecorder(db, 5000, (err) => log.warn({ err }, "Could not save bot activity"));
-  activity.record({ orgId: state.orgId, source: "bot", sourceId: state.botDbId, kind, actorId: user?.id ?? null, actorName: user?.username ?? null });
+  activity.record({ orgId: state.orgId, source: "bot", sourceId: state.botDbId, kind, actorId: user?.id ?? null, actorName: user?.username ?? null, amount: extra?.amount ?? null, detail: extra?.detail ?? null });
 }
 
 async function notifyBotOwner(state: BotLoopState, type: "bot_error" | "bot_offline", title: string, body: string): Promise<void> {
@@ -465,10 +471,10 @@ async function runBotLoop(
 
   client.on("event", (event: HighriseEvent) => {
     state.messageCount += 1;
-    if (event._type === "ChatEvent" && event.user.id !== client.sessionMetadata?.user_id) recordActivity(state, event.whisper ? "whisper" : "chat", event.user);
+    if (event._type === "ChatEvent" && event.user.id !== client.sessionMetadata?.user_id) recordActivity(state, event.whisper ? "whisper" : "chat", event.user, { detail: commandWord(event.message) });
     else if (event._type === "UserJoinedEvent") recordActivity(state, "join", event.user);
     else if (event._type === "UserLeftEvent") recordActivity(state, "leave", event.user);
-    else if (event._type === "TipReactionEvent") recordActivity(state, "tip", event.sender);
+    else if (event._type === "TipReactionEvent") recordActivity(state, "tip", event.sender, { amount: event.item.type === "gold" ? event.item.amount : null });
     else if (event._type === "EmoteEvent") recordActivity(state, "emote", event.user);
 
     broadcastBotEvent(state.botId, {

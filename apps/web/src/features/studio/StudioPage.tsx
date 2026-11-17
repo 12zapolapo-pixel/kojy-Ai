@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import clsx from "clsx";
-import { trpc, type RouterOutputs } from "../../lib/trpc";
+import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
 import { ChatTab } from "../projects/ChatTab";
 import { Header, CodeTab, ConsoleTab, SecretsTab, SettingsTab } from "../projects/ProjectPage";
 import { DataTab } from "../projects/DataTab";
@@ -81,11 +81,12 @@ function BotList({ bots, loading, selected }: { bots: BotItem[]; loading: boolea
 
 // ── chat + panel layout (panel below the chat on narrow screens) ─────────────
 
-function Split({ chat, panel, panelTabs, active }: {
-  chat: React.ReactNode; panel: React.ReactNode; panelTabs?: React.ReactNode; active?: string | undefined;
+function Split({ chat, panel, panelTabs, active, chatFocus }: {
+  chat: React.ReactNode; panel: React.ReactNode; panelTabs?: React.ReactNode; active?: string | undefined; chatFocus?: number | undefined;
 }) {
   const [mobileView, setMobileView] = useState<"chat" | "panel">("chat");
   useEffect(() => { if (active) setMobileView("panel"); }, [active]);
+  useEffect(() => { if (chatFocus) setMobileView("chat"); }, [chatFocus]);
   return (
     <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
       <div className="lg:hidden flex border-b border-white/5 text-xs">
@@ -109,6 +110,7 @@ function PythonBot({ id }: { id: string }) {
   const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 4000 });
   const [panel, setPanel] = useState<Panel>("console");
   const [kojyPanel, setKojyPanel] = useState<string | undefined>();
+  const [chatFocus, setChatFocus] = useState<number | undefined>();
 
   if (project.isLoading) return <p className="p-6 text-sm text-white/40">Loading…</p>;
   if (project.isError || !project.data) {
@@ -120,6 +122,10 @@ function PythonBot({ id }: { id: string }) {
     );
   }
   const p = project.data;
+  /** "Ask Kojy" on a console error: a message in this bot's chat (shown on narrow screens too). */
+  const askKojy = (text: string) => {
+    void trpcClient.projects.chatSend.mutate({ id: p.id, text }).then(() => setChatFocus(Date.now())).catch(() => undefined);
+  };
   const showPanel = (name: string) => {
     if (PANELS.some((x) => x.id === name)) { setPanel(name as Panel); setKojyPanel(`${name}-${Date.now()}`); }
   };
@@ -129,6 +135,7 @@ function PythonBot({ id }: { id: string }) {
       <Header project={p} />
       <Split
         active={kojyPanel}
+        chatFocus={chatFocus}
         chat={<ChatTab key={p.id} project={p} onPanel={showPanel} />}
         panelTabs={
           <div className="flex gap-1 px-3 border-b border-white/5 overflow-x-auto">
@@ -141,7 +148,7 @@ function PythonBot({ id }: { id: string }) {
           </div>
         }
         panel={
-          panel === "console" ? <ConsoleTab key={`c-${p.id}`} project={p} />
+          panel === "console" ? <ConsoleTab key={`c-${p.id}`} project={p} onAskKojy={askKojy} />
           : panel === "code" ? <CodeTab key={`k-${p.id}`} project={p} />
           : panel === "data" ? <DataTab key={`d-${p.id}`} projectId={p.id} />
           : panel === "secrets" ? <SecretsTab key={`s-${p.id}`} project={p} />
@@ -273,9 +280,10 @@ function KojyMemory() {
   const [note, setNote] = useState("");
   const add = trpc.studio.addMemory.useMutation({ onSuccess: () => { setNote(""); void utils.studio.memories.invalidate(); } });
   const del = trpc.studio.deleteMemory.useMutation({ onSuccess: () => void utils.studio.memories.invalidate() });
+  const pin = trpc.studio.pinMemory.useMutation({ onSuccess: () => void utils.studio.memories.invalidate() });
   return (
     <div className="h-full overflow-y-auto p-4 space-y-3">
-      <p className="text-xs text-white/45">Kojy saves short lessons as it works and reads them before every task. Remove anything wrong, or teach it something yourself.</p>
+      <p className="text-xs text-white/45">Kojy saves short lessons as it works and reads them before every task. What you teach and what you pin (📌) is always read; Kojy's own notes are read newest first until there's no more room. Remove anything wrong, or teach it something yourself.</p>
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (note.trim()) add.mutate({ content: note.trim() }); }}>
         <input value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} placeholder="e.g. My room's theme is a beach club; keep messages short and fun."
           className="flex-1 bg-white/[0.03] border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white/85 focus:outline-none focus:border-[#49dcb5]/40" />
@@ -284,8 +292,13 @@ function KojyMemory() {
       {memories.data?.length === 0 && <p className="text-sm text-white/40">Nothing yet — Kojy learns as it fixes and builds things.</p>}
       <ul className="space-y-1.5">
         {memories.data?.map((m) => (
-          <li key={m.id} className="flex items-start gap-2 text-sm text-white/75 border border-white/8 rounded-lg px-3 py-2">
-            <span className="flex-1">{m.content}<span className="block text-[10px] text-white/30 mt-0.5">{m.bot ? `About ${m.bot}` : "All bots"} · {new Date(m.createdAt).toLocaleDateString()}</span></span>
+          <li key={m.id} className={clsx("flex items-start gap-2 text-sm border border-white/8 rounded-lg px-3 py-2", m.read ? "text-white/75" : "text-white/40")}>
+            <span className="flex-1">{m.content}<span className="block text-[10px] text-white/30 mt-0.5">
+              {m.bot ? `About ${m.bot}` : "All bots"} · {m.source === "owner" ? "taught by you" : "saved by Kojy"} · {new Date(m.createdAt).toLocaleDateString()}
+              {!m.read && <span className="text-amber-300/70"> · not read right now (older note — pin it to keep it)</span>}
+            </span></span>
+            <button title={m.pinned ? "Unpin" : "Pin: always read this"} disabled={pin.isPending} onClick={() => pin.mutate({ id: m.id, pinned: !m.pinned })}
+              className={clsx("text-xs", m.pinned ? "opacity-100" : "opacity-30 hover:opacity-80")}>📌</button>
             <button title="Forget this" onClick={() => del.mutate({ id: m.id })} className="text-white/30 hover:text-red-300 text-xs">✕</button>
           </li>
         ))}

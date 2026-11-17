@@ -25,9 +25,14 @@ import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
 import {
   ProjectFileError, MAX_UPLOAD_BYTES, ensureProjectDir, removeProjectDir, listFiles, readProjectFile,
   writeProjectFile, deleteProjectPath, extractZip, zipProject, detectEntrypoint, readLogs, cleanRelPath, removeSnapshots, listSnapshots, restoreSnapshot, BOT_TEMPLATES,
+  snapshotUnlessRecent, compareSnapshot,
 } from "@kojyai/shared/projects";
 import { listDatabases, describeDatabase, readTable } from "./data.js";
-import { listThread, addToThread, agentProgress } from "./chat.js";
+import { listThread, addToThread, agentProgress, noteOwnerEdit } from "./chat.js";
+
+/** Undo label for the owner's own edits; one snapshot per editing session of this length. */
+const OWNER_EDIT_REASON = "Before your edits in the code editor";
+const OWNER_EDIT_SNAPSHOT_GAP_MS = 10 * 60_000;
 
 const { botProjects, projectSecrets, projectMessages } = schema;
 
@@ -174,6 +179,7 @@ export const projectsRouter = router({
     await ctx.db.delete(projectMessages).where(eq(projectMessages.projectId, project.id));
     await ctx.db.delete(schema.agentMemories).where(eq(schema.agentMemories.projectId, project.id));
     await ctx.db.delete(schema.agentWorkLog).where(eq(schema.agentWorkLog.thread, `project:${project.id}`));
+    await ctx.db.delete(schema.roomTests).where(eq(schema.roomTests.projectId, project.id));
     await ctx.db.delete(botProjects).where(eq(botProjects.id, project.id));
     removeProjectDir(project.uuid);
     removeSnapshots(project.uuid);
@@ -189,6 +195,8 @@ export const projectsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
       await zipThrottle(ctx.user.id);
+      // An upload replaces the code: keep the old version so it can be undone.
+      files(() => snapshotUnlessRecent(project.uuid, "Before uploading new code", 0));
       const result = await filesAsync(() => extractZip(project.uuid, Buffer.from(input.zipBase64, "base64")));
       let detected: string | null = null;
       if (!project.entrypoint) {
@@ -197,6 +205,7 @@ export const projectsRouter = router({
       } else {
         await ctx.db.update(botProjects).set({ updatedAt: new Date() }).where(eq(botProjects.id, project.id));
       }
+      await noteOwnerEdit(ctx.db, project.id, `The owner uploaded new code (${result.written} files). Files you read before may have changed: read them again.`);
       return { ...result, entrypoint: detected ?? project.entrypoint };
     }),
 
@@ -214,14 +223,20 @@ export const projectsRouter = router({
     .input(projectId.extend({ path: relPath, content: z.string().max(1024 * 1024) }))
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
-      files(() => writeProjectFile(project.uuid, input.path, input.content));
+      const rel = files(() => cleanRelPath(input.path));
+      files(() => snapshotUnlessRecent(project.uuid, OWNER_EDIT_REASON, OWNER_EDIT_SNAPSHOT_GAP_MS));
+      files(() => writeProjectFile(project.uuid, rel, input.content));
       await ctx.db.update(botProjects).set({ updatedAt: new Date() }).where(eq(botProjects.id, project.id));
-      return { success: true, path: cleanRelPath(input.path) };
+      await noteOwnerEdit(ctx.db, project.id, `The owner edited ${rel} in the code editor. Read it again before changing it; don't undo their change.`);
+      return { success: true, path: rel };
     }),
 
   deleteFile: permittedProc("bots:update").input(projectId.extend({ path: relPath })).mutation(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
-    files(() => deleteProjectPath(project.uuid, input.path));
+    const rel = files(() => cleanRelPath(input.path));
+    files(() => snapshotUnlessRecent(project.uuid, OWNER_EDIT_REASON, OWNER_EDIT_SNAPSHOT_GAP_MS));
+    files(() => deleteProjectPath(project.uuid, rel));
+    await noteOwnerEdit(ctx.db, project.id, `The owner deleted ${rel} in the code editor.`);
     return { success: true };
   }),
 
@@ -263,12 +278,12 @@ export const projectsRouter = router({
   // ── chat with the coder AI ─────────────────────────────────────────────────
 
   /** Messages after `afterId` (poll it), what the AI is doing now, and its state. */
-  chatList: permittedProc("bots:read").input(projectId.extend({ afterId: z.number().int().min(0).optional() }))
+  chatList: permittedProc("bots:read").input(projectId.extend({ afterId: z.number().int().min(0).optional(), beforeId: z.number().int().min(1).optional() }))
     .query(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
-      const thread = await listThread(ctx.db, `project:${project.id}`, input.afterId);
+      const thread = await listThread(ctx.db, `project:${project.id}`, input.afterId, input.beforeId);
       return {
-        agentState: project.agentState,
+        agentState: project.agentState, orgId: project.orgId,
         progress: project.agentState === "working" ? await agentProgress(project.uuid) : null,
         ...thread,
       };
@@ -318,6 +333,21 @@ export const projectsRouter = router({
       await ctx.db.update(projectMessages).set({ data: { ...data, card: { ...data.card, resolved: true } } }).where(eq(projectMessages.id, row.id));
       await addToThread(ctx.db, `project:${project.id}`, project.id, "user", "event", `The owner approved the plan "${data.card?.title ?? ""}". Go ahead and build it.`);
       await control(project.uuid, "agent");
+      return { success: true };
+    }),
+
+  /** The owner declined Kojy's plan: nothing is built and the chat stops waiting (no AI is used). */
+  chatRejectPlan: permittedProc("bots:update").input(projectId.extend({ messageId: z.number().int() }))
+    .mutation(async ({ ctx, input }) => {
+      const project = await loadProject(ctx, input.id);
+      const [row] = await ctx.db.select().from(projectMessages)
+        .where(and(eq(projectMessages.id, input.messageId), eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.kind, "plan"))).limit(1);
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "That plan is gone" });
+      const data = (row.data ?? {}) as { card?: { title?: string; resolved?: boolean } };
+      if (data.card?.resolved) return { success: true };
+      await ctx.db.update(projectMessages).set({ data: { ...data, card: { ...data.card, resolved: true, rejected: true } } }).where(eq(projectMessages.id, row.id));
+      await addToThread(ctx.db, `project:${project.id}`, project.id, "user", "event", `The owner declined the plan "${data.card?.title ?? ""}". Don't build it.`);
+      if (project.agentState === "waiting") await ctx.db.update(botProjects).set({ agentState: "idle" }).where(eq(botProjects.id, project.id));
       return { success: true };
     }),
 
@@ -375,6 +405,28 @@ export const projectsRouter = router({
     const project = await loadProject(ctx, input.id);
     return files(() => listSnapshots(project.uuid));
   }),
+
+  /** Fake-room tests Kojy saved for this bot (re-run after changes). */
+  roomTests: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
+    const project = await loadProject(ctx, input.id);
+    const rows = await ctx.db.select().from(schema.roomTests).where(eq(schema.roomTests.projectId, project.id)).orderBy(asc(schema.roomTests.id));
+    return (rows as (typeof schema.roomTests.$inferSelect)[]).map((t) => ({
+      id: t.id, name: t.name, events: t.events.length, expect: t.expect, moderator: t.moderator, lastResult: t.lastResult, lastRunAt: t.lastRunAt,
+    }));
+  }),
+
+  deleteRoomTest: permittedProc("bots:update").input(projectId.extend({ testId: z.number().int() })).mutation(async ({ ctx, input }) => {
+    const project = await loadProject(ctx, input.id);
+    await ctx.db.delete(schema.roomTests).where(and(eq(schema.roomTests.id, input.testId), eq(schema.roomTests.projectId, project.id)));
+    return { success: true };
+  }),
+
+  /** What restoring a snapshot would change (shown before the owner confirms). */
+  snapshotDiff: permittedProc("bots:read").input(projectId.extend({ snapshotId: z.string().regex(/^\d+$/) }))
+    .query(async ({ ctx, input }) => {
+      const project = await loadProject(ctx, input.id);
+      return files(() => compareSnapshot(project.uuid, input.snapshotId));
+    }),
 
   restoreSnapshot: permittedProc("bots:update").input(projectId.extend({ snapshotId: z.string().regex(/^\d+$/) }))
     .mutation(async ({ ctx, input }) => {

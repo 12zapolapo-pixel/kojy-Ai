@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -34,6 +35,25 @@ REPORTED_EVENTS = {
 }
 
 
+COMMAND = re.compile(r"^[!/]([A-Za-z][A-Za-z0-9_-]{0,30})(?:\s|$)")
+
+
+def command_word(message) -> str | None:
+    """'!dance now' -> '!dance'. Only the command word is reported, never the rest of the message."""
+    if not isinstance(message, str):
+        return None
+    match = COMMAND.match(message.strip())
+    return f"{message.strip()[0]}{match.group(1).lower()}" if match else None
+
+
+def tip_gold(tip) -> int | None:
+    """The gold in a tip (a CurrencyItem of type gold), else None."""
+    if getattr(tip, "type", None) != "gold":
+        return None
+    amount = getattr(tip, "amount", None)
+    return int(amount) if isinstance(amount, (int, float)) and amount >= 0 else None
+
+
 def install_activity_reporter(bot) -> None:
     """Report room activity to the runner on fd 3 (one JSON line per event).
 
@@ -48,9 +68,14 @@ def install_activity_reporter(bot) -> None:
         return  # not started by the KojyAI runner
     out = os.fdopen(3, "w", buffering=1)
 
-    def emit(kind, user=None):
+    def emit(kind, user=None, amount=None, detail=None):
         try:
-            out.write(json.dumps({"k": kind, "id": getattr(user, "id", None), "n": getattr(user, "username", None)}) + "\n")
+            event = {"k": kind, "id": getattr(user, "id", None), "n": getattr(user, "username", None)}
+            if amount is not None:
+                event["a"] = amount
+            if detail:
+                event["d"] = detail
+            out.write(json.dumps(event) + "\n")
         except Exception:
             pass
 
@@ -62,7 +87,15 @@ def install_activity_reporter(bot) -> None:
 
         def make(original, kind=kind):
             async def wrapper(*args, **kwargs):
-                emit(kind, args[0] if args else None)
+                amount, detail = None, None
+                try:
+                    if kind == "tip":
+                        amount = tip_gold(args[2] if len(args) > 2 else kwargs.get("tip"))
+                    elif kind in ("chat", "whisper"):
+                        detail = command_word(args[1] if len(args) > 1 else kwargs.get("message"))
+                except Exception:
+                    pass
+                emit(kind, args[0] if args else None, amount, detail)
                 return await original(*args, **kwargs)
             return wrapper
 

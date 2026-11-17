@@ -75,6 +75,9 @@ interface WsStore {
   // narrow `artifact` using their own imported ComposerArtifact type when reading it.
   lastDelegationEvent: { type: "delegation_status"; sessionUuid: string; taskStatus: string; message: string; botId?: string; scriptUuid?: string; ts: number; projectId?: string; artifact?: unknown } | null;
 
+  /** The newest "a Kojy chat changed" nudge (the open chat fetches right away). */
+  lastChatUpdate: { thread: string; ts: number } | null;
+
   // Actions
   connect:               () => void;
   disconnect:            () => void;
@@ -115,6 +118,7 @@ export const useWsStore = create<WsStore>()(
     subscribedSims: new Set(),
     subscribedDelegations: new Set(),
     lastDelegationEvent: null,
+    lastChatUpdate: null,
 
     connect: () => {
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -382,6 +386,10 @@ function dispatchEvent(event: ServerEvent, set: any, get: () => WsStore): void {
 
     case "error":
       console.error("[WS Error]", event.code, event.message);
+      break;
+
+    case "chat_update":
+      set({ lastChatUpdate: { thread: event.thread, ts: Date.now() } });
       break;
 
     case "delegation_status":
