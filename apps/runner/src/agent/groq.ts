@@ -67,6 +67,15 @@ const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY.tri
 const GROQ_SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
 const GROQ_FAST = process.env.AGENT_FALLBACK_MODEL ?? process.env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
 const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);
+/**
+ * Output room on models with no per-minute token budget (Gemini, a gateway
+ * without <NAME>_TOKENS_PER_MINUTE): enough for a whole file in one
+ * write_file. Budgeted models keep AGENT_MAX_OUTPUT_TOKENS, which a request
+ * has to reserve out of their minute.
+ */
+const LONG_OUTPUT_TOKENS = Number(process.env.AGENT_LONG_OUTPUT_TOKENS ?? 8192);
+/** History sent when the AI that will answer takes long chats (no per-request limit). */
+const LONG_HISTORY_TOKENS = Number(process.env.AGENT_LONG_HISTORY_TOKENS ?? 24_000);
 
 /**
  * More models through OpenAI-compatible endpoints, each switched on by its
@@ -257,6 +266,18 @@ const cool = (lane: Lane, ms: number, why: string, kind: CoolKind = "error") => 
 const isCooling = (lane: Lane) => (coolUntil.get(lane.id) ?? 0) > Date.now();
 const DAILY = /per day|TPD|RPD|quota|RESOURCE_EXHAUSTED|daily/i;
 
+/**
+ * How much history to send with the next step: more when the first AI that
+ * can answer right now takes long chats (Gemini), `base` otherwise (sized for
+ * Mistral's and Groq's free plans). A request that turns out too big is
+ * retried smaller, so guessing high costs one retry at most.
+ */
+export function historyBudget(base: number): number {
+  const now = Date.now();
+  const next = LANES.find((l) => (coolUntil.get(l.id) ?? 0) <= now);
+  return next && !Number.isFinite(next.maxRequestTokens) ? Math.max(base, LONG_HISTORY_TOKENS) : base;
+}
+
 export interface ChatOptions {
   messages: ChatMessage[];
   tools: ToolSpec[];
@@ -284,7 +305,8 @@ export function contentText(content: unknown): string | null {
 
 const TOO_LARGE = /context_length|context length|maximum context|too large|too long|exceeds the maximum number of tokens/i;
 
-export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
+/** `truncated`: the answer hit the output limit, so a tool call's arguments may be cut off. */
+export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string; truncated?: boolean }> {
   if (LANES.length === 0) {
     throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter key and model list in the server's .env.");
   }
@@ -350,7 +372,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       tools: opts.tools,
       tool_choice: "auto",
       temperature: 0.2,
-      max_tokens: maxTokens + 800, // headroom for reasoning tokens
+      // Headroom for reasoning tokens; much more where no minute budget is spent by it.
+      max_tokens: Number.isFinite(lane.tokensPerMinute) ? maxTokens + 800 : Math.max(maxTokens + 800, LONG_OUTPUT_TOKENS),
     };
     if (lane.provider === "groq") body.reasoning_effort = "medium";
 
@@ -374,7 +397,7 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
 
     if (res.ok) {
-      type Reply = { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      type Reply = { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] }; finish_reason?: string }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
       let data: Reply;
       try {
         data = await res.json() as Reply;
@@ -395,7 +418,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
         log.warn({ lane: lane.label }, `${lane.label} answered with nothing — trying the next AI`);
         continue;
       }
-      return { message: { role: "assistant", content, ...(toolCalls ? { tool_calls: toolCalls } : {}) }, model: lane.model };
+      const truncated = data.choices?.[0]?.finish_reason === "length";
+      return { message: { role: "assistant", content, ...(toolCalls ? { tool_calls: toolCalls } : {}) }, model: lane.model, truncated };
     }
 
     const text = await res.text().catch(() => "");

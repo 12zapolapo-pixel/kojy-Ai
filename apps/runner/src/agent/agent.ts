@@ -29,7 +29,7 @@ import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/s
 import { listFiles, resolveInside } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
-import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
+import { chat, configuredLanes, estimateTokens, historyBudget, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
 import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, type PartOutcome } from "./taskMemory.js";
@@ -121,7 +121,6 @@ export const JSBOT_PREFIX = "jsbot-";
 export class Agent {
   private active = new Map<string, AbortController>();
   private again = new Set<string>();
-  private autofixLog = new Map<string, number[]>();
 
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
     supervisor.onCrash = (uuid, streak, tail) => void this.onCrash(uuid, streak, tail);
@@ -340,10 +339,11 @@ export class Agent {
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
 
         let message: ChatMessage | undefined;
-        // Too big for the plan → try again with less history (twice).
-        for (let budget = HISTORY_TOKENS; !message; budget = Math.floor(budget / 2)) {
+        let truncated = false;
+        // Too big for the plan → try again with less history (down to a quarter of the usual).
+        for (let budget = historyBudget(HISTORY_TOKENS); !message; budget = Math.floor(budget / 2)) {
           try {
-            ({ message } = await chat({
+            ({ message, truncated = false } = await chat({
               messages: await this.buildMessages(scope, budget), tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`),
             }));
@@ -358,11 +358,12 @@ export class Agent {
         let pause = false;
         for (const call of calls) {
           let args: Record<string, unknown> = {};
-          try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* reported below */ }
+          let broken = false;
+          try { args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>; } catch { broken = true; }
           await this.progress(uuid, describeCall(call.function.name, args));
-          const refusal = automated ? automaticRefusal(automated, call.function.name, args, currentText) : null;
-          const result: ToolResult = refusal
-            ? { ok: false, output: refusal, summary: automated === "crash" ? "Not allowed in an automatic fix" : "Needs the owner's approval first" }
+          const refusal = broken ? null : automated ? automaticRefusal(automated, call.function.name, args, currentText) : null;
+          const result: ToolResult = broken ? brokenCall(call.function.name, call.function.arguments, truncated)
+            : refusal ? { ok: false, output: refusal, summary: automated === "crash" ? "Not allowed in an automatic fix" : "Needs the owner's approval first" }
             : await runTool(call.function.name, args);
           await this.add(scope, "tool", result.output, result.cardKind ?? (result.card ? "secret_request" : "tool"), {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
@@ -495,15 +496,16 @@ export class Agent {
     if (!configuredLanes().length) return; // no AI key of any kind
 
     const now = Date.now();
-    const recent = (this.autofixLog.get(uuid) ?? []).filter((t) => now - t < 24 * 3600_000);
-    if (recent.length >= AUTOFIX_PER_DAY) return;
-    // A fix that didn't hold gets another try, but not in a tight loop.
     const thread = `project:${project.id}`;
+    // At most AUTOFIX_PER_DAY a day, counted from the chat (so a runner restart doesn't reset it).
+    const today = await this.db.select({ id: projectMessages.id }).from(projectMessages)
+      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.kind, "crash"), gt(projectMessages.createdAt, new Date(now - 24 * 3600_000))))
+      .limit(AUTOFIX_PER_DAY);
+    if (today.length >= AUTOFIX_PER_DAY) return;
+    // A fix that didn't hold gets another try, but not in a tight loop.
     const [last] = await this.db.select({ id: projectMessages.id }).from(projectMessages)
       .where(and(eq(projectMessages.thread, thread), eq(projectMessages.kind, "crash"), gt(projectMessages.createdAt, new Date(now - AUTOFIX_GAP_MS)))).limit(1);
     if (last) return;
-    recent.push(now);
-    this.autofixLog.set(uuid, recent);
 
     const frozen = excerpt.includes("BotFrozenError");
     // V-03: the output is the bot's (and so possibly a room visitor's) text:
@@ -575,6 +577,24 @@ export function pairToolCalls(msgs: ChatMessage[]): ChatMessage[] {
     out.push(m);
   }
   return out;
+}
+
+/**
+ * A tool call whose arguments aren't complete JSON. Usually the answer ran
+ * out of room mid-call (a long write_file), so the file content is cut off:
+ * running the tool would write half a file, or fail with a confusing
+ * "Invalid path". Tell the AI what happened and how to do it instead.
+ */
+export function brokenCall(name: string, args: string, truncated: boolean): ToolResult {
+  const cutOff = truncated || !args.trim().endsWith("}");
+  return {
+    ok: false,
+    output: cutOff
+      ? `Your ${name} call was cut off: the answer hit the length limit before its arguments were complete (${args.length} characters arrived), so nothing was done. `
+        + "Make it smaller: change files with edit_file, or write a big file in parts — write_file with the first part, then write_file with append: true for each next part (under about 150 lines each)."
+      : `Your ${name} call's arguments weren't valid JSON, so nothing was done. Send the call again with valid JSON arguments.`,
+    summary: cutOff ? `${name} was cut off (too long for one answer)` : `${name} had broken arguments`,
+  };
 }
 
 function shrinkArgs(json: string): string {

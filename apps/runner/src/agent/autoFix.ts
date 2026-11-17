@@ -74,7 +74,9 @@ export function automaticRefusal(kind: AutomatedKind, tool: string, args: Record
   if (isPersistentData(rel)) return no(`changing the bot's saved data (${rel})`);
   if (DEPENDENCY_FILE.test(rel)) return no(`changing the bot's dependencies (${rel})`);
   const before = tool === "edit_file" ? String(args.old_text ?? "") : currentText(rel);
-  const after = tool === "edit_file" ? String(args.new_text ?? "") : String(args.content ?? "");
+  // An append keeps what's there: compare the whole file before and after.
+  const after = tool === "edit_file" ? String(args.new_text ?? "")
+    : args.append === true ? `${before}\n${String(args.content ?? "")}` : String(args.content ?? "");
   const risks = addedRisks(before, after);
   return risks.length ? no(`adding code for ${risks.join(" or ")}`) : null;
 }

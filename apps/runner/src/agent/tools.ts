@@ -19,7 +19,7 @@ import {
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { BOTCHECK, LAUNCHER } from "../supervisor.js";
-import { runRoomTest } from "./mockRoom.js";
+import { runRoomTest, parseEvents, EVENT_TYPES } from "./mockRoom.js";
 import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
 import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js";
@@ -63,12 +63,24 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("search_code", "Search all text files for a regular expression; returns file:line matches.", { pattern: str("regex, e.g. def on_chat|os.environ") , folder: str("optional folder") }, ["pattern"]),
   fn("edit_file", "Replace an exact piece of text in a file (must match exactly once, including indentation). Best way to change code.",
     { path: str("file path"), old_text: str("exact current text"), new_text: str("replacement") }, ["path", "old_text", "new_text"]),
-  fn("write_file", "Create a file or replace a whole file. Use edit_file for small changes to existing files.",
-    { path: str("file path"), content: str("full file content") }, ["path", "content"]),
+  fn("write_file", "Create a file or replace a whole file. Use edit_file for small changes to existing files. For a long file, write it in parts of under ~150 lines: the first part normally, then each next part with append: true.",
+    { path: str("file path"), content: str("full file content, or the next part when append is true"), append: { type: "boolean", description: "add content to the end of the file instead of replacing it" } }, ["path", "content"]),
   fn("delete_file", "Delete a file.", { path: str("file path") }, ["path"]),
   fn("check_code", "Compile every .py file and import the bot's entrypoint in the bot's Python environment (installs requirements.txt changes first). Shows errors with tracebacks."),
-  fn("test_in_room", "Run a copy of the bot for a few seconds in a fake Highrise room (real room and data are untouched). User 'tester' joins (optional) and says the chat lines. Returns what the bot did and any errors.",
-    { chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" }, join: { type: "boolean" }, seconds: { type: "integer" } }, ["chat"]),
+  fn("test_in_room", "Run a copy of the bot for a few seconds in a fake Highrise room (real room and data are untouched) and see what it does. Things happen in this order: join (tester joins), events, then chat lines from tester. Use events for anything besides tester chatting: tips, whispers, DMs, emotes, reactions, people leaving, or commands from the room owner (user \"owner\"). Set moderator false to check what happens when the bot isn't a moderator. Returns what the bot did and any errors.",
+    {
+      chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" },
+      join: { type: "boolean" },
+      events: { type: "array", description: "e.g. [{\"type\":\"tip\",\"amount\":100}, {\"type\":\"chat\",\"user\":\"owner\",\"text\":\"!addword bad\"}, {\"type\":\"leave\"}]",
+        items: { type: "object", properties: {
+          type: { type: "string", enum: [...EVENT_TYPES] },
+          user: str("tester (default), owner (the room owner) or any name"),
+          text: str("for chat, whisper, dm"), amount: { type: "integer", description: "gold, for tip" },
+          emote: str("emote id for emote; clap/heart/thumbs/wave/wink for reaction"),
+        }, required: ["type"] } },
+      moderator: { type: "boolean", description: "the bot is a moderator in the test room (default true)" },
+      seconds: { type: "integer" },
+    }),
   fn("find_env_vars", "Find the environment variables (secrets/settings) the code reads, and which are already set."),
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
@@ -253,14 +265,18 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       case "write_file": {
         const rel = cleanRelPath(s(args.path));
         const file = resolveInside(uuid, rel);
-        const content = s(args.content);
+        const append = args.append === true;
+        const before = append && existsSync(file) ? readFileSync(file, "utf8") : "";
+        const content = append ? before + (before && !before.endsWith("\n") ? "\n" : "") + s(args.content) : s(args.content);
         if (content.length > MAX_EDIT_BYTES) return { ok: false, output: "Content is over 1 MB.", summary: `${rel} too big` };
         const existed = existsSync(file);
         ensureSnapshot(ctx);
         mkdirSync(path.dirname(file), { recursive: true });
         writeFileSync(file, content);
         ctx.changedFiles.add(rel);
-        return { ok: true, output: existed ? "File replaced." : "File created.", summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)` };
+        const lines = content.split("\n").length;
+        if (append) return { ok: true, output: `Added to the end of ${rel}; it now has ${lines} lines.`, summary: `Added to ${rel} (now ${lines} lines)` };
+        return { ok: true, output: existed ? "File replaced." : "File created.", summary: `${existed ? "Rewrote" : "Created"} ${rel} (${lines} lines)` };
       }
 
       case "delete_file": {
@@ -303,11 +319,13 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       case "test_in_room": {
         if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
+        const events = parseEvents(args.events);
+        if (!chat.length && !events.length && args.join !== true) return { ok: false, output: "Give chat lines, events, or join: true to test something.", summary: "Nothing to test" };
         const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
         const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
         const r = await runRoomTest({
           uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat,
-          join: args.join === true, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
+          join: args.join === true, events, moderator: args.moderator !== false, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
         });
         const verdict = !r.connected ? "The bot never connected to the test room."
           : r.exitedEarly ? `The bot crashed during the test (exit code ${r.exitCode}).`
@@ -318,7 +336,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           r.errors.length ? `Errors:\n${r.errors.join("\n")}` : "",
           `Console (last lines):\n${r.output.slice(-40).join("\n")}`,
         ].filter(Boolean).join("\n\n");
-        const replies = r.actions.filter((a) => !a.startsWith("(")).length;
+        const replies = r.actions.filter((a) => !a.startsWith("(") || a.startsWith("(refused")).length;
         const ok = r.connected && !r.exitedEarly && r.errors.length === 0;
         return { ok, output: clip(output, 8000), summary: `Tested in a fake room: ${ok ? "no errors" : r.exitedEarly ? "crashed" : r.connected ? "errors" : "didn't connect"}, ${replies} bot actions` };
       }
@@ -480,9 +498,31 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
   }
 }
 
+/** Room in the instructions for saved lessons (they're paid on every step). */
+export const MEMORY_CHARS = Number(process.env.AGENT_MEMORY_CHARS ?? 3000);
+
+/**
+ * The lessons Kojy reads before every step: this bot's own first, then the
+ * ones for all bots, newest first, as many as fit MEMORY_CHARS — so an old
+ * lesson isn't dropped just because 15 newer ones exist. Oldest first in the
+ * result, the order they were learned.
+ */
+export function pickMemories(rows: { id: number; content: string; projectId: number | null }[], projectId: number, maxChars = MEMORY_CHARS): string[] {
+  const mine = rows.filter((r) => r.projectId === projectId).sort((a, b) => b.id - a.id);
+  const all = rows.filter((r) => r.projectId === null).sort((a, b) => b.id - a.id);
+  const picked: typeof rows = [];
+  let used = 0;
+  for (const r of [...mine, ...all]) {
+    if (used + r.content.length > maxChars) continue;
+    used += r.content.length + 3;
+    picked.push(r);
+  }
+  return picked.sort((a, b) => a.id - b.id).map((r) => r.content);
+}
+
 export async function loadMemories(db: Database, project: { orgId: number; id: number }): Promise<string[]> {
-  const rows = await db.select({ content: agentMemories.content, projectId: agentMemories.projectId }).from(agentMemories)
+  const rows = await db.select({ id: agentMemories.id, content: agentMemories.content, projectId: agentMemories.projectId }).from(agentMemories)
     .where(eq(agentMemories.orgId, project.orgId)).orderBy(asc(agentMemories.id));
-  return rows.filter((r) => r.projectId === null || r.projectId === project.id).slice(-15).map((r) => r.content);
+  return pickMemories(rows, project.id);
 }
 

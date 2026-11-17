@@ -32,6 +32,14 @@ import { listThread, addToThread, agentProgress, runnerOnline } from "./chat.js"
 const { botProjects, projectSecrets, projectMessages } = schema;
 
 const MAX_PROJECTS_PER_ORG = 20;
+
+/** How Kojy should test a starter bot, in words it passes to test_in_room. */
+function templateTest(t: (typeof BOT_TEMPLATES)[number]): string {
+  const parts = [`chat: ${t.tryChat.join(", ")}`];
+  if (t.join) parts.unshift("join: true");
+  if (t.tryEvents.length) parts.push(`events: ${JSON.stringify(t.tryEvents)}`);
+  return parts.join("; ");
+}
 /** Set by the runner itself — a secret with one of these names would break the bot's environment. */
 const RESERVED_KEYS = /^(PATH|HOME|LANG|VIRTUAL_ENV|PYTHON\w*|LD_\w+|KOJY_\w+)$/;
 
@@ -147,7 +155,7 @@ export const projectsRouter = router({
       const asks = input.description?.trim();
       if (template || asks) {
         const intro = template
-          ? `This bot was created from the ${template.name} template (${template.description}).${asks ? ` I'd like these changes: ${asks}` : ""} Briefly tell me what it does, ${asks ? "make the changes (plan first if they're big), " : ""}test it in the fake room (try: ${template.tryChat.join(", ")}), then ask me for the secrets it needs.`
+          ? `This bot was created from the ${template.name} template (${template.description}).${asks ? ` I'd like these changes: ${asks}` : ""} Briefly tell me what it does, ${asks ? "make the changes (plan first if they're big), " : ""}test it in the fake room (${templateTest(template)}), then ask me for the secrets it needs.`
           : `Build a new Highrise bot called "${input.name}": ${asks}\n\nStart small: write a working first version (Python, highrise-bot-sdk), set the entrypoint, check it and test it in the fake room. Then ask me for the secrets it needs (at least HIGHRISE_ROOM_ID and HIGHRISE_BOT_TOKEN).`;
         await addToThread(ctx.db, `project:${row!.id}`, row!.id, "user", "text", intro);
         await control(uuid, "agent").catch(() => undefined); // no runner/Redis: the chat waits

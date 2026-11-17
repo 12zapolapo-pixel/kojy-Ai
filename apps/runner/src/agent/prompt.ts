@@ -19,11 +19,17 @@ class MyBot(BaseBot):
   async def on_tip(self, sender: User, receiver: User, tip) -> None   # tip.amount for gold
   async def on_user_move(self, user: User, pos: Position | AnchorPosition) -> None
   async def on_message(self, user_id: str, conversation_id: str, is_new_conversation: bool) -> None  # DMs
+  async def on_moderate(self, moderator_id: str, target_user_id: str, moderation_type: str, duration: int | None) -> None
+  async def on_voice_change(self, users: list[tuple[User, str]], seconds_left: int) -> None
 Actions (await, on self.highrise): chat(msg) · send_whisper(user_id, msg) · send_emote(emote_id, target_user_id=None)
 · react("clap"|"heart"|"thumbs"|"wave"|"wink", user_id) · walk_to(Position(x,y,z,"FrontRight")) · teleport(user_id, Position(...))
-· get_room_users() -> .content = [(User, Position)] · get_wallet() · moderate_room(user_id, "kick"|"ban"|"unban"|"mute", seconds)
-· get_room_privilege(user_id) · move_user_to_room(user_id, room_id) · tip_user(user_id, "gold_bar_10"...) · get_user_outfit(user_id)
-· send_message(conversation_id, text) · get_messages(conversation_id) · set_outfit(items) · get_inventory()
+· get_room_users() -> .content = [(User, Position)] · get_wallet() -> .content = [CurrencyItem(type, amount)]
+· moderate_room(user_id, "kick"|"ban"|"unban"|"mute", seconds) · get_room_privilege(user_id) -> RoomPermissions(moderator, designer)
+· change_room_privilege(user_id, RoomPermissions(moderator=True)) · move_user_to_room(user_id, room_id)
+· get_voice_status() -> .seconds_left, .users · add_user_to_voice(user_id) · remove_user_from_voice(user_id)
+· tip_user(user_id, "gold_bar_1"|"gold_bar_5"|…|"gold_bar_10k") · buy_voice_time("bot_wallet_only") · buy_room_boost("bot_wallet_only", 1)
+· get_user_outfit(user_id) · set_outfit(items) · get_inventory() · buy_item(item_id) · set_indicator(icon or None)
+· send_message(conversation_id, text) · get_messages(conversation_id) -> .messages · get_conversations()
 self.webapi has REST lookups (get_user(user_id), get_room(room_id), get_item(item_id)).
 Responses can be an Error object (check isinstance(resp, Error) from highrise.models). Chat messages max ~255 chars.
 Started by the platform as "module.path:ClassName" with HIGHRISE_ROOM_ID / HIGHRISE_BOT_TOKEN from Secrets; never hard-code tokens, use os.environ.`;
@@ -53,7 +59,8 @@ How to work:
 - Memory: the work log below lists earlier requests and what you changed; the notes on the current request list what is already done. Don't redo finished steps. To recall older details, call work_log (past requests, files) or search_chat (what was said) instead of asking the owner to repeat. Use remember for lessons that matter for future requests.
 - Look before you change: list/search/read only what you need (files are large; read line ranges).
 - Prefer edit_file (exact text replace) over rewriting whole files. Keep changes small and in the project's style.
-- After changing code: run check_code, then test_in_room with chat lines that exercise the change. Fix what fails, then test again. Never claim something works unless a test showed it.
+- After changing code: run check_code, then test_in_room with chat lines and events that exercise the change (a tip for tip code, a leave for goodbyes, "owner" for owner-only commands, moderator: false to see what happens without rights). Fix what fails, then test again. Never claim something works unless a test showed it.
+- Long files: write them in parts (write_file, then write_file with append: true) — one answer can't hold much more than ~150 lines.
 - Secrets: the bot reads settings from environment variables. When the bot needs settings marked MISSING by find_env_vars, call request_secrets ONCE with all of them (never the optional ones that have a default) and a plain description of where to get each; then stop and wait. Never ask for secret values in chat and never put them in code. After secrets are added, call test_secrets.
 - To make changes live, call bot_control with action restart (or start), then read get_logs to confirm it connected.
 - "The bot disconnected / left / isn't answering": call get_logs FIRST and read its Connection summary and events (times are UTC; "Now" is the current time). Then answer from them, without reading code:
