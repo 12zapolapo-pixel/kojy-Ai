@@ -48,6 +48,9 @@
     },
     "./error-reporting": {
       "import": "./src/error-reporting/index.ts"
+    },
+    "./bothost": {
+      "import": "./src/bothost/index.ts"
     }
   },
   "scripts": {

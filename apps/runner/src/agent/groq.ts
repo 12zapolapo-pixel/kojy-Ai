@@ -54,7 +54,8 @@ const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGEN
   .map((k) => k?.trim()).filter(usable))];
 
 const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/$/, "");
-const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,mistral-large-2512").split(",").map((s) => s.trim()).filter(Boolean);
+// Large 3 (mistral-large-2512) is refused on the free plan ("not available in your subscription tier").
+const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,codestral-latest").split(",").map((s) => s.trim()).filter(Boolean);
 const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY.trim() : "";
 
 /** Mistral's free plan: about one request per second… */
@@ -86,6 +87,7 @@ export const GATEWAYS: { name: string; label: string; base?: string }[] = [
   { name: "SAMBANOVA", label: "SambaNova", base: "https://api.sambanova.ai/v1" },
   { name: "GITHUB_MODELS", label: "GitHub Models", base: "https://models.github.ai/inference" },
   { name: "OPENROUTER", label: "OpenRouter", base: "https://openrouter.ai/api/v1" },
+  { name: "GONKAROUTER", label: "GonkaRouter", base: "https://api.gonkarouter.io/v1" },
 ];
 
 interface Lane {
@@ -203,6 +205,9 @@ export interface UsageSink {
   hincrby(key: string, field: string, by: number): Promise<unknown>;
   hset(key: string, field: string, value: string): Promise<unknown>;
   expire(key: string, seconds: number): Promise<unknown>;
+  /** With these two, models taken out of the configuration also leave the chat's list. */
+  hkeys?(key: string): Promise<string[]>;
+  hdel?(key: string, ...fields: string[]): Promise<unknown>;
 }
 export type CoolKind = "rate_limited" | "out_of_quota" | "refused" | "unavailable" | "error";
 export interface LaneState {
@@ -226,6 +231,15 @@ function publishLane(lane: Lane, kind: CoolKind | null, reason: string): void {
 export function setUsageSink(sink: UsageSink | null): void {
   usageSink = sink;
   for (const lane of LANES) publishLane(lane, null, "");
+  // A model removed from .env would otherwise stay in the AI models circle for good.
+  if (!sink?.hkeys || !sink.hdel) return;
+  const configured = new Set(LANES.map((l) => l.id));
+  void sink.hkeys("ai_lanes")
+    .then((ids) => {
+      const gone = ids.filter((id) => !configured.has(id));
+      return gone.length && sink.hdel ? sink.hdel("ai_lanes", ...gone) : undefined;
+    })
+    .catch(() => undefined);
 }
 
 function recordUsage(lane: Lane, d: { req?: number; tokensIn?: number; tokensOut?: number; fail?: number }): void {
@@ -266,13 +280,17 @@ export interface ChatOptions {
  * the owner, and stored as it came it showed up in the chat as raw JSON.
  */
 export function contentText(content: unknown): string | null {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return null;
-  const text = content.map((c) => {
-    if (typeof c === "string") return c;
-    if (c && typeof c === "object" && (c as { type?: unknown }).type === "text") return String((c as { text?: unknown }).text ?? "");
-    return "";
-  }).join("");
+  let text: string;
+  if (typeof content === "string") text = content;
+  else if (Array.isArray(content)) {
+    text = content.map((c) => {
+      if (typeof c === "string") return c;
+      if (c && typeof c === "object" && (c as { type?: unknown }).type === "text") return String((c as { text?: unknown }).text ?? "");
+      return "";
+    }).join("");
+  } else return null;
+  // Some models (MiniMax, GLM) put their thinking in the answer as <think>…</think>: the owner sees only the answer.
+  text = text.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
   return text || null;
 }
 
@@ -280,7 +298,7 @@ const TOO_LARGE = /context_length|context length|maximum context|too large|too l
 
 export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
   if (LANES.length === 0) {
-    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter key and model list in the server's .env.");
+    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter/GonkaRouter key and model list in the server's .env.");
   }
   const maxTokens = opts.maxTokens ?? Number(process.env.AGENT_MAX_OUTPUT_TOKENS ?? 1200);
   const size = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools)) + maxTokens;

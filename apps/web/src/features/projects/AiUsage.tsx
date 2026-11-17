@@ -15,7 +15,7 @@ type Model = AiUsageData["models"][number];
 
 const PROVIDER: Record<string, string> = {
   mistral: "Mistral", gemini: "Gemini", groq: "Groq",
-  litellm: "LiteLLM", cerebras: "Cerebras", sambanova: "SambaNova", github_models: "GitHub Models", openrouter: "OpenRouter",
+  litellm: "LiteLLM", cerebras: "Cerebras", sambanova: "SambaNova", github_models: "GitHub Models", openrouter: "OpenRouter", gonkarouter: "GonkaRouter",
 };
 
 export function formatTokens(n: number): string {

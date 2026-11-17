@@ -8,7 +8,8 @@ import { trpc } from "../../lib/trpc";
 
 const PAGE = 50;
 
-export function DataTab({ projectId }: { projectId: string }) {
+/** `hostLabel`: set when the bot runs on a bot host, where its saved data lives. */
+export function DataTab({ projectId, hostLabel }: { projectId: string; hostLabel?: string | null }) {
   const sources = trpc.projects.dataSources.useQuery({ id: projectId });
   const [db, setDb] = useState<string | null>(null);
   const [table, setTable] = useState<string | null>(null);
@@ -24,14 +25,22 @@ export function DataTab({ projectId }: { projectId: string }) {
     { enabled: !!db && !!table, refetchInterval: 15000 },
   );
 
+  const away = hostLabel ? (
+    <p className="px-4 py-2 text-xs text-amber-300/80 border-b border-white/5">
+      This bot runs on {hostLabel}, where it saves its data. What&apos;s shown here is from when it last ran on KojyAI; it&apos;s brought up to date when the bot moves back.
+    </p>
+  ) : null;
+
   if (sources.isLoading) return <p className="p-6 text-sm text-white/40">Loading…</p>;
   if (sources.isError) return <p className="p-6 text-sm text-red-400">{sources.error.message}</p>;
   if (!sources.data?.length) {
-    return <p className="p-6 text-sm text-white/40">No SQLite files (.db / .sqlite) in this project yet. They appear here once the bot creates them.</p>;
+    return <>{away}<p className="p-6 text-sm text-white/40">No SQLite files (.db / .sqlite) in this project yet. They appear here once the bot creates them.</p></>;
   }
 
   return (
-    <div className="h-full flex min-h-0">
+    <div className="h-full flex flex-col min-h-0">
+    {away}
+    <div className="flex-1 flex min-h-0">
       <aside className="w-56 shrink-0 border-r border-white/5 overflow-y-auto p-2 space-y-3 text-xs">
         {sources.data.length > 1 && (
           <select className="w-full bg-white/[0.03] border border-white/10 rounded px-2 py-1 text-white/80" value={db ?? ""}
@@ -81,6 +90,7 @@ export function DataTab({ projectId }: { projectId: string }) {
           </div>
         )}
       </section>
+    </div>
     </div>
   );
 }

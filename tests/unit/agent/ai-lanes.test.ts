@@ -199,6 +199,23 @@ describe("usage recorded for the chat's AI models circle", () => {
     for (const v of lanes.values()) expect(v).not.toMatch(/AQ\.fake|mstrl_fake/);
   });
 
+  it("models taken out of .env leave the list when the runner starts", async () => {
+    const ai = await load(true);
+    const sink = {
+      ...fakeSink(),
+      hkeys: async (k: string) => [...(sink.hashes.get(k)?.keys() ?? [])],
+      hdel: async (k: string, ...fields: string[]) => { for (const f of fields) sink.hashes.get(k)?.delete(f); },
+    };
+    // Left over from an earlier configuration.
+    await sink.hset("ai_lanes", "mistral:mistral-large-2512", "{}");
+    await sink.hset("ai_lanes", "openrouter:xingchen-agi/xing4.0-29b-a4b:free", "{}");
+    ai.setUsageSink(sink);
+    await flush();
+    const ids = [...sink.hashes.get("ai_lanes")!.keys()];
+    expect(ids).not.toContain("openrouter:xingchen-agi/xing4.0-29b-a4b:free");
+    expect(ids).toHaveLength(ai.configuredLanes().length);
+  });
+
   it("counts requests and tokens for the model that answered", async () => {
     const ai = await load(true);
     const sink = fakeSink();

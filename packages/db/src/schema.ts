@@ -855,11 +855,47 @@ export const botProjects = pgTable("bot_projects", {
   // Once a day Kojy reads the bot's errors and reports (AI only if there are any).
   dailyCheckup:  boolean("daily_checkup").default(false).notNull(),
   lastCheckupAt: ts("last_checkup_at"),
+  // Where the bot runs: no host = KojyAI's own server. Otherwise bot_hosts.id
+  // and the server's identifier there (no server yet = KojyAI is waiting for
+  // a free one; the bot keeps running here meanwhile).
+  hostId:        integer("host_id"),
+  hostServer:    varchar("host_server", { length: 64 }),
+  // What was last uploaded to that server, so only changed files are sent.
+  hostSync:      jsonb("host_sync").$type<HostSync>(),
   createdAt:     createdAt(),
   updatedAt:     updatedAt(),
 }, (t) => ({
   uuidIdx: uniqueIndex("bot_projects_uuid_idx").on(t.uuid),
   orgIdx:  index("bot_projects_org_idx").on(t.orgId),
+}));
+
+export interface HostSync {
+  /** The server these files went to. */
+  server: string;
+  /** Path → sha256 of what was uploaded (the bot's data files are not listed). */
+  files: Record<string, string>;
+  /** The bot's data/ and database files went up once (they then live on the host). */
+  dataUploaded: boolean;
+}
+
+// Outside bot hosts an org connected (Pterodactyl-style panels such as
+// Silly Development) where its Python bots can run instead of on KojyAI's
+// server. The panel API key is encrypted with ENCRYPTION_KEY and never sent
+// back to the browser.
+export const botHosts = pgTable("bot_hosts", {
+  id:          serial("id").primaryKey(),
+  orgId:       integer("org_id").notNull(),
+  createdBy:   integer("created_by").notNull(),
+  provider:    varchar("provider", { length: 32 }).notNull(),
+  // The account's name on the host, to show which account is connected.
+  account:     varchar("account", { length: 120 }).default("").notNull(),
+  apiKeyVault: text("api_key_vault").notNull(),
+  // The key's first characters (its public id on Silly Development).
+  keyHint:     varchar("key_hint", { length: 24 }).default("").notNull(),
+  createdAt:   createdAt(),
+  updatedAt:   updatedAt(),
+}, (t) => ({
+  orgIdx: index("bot_hosts_org_idx").on(t.orgId),
 }));
 
 // Environment variables handed to a project's process (HIGHRISE_ROOM_ID,

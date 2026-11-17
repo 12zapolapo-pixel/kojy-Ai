@@ -25,14 +25,15 @@ import { readFileSync } from "node:fs";
 import { and, desc, eq, gt, ne } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
-import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
+import { botHosts, botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
+import { botHostProvider } from "@kojyai/shared/bothost";
 import { listFiles, listSnapshots, resolveInside, restoreSnapshot, snapshotProject } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
 import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
-import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
+import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, announcesNextStep, MAX_NUDGES, NUDGE, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
 import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
@@ -252,8 +253,11 @@ export class Agent {
           this.db.select({ key: projectSecrets.key }).from(projectSecrets).where(eq(projectSecrets.projectId, project.id)),
           loadMemories(this.db, project),
         ]);
+        const [where] = await this.db.select({ hostId: botProjects.hostId, hostServer: botProjects.hostServer, provider: botHosts.provider })
+          .from(botProjects).leftJoin(botHosts, eq(botHosts.id, botProjects.hostId)).where(eq(botProjects.id, project.id)).limit(1);
+        const runsOn = where?.hostServer ? `${botHostProvider(where.provider ?? "")?.label ?? "a bot host"} (server ${where.hostServer})` : null;
         return systemPrompt({
-          projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status,
+          projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status, runsOn,
           secrets: secrets.map((x) => x.key), memories, fileCount: listFiles(project.uuid).filter((f) => !f.isDir).length,
         });
       },
@@ -300,6 +304,8 @@ export class Agent {
     const runTool = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
       MEMORY_TOOL_NAMES.has(name) ? runMemoryTool(name, args, { db: this.db, thread: scope.thread }) : scope.runTool(name, args);
 
+    // Kojy said what it would do next but didn't do it: told to go on (a few times in a row at most).
+    let nudges = 0;
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
         if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); outcome = "done"; ended = "stopped"; break; }
@@ -310,7 +316,7 @@ export class Agent {
         for (let budget = HISTORY_TOKENS; !message; budget = Math.floor(budget / 2)) {
           try {
             ({ message } = await chat({
-              messages: await this.buildMessages(scope, budget), tools, signal,
+              messages: [...await this.buildMessages(scope, budget), ...(nudges ? [{ role: "user" as const, content: NUDGE }] : [])], tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`, scope.orgId),
             }));
           } catch (err) {
@@ -319,7 +325,12 @@ export class Agent {
         }
         const calls = message.tool_calls ?? [];
         await this.add(scope, "assistant", message.content ?? "", "text", calls.length ? { toolCalls: calls } : undefined);
-        if (!calls.length) { outcome = "done"; break; }
+        if (!calls.length) {
+          if (nudges < MAX_NUDGES && announcesNextStep(message.content ?? "")) { nudges++; continue; }
+          outcome = "done";
+          break;
+        }
+        nudges = 0;
 
         let pause = false;
         for (const call of calls) {
