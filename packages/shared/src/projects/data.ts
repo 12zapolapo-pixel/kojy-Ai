@@ -7,6 +7,7 @@
  * data. Table names are only ever taken from the database's own table list.
  */
 
+import type * as SqliteModule from "node:sqlite";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
@@ -15,9 +16,9 @@ import { existsSync } from "node:fs";
 // @kojyai/shared/projects, which much code imports without needing SQLite
 // (and some tools, like vitest's resolver, can't load "node:sqlite" eagerly).
 type DatabaseSync = DatabaseSyncType;
-let sqlite: typeof import("node:sqlite") | null = null;
+let sqlite: typeof SqliteModule | null = null;
 const DatabaseSync = function (file: string, opts: { readOnly: boolean }): DatabaseSync {
-  sqlite ??= createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+  sqlite ??= createRequire(import.meta.url)("node:sqlite") as typeof SqliteModule;
   return new sqlite.DatabaseSync(file, opts);
 } as unknown as new (file: string, opts: { readOnly: boolean }) => DatabaseSync;
 import { listFiles, resolveInside, ProjectFileError } from "./files.js";
