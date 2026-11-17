@@ -293,6 +293,16 @@ export function restoreSnapshot(uuid: string, id: string, saveCurrentAs?: string
   return Object.keys(files).length;
 }
 
+/** Some files' text from a snapshot (missing → null; binary or too big → skipped). */
+export function readSnapshotFiles(uuid: string, id: string, paths: string[]): Record<string, string | null> {
+  if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
+  const file = path.join(SNAPSHOT_DIR, uuid, `${id}.zip`);
+  if (!existsSync(file)) throw new ProjectFileError("That snapshot no longer exists");
+  const want = new Set(paths);
+  const files = unzipSync(readFileSync(file), { filter: (f) => want.has(f.name) });
+  return Object.fromEntries(paths.map((p) => [p, files[p] && files[p].length <= 300_000 ? strFromU8(files[p]) : null]));
+}
+
 export function removeSnapshots(uuid: string): void {
   rmSync(path.join(SNAPSHOT_DIR, uuid), { recursive: true, force: true });
 }

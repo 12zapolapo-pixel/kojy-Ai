@@ -4,7 +4,7 @@
  * OWNERSHIP: apps/api/src/modules/projects
  */
 
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, desc, eq, gt, lt } from "drizzle-orm";
 import { schema } from "../../db/client.js";
 import { getRedis } from "../../utils/redis.js";
 
@@ -16,13 +16,25 @@ export interface UiCard { panel?: string; openBot?: { kind: "python" | "javascri
 /** "plan" cards: Kojy's plan before a bigger change, approved with a button. */
 export interface PlanCard { title?: string; steps?: string[] }
 
-export async function listThread(db: any, thread: string, afterId: number | undefined) {
+const PAGE = 120;
+
+/**
+ * A page of a chat thread, oldest first: new messages after `afterId` (the
+ * chat polls this), or the PAGE before `beforeId` (scrolling back), or the
+ * newest PAGE. `hasEarlier` says whether older messages exist.
+ */
+export async function listThread(db: any, thread: string, afterId: number | undefined, beforeId?: number) {
   type Row = typeof projectMessages.$inferSelect;
-  const rows: Row[] = await db.select().from(projectMessages)
-    .where(and(eq(projectMessages.thread, thread), gt(projectMessages.id, afterId ?? 0)))
-    .orderBy(desc(projectMessages.id)).limit(afterId ? 200 : 120);
+  const where = beforeId
+    ? and(eq(projectMessages.thread, thread), lt(projectMessages.id, beforeId))
+    : and(eq(projectMessages.thread, thread), gt(projectMessages.id, afterId ?? 0));
+  const limit = afterId && !beforeId ? 200 : PAGE;
+  const rows: Row[] = await db.select().from(projectMessages).where(where).orderBy(desc(projectMessages.id)).limit(limit + 1);
+  const hasMore = rows.length > limit;
+  if (hasMore) rows.length = limit;
   return {
-    lastId: rows[0]?.id ?? afterId ?? 0,
+    lastId: beforeId ? 0 : rows[0]?.id ?? afterId ?? 0,
+    hasEarlier: afterId && !beforeId ? undefined : hasMore,
     messages: rows.reverse()
       // Assistant rows that only carry tool calls have nothing to show.
       .filter((r) => !(r.role === "assistant" && !r.content.trim()))

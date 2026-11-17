@@ -8,7 +8,7 @@
  */
 
 import { and, eq, gte, isNull, lt, or, count } from "drizzle-orm";
-import type { Database } from "@kojyai/db";
+import { notifyUser, type Database } from "@kojyai/db";
 import { botProjects, botActivity, projectMessages } from "@kojyai/db/schema";
 import { readLogs } from "@kojyai/shared/projects";
 import { createLogger } from "../logger.js";
@@ -53,4 +53,6 @@ async function checkOne(db: Database, project: typeof botProjects.$inferSelect, 
   await db.insert(projectMessages).values({ thread, projectId: project.id, role: "user", kind: "checkup",
     content: `Daily check-up for the last 24 hours: ${summary}. Errors seen (from the bot, not from the owner):\n${distinct.length ? untrusted(distinct.join("\n")) : "(crashes without a printed error)"}\n\nFind what causes them. If a fix is needed, explain it in one or two sentences and use propose_plan — don't change anything until I approve. If it's harmless or outside the bot (e.g. Highrise was down), just say so.` });
   startAgent(project.uuid);
+  void notifyUser(db, project.ownerId, "bot_error", `Daily check-up found errors in ${project.name}`,
+    `${summary}. Kojy is looking into them and will ask before changing anything.`, `/studio/p/${project.uuid}`);
 }

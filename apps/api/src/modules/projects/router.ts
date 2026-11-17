@@ -11,7 +11,7 @@
  */
 
 import { z } from "zod";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gt, or } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { randomUUID } from "node:crypto";
 import { router, permittedProc, adminProc } from "../../trpc.js";
@@ -24,7 +24,7 @@ import { emitAuditLog } from "../../events/audit.js";
 import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
 import {
   ProjectFileError, MAX_UPLOAD_BYTES, ensureProjectDir, removeProjectDir, listFiles, readProjectFile,
-  writeProjectFile, deleteProjectPath, extractZip, zipProject, detectEntrypoint, readLogs, cleanRelPath, removeSnapshots, listSnapshots, restoreSnapshot, snapshotProject, hasCode, BOT_TEMPLATES,
+  writeProjectFile, deleteProjectPath, extractZip, zipProject, detectEntrypoint, readLogs, cleanRelPath, removeSnapshots, listSnapshots, restoreSnapshot, snapshotProject, hasCode, readSnapshotFiles, BOT_TEMPLATES,
 } from "@kojyai/shared/projects";
 import { listDatabases, describeDatabase, readTable } from "./data.js";
 import { listThread, addToThread, agentProgress, runnerOnline } from "./chat.js";
@@ -273,10 +273,10 @@ export const projectsRouter = router({
   // ── chat with the coder AI ─────────────────────────────────────────────────
 
   /** Messages after `afterId` (poll it), what the AI is doing now, and its state. */
-  chatList: permittedProc("bots:read").input(projectId.extend({ afterId: z.number().int().min(0).optional() }))
+  chatList: permittedProc("bots:read").input(projectId.extend({ afterId: z.number().int().min(0).optional(), beforeId: z.number().int().min(1).optional() }))
     .query(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
-      const thread = await listThread(ctx.db, `project:${project.id}`, input.afterId);
+      const thread = await listThread(ctx.db, `project:${project.id}`, input.afterId, input.beforeId);
       return {
         agentState: project.agentState,
         progress: project.agentState === "working" ? await agentProgress(project.uuid) : null,
@@ -326,6 +326,11 @@ export const projectsRouter = router({
       if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "That plan is gone" });
       const data = (row.data ?? {}) as { card?: { title?: string; resolved?: boolean } };
       if (data.card?.resolved) return { success: true };
+      // The owner asked for changes (or Kojy made a newer plan) since: approving this one would build the old plan.
+      const [newer] = await ctx.db.select({ id: projectMessages.id }).from(projectMessages)
+        .where(and(eq(projectMessages.thread, `project:${project.id}`), gt(projectMessages.id, row.id),
+          or(and(eq(projectMessages.role, "user"), eq(projectMessages.kind, "text")), eq(projectMessages.kind, "plan")))).limit(1);
+      if (newer) throw new TRPCError({ code: "CONFLICT", message: "This plan is out of date — you asked for changes after it. Approve Kojy's newer plan, or tell Kojy to go ahead." });
       await ctx.db.update(projectMessages).set({ data: { ...data, card: { ...data.card, resolved: true } } }).where(eq(projectMessages.id, row.id));
       await addToThread(ctx.db, `project:${project.id}`, project.id, "user", "event", `The owner approved the plan "${data.card?.title ?? ""}". Go ahead and build it.`);
       await control(project.uuid, "agent");
@@ -351,6 +356,35 @@ export const projectsRouter = router({
       id: r.id, request: r.request, status: r.status, summary: r.summary, files: r.files,
       steps: r.actions.length, failed: r.failed, startedAt: r.startedAt, updatedAt: r.updatedAt,
     }));
+  }),
+
+  /**
+   * What one request changed: each file before (the version Kojy saved when
+   * it started changing code) and after (the next saved version, or the code
+   * now). Plus that version's id, for "undo this request".
+   */
+  workChanges: permittedProc("bots:read").input(projectId.extend({ entryId: z.number().int() })).query(async ({ ctx, input }) => {
+    const project = await loadProject(ctx, input.id);
+    const [entry] = await ctx.db.select().from(schema.agentWorkLog)
+      .where(and(eq(schema.agentWorkLog.id, input.entryId), eq(schema.agentWorkLog.thread, `project:${project.id}`))).limit(1);
+    if (!entry) throw new TRPCError({ code: "NOT_FOUND", message: "That request is gone" });
+    return files(() => {
+      const snaps = listSnapshots(project.uuid).sort((a, b) => a.createdAt - b.createdAt);
+      const from = entry.startedAt.getTime() - 1000, to = entry.updatedAt.getTime() + 60_000;
+      const before = snaps.find((x) => x.createdAt >= from && x.createdAt <= to && x.reason.startsWith("Before Kojy"));
+      if (!before) return { snapshotId: null, afterLabel: "", files: [] };
+      const next = snaps.find((x) => x.createdAt > before.createdAt);
+      const paths = (entry.files as { path: string; change: string }[]).slice(0, 20).map((f) => f.path);
+      const old = readSnapshotFiles(project.uuid, before.id, paths);
+      const now = next ? readSnapshotFiles(project.uuid, next.id, paths) : Object.fromEntries(paths.map((p) => {
+        try { const f = readProjectFile(project.uuid, p); return [p, f.binary ? null : f.content]; } catch { return [p, null]; }
+      }));
+      return {
+        snapshotId: before.id,
+        afterLabel: next ? `the next saved version (${new Date(next.createdAt).toISOString().slice(0, 16).replace("T", " ")} UTC)` : "the code now",
+        files: paths.map((p) => ({ path: p, before: old[p] ?? null, after: now[p] ?? null })),
+      };
+    });
   }),
 
   chatStop: permittedProc("bots:update").input(projectId).mutation(async ({ ctx, input }) => {

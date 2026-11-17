@@ -1,6 +1,8 @@
 /**
  * Bot data viewer — read-only look into a project's own SQLite databases
- * (e.g. Japalo's data/bot.db: players, coins, warnings).
+ * (e.g. Japalo's data/bot.db: players, coins, warnings) and the JSON files
+ * bots save under data/ (every starter bot does: wallets.json, tips.json…),
+ * shown as tables. Editing JSON goes through the normal file save.
  * OWNERSHIP: apps/api/src/modules/projects
  *
  * Opened read-only with query_only on, so nothing here can change the bot's
@@ -8,14 +10,31 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { listFiles, resolveInside, ProjectFileError } from "@kojyai/shared/projects";
+import { jsonTable, cell } from "./dataJson.js";
 
 const DB_FILE = /\.(db|sqlite3?)$/i;
-const MAX_CELL = 2000;
+
+const JSON_FILE = /^data\/.+\.json$/i;
+const MAX_JSON_BYTES = 5 * 1024 * 1024;
 
 export function listDatabases(uuid: string): string[] {
-  return listFiles(uuid).filter((f) => !f.isDir && DB_FILE.test(f.path)).map((f) => f.path);
+  return listFiles(uuid).filter((f) => !f.isDir && (DB_FILE.test(f.path) || JSON_FILE.test(f.path))).map((f) => f.path)
+    .sort((a, b) => Number(JSON_FILE.test(a)) - Number(JSON_FILE.test(b)) || a.localeCompare(b));
+}
+
+
+function readJson(uuid: string, path: string): ReturnType<typeof jsonTable> {
+  const file = resolveInside(uuid, path);
+  if (!existsSync(file)) throw new ProjectFileError(`No such file: ${path}`);
+  if (statSync(file).size > MAX_JSON_BYTES) throw new ProjectFileError(`${path} is over 5 MB.`);
+  try {
+    return jsonTable(JSON.parse(readFileSync(file, "utf8")));
+  } catch (err) {
+    if (err instanceof ProjectFileError) throw err;
+    throw new ProjectFileError(`${path} isn't valid JSON right now (the bot may be writing it).`);
+  }
 }
 
 function open<T>(uuid: string, dbPath: string, fn: (db: DatabaseSync) => T): T {
@@ -46,15 +65,26 @@ function tableNames(db: DatabaseSync): string[] {
 }
 
 export function describeDatabase(uuid: string, dbPath: string) {
+  if (JSON_FILE.test(dbPath)) {
+    const t = readJson(uuid, dbPath);
+    return [{ name: dbPath.split("/").pop()!, rows: t.rows.length, columns: t.columns.map((c) => ({ name: c, type: "" })), kind: t.kind }];
+  }
   return open(uuid, dbPath, (db) => tableNames(db).map((name) => ({
     name,
     rows: Number((db.prepare(`SELECT COUNT(*) AS n FROM ${quote(name)}`).get() as { n: number | bigint }).n),
     columns: (db.prepare(`PRAGMA table_info(${quote(name)})`).all() as { name: string; type: string }[]).map((c) => ({ name: c.name, type: c.type })),
+    kind: "sqlite" as const,
   })));
 }
 
 /** A page of rows; `search` matches any column as text. */
 export function readTable(uuid: string, dbPath: string, table: string, offset: number, limit: number, search?: string) {
+  if (JSON_FILE.test(dbPath)) {
+    const t = readJson(uuid, dbPath);
+    const q = search?.toLowerCase();
+    const rows = q ? t.rows.filter((r) => r.some((c) => c !== null && String(c).toLowerCase().includes(q))) : t.rows;
+    return { columns: t.columns, rows: rows.slice(offset, offset + limit), total: rows.length };
+  }
   return open(uuid, dbPath, (db) => {
     if (!tableNames(db).includes(table)) throw new ProjectFileError(`No such table: ${table}`);
     const columns = (db.prepare(`PRAGMA table_info(${quote(table)})`).all() as { name: string }[]).map((c) => c.name);
@@ -67,11 +97,3 @@ export function readTable(uuid: string, dbPath: string, table: string, offset: n
   });
 }
 
-function cell(v: unknown): string | number | null {
-  if (v === null || v === undefined) return null;
-  if (typeof v === "number") return v;
-  if (typeof v === "bigint") return v.toString();
-  if (v instanceof Uint8Array) return `<${v.length} bytes>`;
-  const s = String(v);
-  return s.length > MAX_CELL ? `${s.slice(0, MAX_CELL)}…` : s;
-}
