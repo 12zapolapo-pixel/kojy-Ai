@@ -350,15 +350,19 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
           onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot and the work history.")) clear.mutate({ id: project.id }); }}>New chat</button>
       </div>
       {showUndo && (
-        <div className="absolute right-4 top-9 z-10 w-[26rem] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">
-          <p className="text-white/40 px-1 pb-1">Put the code back to how it was before a change (your bot's data is never touched). Preview first to see what would change.</p>
+        <div className="absolute right-4 top-full mt-1 z-10 w-[26rem] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1"
+          onKeyDown={(e) => { if (e.key === "Escape") setShowUndo(false); }}>
+          <div className="flex items-start gap-2 px-1 pb-1">
+            <p className="flex-1 text-white/40">Put the code back to how it was before a change (your bot's data is never touched). Preview first to see what would change.</p>
+            <button onClick={() => setShowUndo(false)} title="Close" aria-label="Close" className="text-white/40 hover:text-white">✕</button>
+          </div>
           {snapshots.isLoading && <p className="px-1 text-white/40">Loading…</p>}
           {snapshots.data?.length === 0 && <p className="px-1 text-white/40">No saved versions yet.</p>}
           {snapshots.data?.map((s) => (
             <div key={s.id} className="rounded hover:bg-white/[0.03]">
               <button onClick={() => setPreview(preview === s.id ? null : s.id)} className="w-full text-left px-2 py-1.5 text-white/70">
                 <span className="block truncate">{s.reason || "Saved version"}</span>
-                <span className="text-white/30">{new Date(s.createdAt).toLocaleString()} · {s.files} files · {preview === s.id ? "hide" : "preview"}</span>
+                <span className="text-white/30">{new Date(s.createdAt).toLocaleString()} · {s.files} file{s.files === 1 ? "" : "s"} · {preview === s.id ? "hide" : "preview"}</span>
               </button>
               {preview === s.id && (
                 <div className="px-2 pb-2 space-y-2">
