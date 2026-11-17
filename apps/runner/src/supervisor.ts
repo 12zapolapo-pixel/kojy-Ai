@@ -220,8 +220,12 @@ export class Supervisor {
     return env;
   }
 
-  private record(run: Running, kind: string, actorId?: string | null, actorName?: string | null): void {
-    this.activity.record({ orgId: run.project.orgId, source: "project", sourceId: run.project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null });
+  private record(run: Running, kind: string, actorId?: string | null, actorName?: string | null, extra?: { amount?: number | null; detail?: string | null }): void {
+    this.activity.record({
+      orgId: run.project.orgId, source: "project", sourceId: run.project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null,
+      amount: kind === "tip" && typeof extra?.amount === "number" ? extra.amount : null,
+      detail: (kind === "chat" || kind === "whisper") && typeof extra?.detail === "string" && /^[!/][a-z][a-z0-9_-]{0,30}$/.test(extra.detail) ? extra.detail : null,
+    });
   }
 
   private readActivity(run: Running): void {
@@ -234,8 +238,8 @@ export class Supervisor {
       partial = lines.pop() ?? "";
       for (const line of lines) {
         try {
-          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null };
-          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n);
+          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null; a?: number; d?: string };
+          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n, { amount: e.a ?? null, detail: e.d ?? null });
         } catch { /* not ours */ }
       }
     });

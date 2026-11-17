@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import clsx from "clsx";
-import { trpc, type RouterOutputs } from "../../lib/trpc";
+import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
 import { ChatTab } from "../projects/ChatTab";
 import { Header, CodeTab, ConsoleTab, SecretsTab, SettingsTab } from "../projects/ProjectPage";
 import { DataTab } from "../projects/DataTab";
@@ -81,11 +81,12 @@ function BotList({ bots, loading, selected }: { bots: BotItem[]; loading: boolea
 
 // ── chat + panel layout (panel below the chat on narrow screens) ─────────────
 
-function Split({ chat, panel, panelTabs, active }: {
-  chat: React.ReactNode; panel: React.ReactNode; panelTabs?: React.ReactNode; active?: string | undefined;
+function Split({ chat, panel, panelTabs, active, chatFocus }: {
+  chat: React.ReactNode; panel: React.ReactNode; panelTabs?: React.ReactNode; active?: string | undefined; chatFocus?: number | undefined;
 }) {
   const [mobileView, setMobileView] = useState<"chat" | "panel">("chat");
   useEffect(() => { if (active) setMobileView("panel"); }, [active]);
+  useEffect(() => { if (chatFocus) setMobileView("chat"); }, [chatFocus]);
   return (
     <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
       <div className="lg:hidden flex border-b border-white/5 text-xs">
@@ -109,6 +110,7 @@ function PythonBot({ id }: { id: string }) {
   const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 4000 });
   const [panel, setPanel] = useState<Panel>("console");
   const [kojyPanel, setKojyPanel] = useState<string | undefined>();
+  const [chatFocus, setChatFocus] = useState<number | undefined>();
 
   if (project.isLoading) return <p className="p-6 text-sm text-white/40">Loading…</p>;
   if (project.isError || !project.data) {
@@ -120,6 +122,10 @@ function PythonBot({ id }: { id: string }) {
     );
   }
   const p = project.data;
+  /** "Ask Kojy" on a console error: a message in this bot's chat (shown on narrow screens too). */
+  const askKojy = (text: string) => {
+    void trpcClient.projects.chatSend.mutate({ id: p.id, text }).then(() => setChatFocus(Date.now())).catch(() => undefined);
+  };
   const showPanel = (name: string) => {
     if (PANELS.some((x) => x.id === name)) { setPanel(name as Panel); setKojyPanel(`${name}-${Date.now()}`); }
   };
@@ -129,6 +135,7 @@ function PythonBot({ id }: { id: string }) {
       <Header project={p} />
       <Split
         active={kojyPanel}
+        chatFocus={chatFocus}
         chat={<ChatTab key={p.id} project={p} onPanel={showPanel} />}
         panelTabs={
           <div className="flex gap-1 px-3 border-b border-white/5 overflow-x-auto">
@@ -141,7 +148,7 @@ function PythonBot({ id }: { id: string }) {
           </div>
         }
         panel={
-          panel === "console" ? <ConsoleTab key={`c-${p.id}`} project={p} />
+          panel === "console" ? <ConsoleTab key={`c-${p.id}`} project={p} onAskKojy={askKojy} />
           : panel === "code" ? <CodeTab key={`k-${p.id}`} project={p} />
           : panel === "data" ? <DataTab key={`d-${p.id}`} projectId={p.id} />
           : panel === "secrets" ? <SecretsTab key={`s-${p.id}`} project={p} />

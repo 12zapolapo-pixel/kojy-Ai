@@ -192,9 +192,21 @@ function lineColor(l: LogLine): string {
 
 const STREAM_COLOR: Record<string, string> = { stderr: "text-red-300/90", system: "text-[#49dcb5]", stdin: "text-sky-300", stdout: "text-white/75" };
 
-export function ConsoleTab({ project }: { project: Project }) {
+const isErrorLine = (l: LogLine) => l.stream === "stderr" && /(traceback|error|exception|critical|^\s+(file|raise)\b|^\s*[|+])/i.test(l.line);
+/** The exception that ends a traceback, e.g. "KeyError: 'amy'" → "KeyError". */
+const EXCEPTION = /^\s*[|+ ]*([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt))\b/;
+
+/**
+ * The bot's console. onAskKojy: the "Ask Kojy" button on an error sends a
+ * chat message. It names only the error type and the time — never the bot's
+ * text — and Kojy reads the lines itself with get_logs, where they're data.
+ */
+export function ConsoleTab({ project, onAskKojy }: { project: Project; onAskKojy?: ((text: string) => void) | undefined }) {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [text, setText] = useState("");
+  const [filter, setFilter] = useState("");
+  const [errorsOnly, setErrorsOnly] = useState(false);
+  const [asked, setAsked] = useState<number | null>(null);
   const cursor = useRef<number | undefined>(undefined);
   const box = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -217,21 +229,57 @@ export function ConsoleTab({ project }: { project: Project }) {
     return () => { stopped = true; clearTimeout(timer); };
   }, [project.id]);
 
+  const shown = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return lines.filter((l) => (!errorsOnly || isErrorLine(l)) && (!q || l.line.toLowerCase().includes(q)));
+  }, [lines, filter, errorsOnly]);
+
   useEffect(() => {
     if (stick.current && box.current) box.current.scrollTop = box.current.scrollHeight;
-  }, [lines]);
+  }, [shown]);
+
+  const download = () => {
+    const body = lines.map((l) => `${new Date(l.ts).toISOString()} [${l.stream}] ${l.line}`).join("\n");
+    const url = URL.createObjectURL(new Blob([body], { type: "text/plain" }));
+    Object.assign(document.createElement("a"), { href: url, download: `${project.name.replace(/[^\w.-]+/g, "_") || "bot"}-console.txt` }).click();
+    URL.revokeObjectURL(url);
+  };
+
+  const ask = (l: LogLine, type: string) => {
+    if (!onAskKojy) return;
+    setAsked(l.ts);
+    const at = new Date(l.ts).toISOString().slice(11, 19);
+    onAskKojy(`The console showed a ${type} at ${at} UTC. Read it with get_logs, tell me what causes it, and how we can fix it.`);
+  };
 
   return (
     <div className="h-full flex flex-col min-h-0 p-3 gap-2">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <input className={`${input} py-1 text-xs flex-1 min-w-[8rem]`} placeholder="Search the console" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <label className="flex items-center gap-1.5 text-white/60 cursor-pointer">
+          <input type="checkbox" checked={errorsOnly} onChange={(e) => setErrorsOnly(e.target.checked)} /> Errors only
+        </label>
+        <button className={`${ghostBtn} text-xs py-1`} type="button" onClick={download} disabled={!lines.length} title="Download what's shown here as a text file">⬇ Download</button>
+      </div>
       <div ref={box} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}
         className="flex-1 min-h-0 overflow-y-auto bg-black/40 border border-white/5 rounded-lg p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">
         {lines.length === 0 && <span className="text-white/30">No output yet. Press Run to start the bot.</span>}
-        {lines.map((l, i) => (
-          <div key={i} className={lineColor(l)}>
-            <span className="text-white/20 select-none">{new Date(l.ts).toLocaleTimeString()} </span>
-            {l.stream === "stdin" ? "> " : ""}{l.line}
-          </div>
-        ))}
+        {lines.length > 0 && shown.length === 0 && <span className="text-white/30">Nothing matches.</span>}
+        {shown.map((l, i) => {
+          const ex = l.stream === "stderr" ? EXCEPTION.exec(l.line)?.[1] : undefined;
+          return (
+            <div key={i} className={lineColor(l)}>
+              <span className="text-white/20 select-none">{new Date(l.ts).toLocaleTimeString()} </span>
+              {l.stream === "stdin" ? "> " : ""}{l.line}
+              {ex && onAskKojy && (
+                <button type="button" onClick={() => ask(l, ex)} disabled={asked === l.ts}
+                  className="ml-2 px-1.5 rounded border border-[#49dcb5]/40 text-[#49dcb5] text-[10px] font-sans hover:bg-[#49dcb5]/10 disabled:opacity-40 select-none">
+                  {asked === l.ts ? "Asked ✓" : "Ask Kojy"}
+                </button>
+              )}
+            </div>
+          );
+        })}
       </div>
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (!text) return; send.mutate({ id: project.id, text }); setText(""); }}>
         <input className={`${input} font-mono`} placeholder={project.status === "running" ? "Type into the bot's console and press Enter" : "The bot isn't running"}
