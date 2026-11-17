@@ -20,10 +20,11 @@ import {
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { BOTCHECK, LAUNCHER } from "../supervisor.js";
-import { runRoomTest } from "./mockRoom.js";
+import { runRoomTest, normalizeEvents, chatToEvents, ROOM_EVENT_TYPES } from "./mockRoom.js";
 import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
 import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js";
+import { queryData, roomActivity } from "./dataTools.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -66,8 +67,20 @@ export const TOOL_SPECS: ToolSpec[] = [
     { path: str("file path"), content: str("full file content") }, ["path", "content"]),
   fn("delete_file", "Delete a file.", { path: str("file path") }, ["path"]),
   fn("check_code", "Compile every .py file and import the bot's entrypoint in the bot's Python environment (installs requirements.txt changes first). Shows errors with tracebacks."),
-  fn("test_in_room", "Run a copy of the bot for a few seconds in a fake Highrise room (real room and data are untouched). User 'tester' joins (optional) and says the chat lines. Returns what the bot did and any errors.",
-    { chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" }, join: { type: "boolean" }, seconds: { type: "integer" } }, ["chat"]),
+  fn("test_in_room", "Run a copy of the bot for a few seconds in a fake Highrise room (real room and data are untouched) and return what the bot did and any errors. Use `chat` for simple tests (user 'tester' says the lines); use `events` to test whispers, tips, emotes, joins, leaves or several users. Set moderator=false to check how the bot behaves without moderator rights.",
+    {
+      chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" },
+      join: { type: "boolean", description: "with chat: 'tester' joins first" },
+      events: {
+        type: "array", description: "what happens, in order (up to 12), e.g. [{type:'join',user:'amy'},{type:'tip',user:'amy',amount:50},{type:'whisper',user:'bob',message:'!balance'}]",
+        items: { type: "object", properties: {
+          type: { type: "string", enum: [...ROOM_EVENT_TYPES] }, user: str("username, default tester"), message: str("chat/whisper text"),
+          amount: { type: "integer", description: "tip gold" }, emote: str("emote id"), seconds: { type: "number", description: "wait length" },
+        }, required: ["type"] },
+      },
+      moderator: { type: "boolean", description: "is the bot a moderator in the test room (default true)" },
+      seconds: { type: "integer" },
+    }),
   fn("find_env_vars", "Find the environment variables (secrets/settings) the code reads, and which are already set."),
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
@@ -81,6 +94,10 @@ export const TOOL_SPECS: ToolSpec[] = [
     { query: str("word to search, or empty for a sample") }),
   fn("open_panel", "Show the owner a panel next to the chat: console (logs), code, data (the bot's database), secrets or settings.",
     { panel: { type: "string", enum: ["console", "code", "data", "secrets", "settings"] } }, ["panel"]),
+  fn("query_data", "Read the bot's own saved data (its SQLite database, read-only). Without sql: lists the databases, tables, columns and row counts (and any JSON data files). With sql: runs ONE SELECT and returns up to 50 rows. Use it to answer questions about players, coins, scores, warnings, or to check a data bug.",
+    { sql: str("one SELECT, e.g. SELECT name, coins FROM players ORDER BY coins DESC LIMIT 10"), db: str("database path if the bot has several, e.g. data/bot.db") }),
+  fn("room_activity", "This bot's room activity: chats, whispers, replies, joins, different visitors, tips (and gold), emotes, crashes, most used commands, top tippers.",
+    { days: { type: "integer", description: "1-90, default 7" } }),
   fn("remember", "Save one short lesson for the future (a fix that worked, how this bot is built). scope 'all' = useful for every bot.",
     { note: str("one sentence"), scope: { type: "string", enum: ["project", "all"] } }, ["note"]),
 ];
@@ -302,11 +319,14 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       case "test_in_room": {
         if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
+        const events = normalizeEvents(args.events);
+        const scenario = events.length ? events : chatToEvents(chat, args.join === true);
+        if (!scenario.length) return { ok: false, output: "Give chat lines or events to test with.", summary: "Can't test: nothing happens in the room" };
         const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
         const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
         const r = await runRoomTest({
-          uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat,
-          join: args.join === true, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
+          uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env,
+          events: scenario, moderator: args.moderator !== false, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
         });
         const verdict = !r.connected ? "The bot never connected to the test room."
           : r.exitedEarly ? `The bot crashed during the test (exit code ${r.exitCode}).`
@@ -462,6 +482,12 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         if (!["console", "code", "data", "secrets", "settings"].includes(panel)) return { ok: false, output: "Unknown panel.", summary: "Unknown panel" };
         return { ok: true, output: `The ${panel} panel is open next to the chat.`, summary: `Opened ${panel}`, cardKind: "ui", card: { panel } };
       }
+
+      case "query_data":
+        return await queryData(uuid, args);
+
+      case "room_activity":
+        return await roomActivity(ctx.db, ctx.project.id, args);
 
       case "remember": {
         const note = s(args.note).trim().slice(0, 300);

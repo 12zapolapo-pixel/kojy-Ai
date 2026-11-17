@@ -60,7 +60,7 @@ const RESUME_DELAY_MS = 20_000;
 const RESUME_WITHIN_MS = 30 * 60_000;
 
 /** Tools that only look at something: an older result is outdated once the same look is repeated. */
-const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat"]);
+const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat", "query_data", "room_activity"]);
 /** …and these, whatever their arguments: the newest always says more. */
 const NEWEST_WINS = new Set(["get_logs", "check_code"]);
 
@@ -541,7 +541,8 @@ function describeCall(name: string, args: Record<string, unknown>): string {
     case "test_secrets": return "Testing secrets…";
     case "bot_control": return `${String(args.action ?? "")} the bot…`;
     case "list_bots": return "Looking at your bots…";
-    case "analytics": return "Checking the numbers…";
+    case "analytics": case "room_activity": return "Checking the numbers…";
+    case "query_data": return "Looking at the bot's data…";
     case "server_status": return "Checking the server…";
     case "test_script": return "Testing the script…";
     case "write_script": return `Writing ${String(args.name ?? "a script")}…`;
