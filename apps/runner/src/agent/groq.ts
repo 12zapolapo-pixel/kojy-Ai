@@ -166,7 +166,15 @@ function budgetFreeAt(lane: Lane, size: number): number {
 /** When the lane can take a request of `size`: after its cooldown and once its minute budget allows. */
 const readyAt = (lane: Lane, size: number) => Math.max(coolUntil.get(lane.id) ?? 0, budgetFreeAt(lane, size));
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Waits `ms`, or less if `signal` aborts (the owner pressed Stop). */
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal?.aborted) return resolve();
+  const done = () => { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); };
+  const timer = setTimeout(done, ms);
+  signal?.addEventListener("abort", done, { once: true });
+});
+/** How long one AI request may take before the next AI is tried. */
+const REQUEST_TIMEOUT_MS = Number(process.env.AGENT_REQUEST_TIMEOUT_MS ?? 120_000);
 let lastMistralAt = 0;
 
 /**
@@ -314,7 +322,7 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
         attempt--; // a wait isn't a try
         const wait = Math.max(1, Math.ceil(soonest / 1000));
         opts.onWait?.(wait, "AI rate limit");
-        await sleep(wait * 1000);
+        await sleep(wait * 1000, opts.signal);
         continue;
       }
       if (smallerNow) {
@@ -331,7 +339,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
 
     if (lane.provider === "mistral") {
       const wait = lastMistralAt + MISTRAL_MIN_INTERVAL_MS - Date.now();
-      if (wait > 0) await sleep(wait);
+      if (wait > 0) await sleep(wait, opts.signal);
+      if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
       lastMistralAt = Date.now();
     }
 
@@ -345,14 +354,16 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     };
     if (lane.provider === "groq") body.reasoning_effort = "medium";
 
+    // Both: the owner's Stop, and a time limit so one hung AI doesn't hold the chat.
+    const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const res = await fetch(`${lane.base}/chat/completions`, {
       method: "POST",
-      signal: opts.signal ?? AbortSignal.timeout(120_000),
+      signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
       headers: { "content-type": "application/json", authorization: `Bearer ${lane.key}` },
       body: JSON.stringify(body),
     }).catch((err: Error) => {
       if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
-      cool(lane, 30_000, `${lane.label} couldn't be reached (${err.message})`, "unavailable");
+      cool(lane, 30_000, timeout.aborted ? `${lane.label} took over ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s to answer` : `${lane.label} couldn't be reached (${err.message})`, "unavailable");
       return null;
     });
     if (!res) continue;
@@ -363,7 +374,15 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
 
     if (res.ok) {
-      const data = await res.json() as { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      type Reply = { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      let data: Reply;
+      try {
+        data = await res.json() as Reply;
+      } catch (err) {
+        if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
+        cool(lane, 30_000, `${lane.label} sent a broken or unfinished answer (${(err as Error).message})`, "unavailable");
+        continue;
+      }
       const message = data.choices?.[0]?.message;
       if (!message) { cool(lane, 30_000, `${lane.label} returned an empty answer`); continue; }
       recordUsage(lane, { req: 1, tokensIn: data.usage?.prompt_tokens ?? 0, tokensOut: data.usage?.completion_tokens ?? 0 });

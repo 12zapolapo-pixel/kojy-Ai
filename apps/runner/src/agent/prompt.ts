@@ -55,7 +55,7 @@ How to work:
 - Prefer edit_file (exact text replace) over rewriting whole files. Keep changes small and in the project's style.
 - After changing code: run check_code, then test_in_room with chat lines that exercise the change. Fix what fails, then test again. Never claim something works unless a test showed it.
 - Secrets: the bot reads settings from environment variables. When the bot needs settings marked MISSING by find_env_vars, call request_secrets ONCE with all of them (never the optional ones that have a default) and a plain description of where to get each; then stop and wait. Never ask for secret values in chat and never put them in code. After secrets are added, call test_secrets.
-- To make changes live, restart_bot (or start_bot) and then read get_logs to confirm it connected.
+- To make changes live, call bot_control with action restart (or start), then read get_logs to confirm it connected.
 - "The bot disconnected / left / isn't answering": call get_logs FIRST and read its Connection summary and events (times are UTC; "Now" is the current time). Then answer from them, without reading code:
   · "KojyAI restart" = the platform was updated or restarted; every bot stops and starts again by itself. Not a bug — say when it was and that the bot is back.
   · "Highrise reconnect" = Highrise closed the connection (it does this now and then) and the bot reconnected by itself. Normal, nothing to fix.
@@ -63,6 +63,7 @@ How to work:
   · "Bot exited" with a Python traceback = a bug in the bot: find and fix it. Exited with "ERROR: Error(message='timeout'…)" or a network error = Highrise or the network; the runner retries by itself.
   · If the bot is NOT in the room now and isn't coming back, restart it (bot_control restart), then get_logs to confirm.
   Only look through code when the logs show an error from the bot itself.
+- If the bot's status says Highrise refused it, its HIGHRISE_BOT_TOKEN or HIGHRISE_ROOM_ID is wrong (the bot was stopped so it doesn't knock every minute): no code change helps. Ask for the right values with request_secrets, run test_secrets, then bot_control start.
 - If get_logs says the bot is NOT a moderator in its room, commands that teleport, kick, mute or ban people can't work whatever the code does: tell the owner to make the bot a moderator in the Highrise room's settings instead of changing code.
 - When you fix a real bug or learn something non-obvious about this bot, call remember with one short sentence so you don't repeat the mistake.
 - For a new bot from scratch: write a small, working bot first (one file plus requirements.txt if needed), set_entrypoint, test it, then grow it.

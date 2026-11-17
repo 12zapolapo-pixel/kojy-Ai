@@ -155,6 +155,46 @@ export class Agent {
     }
   }
 
+  /**
+   * A message the owner sent while the runner was down (a platform update
+   * restarts it) was saved, but nobody was listening for its "agent" signal —
+   * so the chat just went quiet. On boot, answer every chat whose newest
+   * message is still the owner's (sent in the last RESUME_WITHIN_MS).
+   * Run after resetStates(): chats it resumed end with Kojy's note.
+   */
+  async answerUnanswered(): Promise<string[]> {
+    const since = new Date(Date.now() - RESUME_WITHIN_MS);
+    const latest = await this.db.selectDistinctOn([projectMessages.thread], { thread: projectMessages.thread, role: projectMessages.role })
+      .from(projectMessages).where(gt(projectMessages.createdAt, since))
+      .orderBy(projectMessages.thread, desc(projectMessages.id));
+    const keys: string[] = [];
+    for (const row of latest) {
+      if (row.role !== "user") continue;
+      const key = await this.keyForThread(row.thread).catch(() => null);
+      if (key && !this.active.has(key)) keys.push(key);
+    }
+    if (keys.length) log.info({ count: keys.length }, "Answering messages sent while the runner was down");
+    for (const key of keys) setTimeout(() => void this.run(key), RESUME_DELAY_MS).unref();
+    return keys;
+  }
+
+  /** The control-message key for a thread ("project:<id>" → the bot's uuid, …), or null. */
+  private async keyForThread(thread: string): Promise<string | null> {
+    const [kind, idText] = thread.split(":");
+    const id = Number(idText);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    if (kind === "studio") return `${STUDIO_PREFIX}${id}`;
+    if (kind === "project") {
+      const [p] = await this.db.select({ uuid: botProjects.uuid }).from(botProjects).where(eq(botProjects.id, id)).limit(1);
+      return p?.uuid ?? null;
+    }
+    if (kind === "bot") {
+      const [b] = await this.db.select({ uuid: bots.uuid }).from(bots).where(eq(bots.id, id)).limit(1);
+      return b ? `${JSBOT_PREFIX}${b.uuid}` : null;
+    }
+    return null;
+  }
+
   private async resumeAfterRestart(uuid: string, projectId: number): Promise<void> {
     const scope = { thread: `project:${projectId}`, projectId };
     const rows = (await this.db.select({ id: projectMessages.id, role: projectMessages.role, kind: projectMessages.kind, content: projectMessages.content, createdAt: projectMessages.createdAt })
@@ -226,7 +266,7 @@ export class Agent {
     }
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, key)).limit(1);
     if (!project) return null;
-    const ctx: ToolContext = { db: this.db, supervisor: this.supervisor, project, snapshotted: false, changedFiles: new Set() };
+    const ctx: ToolContext = { db: this.db, supervisor: this.supervisor, project, snapshotted: false, changedFiles: new Set(), snapshotLabel: await this.snapshotLabel(`project:${project.id}`) };
     return {
       key, thread: `project:${project.id}`, projectId: project.id, tools: TOOL_SPECS,
       runTool: (name, args) => runTool(name, args, ctx),
@@ -242,6 +282,20 @@ export class Agent {
       },
       setState: async (state) => { await this.db.update(botProjects).set({ agentState: state }).where(eq(botProjects.id, project.id)); },
     };
+  }
+
+  /** "Before Kojy: <the owner's request>", for the Undo list. */
+  private async snapshotLabel(thread: string): Promise<string> {
+    try {
+      const rows = (await this.db.select({ role: projectMessages.role, kind: projectMessages.kind, content: projectMessages.content })
+        .from(projectMessages).where(eq(projectMessages.thread, thread)).orderBy(desc(projectMessages.id)).limit(300)).reverse();
+      const req = rows[requestIndex(rows)];
+      if (!req) return "Before Kojy's changes";
+      if (req.kind === "crash") return "Before Kojy's automatic crash fix";
+      if (req.kind === "checkup") return "Before Kojy's fix from the daily check-up";
+      const text = req.content.replace(/\s+/g, " ").trim();
+      return `Before Kojy: “${text.length > 90 ? `${text.slice(0, 89)}…` : text}”`;
+    } catch { return "Before Kojy's changes"; }
   }
 
   async run(uuid: string): Promise<void> {
@@ -314,6 +368,8 @@ export class Agent {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
           });
           if (result.pause) pause = true;
+          // Stop pressed during a slow tool (a test, an install): don't start the next one.
+          if (signal.aborted) break;
         }
         if (pause) { finalState = "waiting"; outcome = "waiting"; break; }
       }
@@ -327,6 +383,13 @@ export class Agent {
         }
       }
     } catch (err) {
+      if (signal.aborted) {
+        // The owner pressed Stop while the AI was answering or waiting: that's a stop, not an error.
+        await this.add(scope, "assistant", "Stopped.", "event");
+        outcome = "done";
+        ended = "stopped";
+        return outcome;
+      }
       const text = err instanceof AiUnavailableError ? err.message : `Something went wrong: ${(err as Error).message}`;
       if (!(err instanceof AiUnavailableError)) log.error({ err, uuid }, "Agent run failed");
       outcome = "done"; // an error is not a step limit: don't restart the request by itself

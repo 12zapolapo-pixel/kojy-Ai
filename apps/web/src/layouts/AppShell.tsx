@@ -42,7 +42,7 @@ import { useAuthStore } from "../state/authStore";
 import { useNotificationStore } from "../state/notificationStore";
 import { useBotStore } from "../state/botStore";
 import { useWsStore } from "../state/wsStore";
-import { NotificationDrawer } from "../components/NotificationDrawer";
+import { NotificationDrawer, NotificationPoller } from "../components/NotificationDrawer";
 import { CommandPalette } from "../components/CommandPalette";
 import clsx from "clsx";
 
@@ -230,6 +230,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <MobileBottomNav />
       </div>
 
+      <NotificationPoller />
       {/* Overlays */}
       {notifOpen   && <NotificationDrawer />}
       {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)} />}

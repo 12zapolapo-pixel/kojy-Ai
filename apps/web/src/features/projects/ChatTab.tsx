@@ -56,6 +56,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
   const navigate = useNavigate();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [state, setState] = useState<{ agentState: string; progress: string | null }>({ agentState: project?.agentState ?? "idle", progress: null });
+  const [runnerOnline, setRunnerOnline] = useState(true);
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -76,7 +77,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
     const poll = async () => {
       try {
         const afterId = lastId.current || undefined;
-        const res: { agentState: string; progress: string | null; lastId: number; messages: Msg[] } = pid
+        const res: { agentState: string; progress: string | null; runnerOnline: boolean; lastId: number; messages: Msg[] } = pid
           ? await trpcClient.projects.chatList.query({ id: pid, afterId })
           : jid ? await trpcClient.studio.jsChatList.query({ id: jid, afterId })
           : await trpcClient.studio.chatList.query({ afterId });
@@ -86,6 +87,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
         // A new "show the console" card from Kojy switches the panel (old ones don't).
         if (afterId) for (const m of fresh) if (m.kind === "ui" && m.card?.panel) onPanelRef.current?.(m.card.panel);
         lastId.current = Math.max(lastId.current, res.lastId);
+        setRunnerOnline(res.runnerOnline);
         setState((prev) => {
           if (prev.agentState === "working" && res.agentState !== "working") { void utils.projects.invalidate(); void utils.studio.invalidate(); }
           return { agentState: res.agentState, progress: res.progress };
@@ -172,6 +174,9 @@ export function ChatTab({ project, jsBot, onPanel }: {
       </div>
 
       <div className="border-t border-white/5 p-3 space-y-2">
+        {!runnerOnline && (
+          <p className="text-xs text-amber-300/90">Kojy is offline right now (the server is restarting, or the bot runner is down). Messages you send are kept, and Kojy answers them as soon as it's back.</p>
+        )}
         {error && <p className="text-xs text-red-400">{error}</p>}
         <form className="flex gap-2 items-end" onSubmit={(e) => { e.preventDefault(); void send(text); }}>
           {project && (
@@ -281,8 +286,8 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
           onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot and the work history.")) clear.mutate({ id: project.id }); }}>New chat</button>
       </div>
       {showUndo && (
-        <div className="absolute right-4 top-9 z-10 w-80 bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">
-          <p className="text-white/40 px-1 pb-1">Put the code back to how it was before a change (your bot's data is never touched):</p>
+        <div className="absolute right-4 top-9 z-10 w-96 max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">
+          <p className="text-white/40 px-1 pb-1">Put the code back to how it was before a change. Your bot's data is never touched, and the code as it is now is saved first, so you can come back.</p>
           {snapshots.isLoading && <p className="px-1 text-white/40">Loading…</p>}
           {snapshots.data?.length === 0 && <p className="px-1 text-white/40">No saved versions yet.</p>}
           {snapshots.data?.map((s) => (
@@ -290,6 +295,7 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
               onClick={() => { if (window.confirm(`Restore the code from ${new Date(s.createdAt).toLocaleString()}?`)) restore.mutate({ id: project.id, snapshotId: s.id }); }}
               className="w-full text-left px-2 py-1.5 rounded hover:bg-white/5 text-white/70">
               {new Date(s.createdAt).toLocaleString()} <span className="text-white/30">· {s.files} files</span>
+              {s.reason && <span className="block text-[11px] text-white/45 truncate" title={s.reason}>{s.reason}</span>}
             </button>
           ))}
           {restore.isError && <p className="px-1 text-red-400">{restore.error.message}</p>}

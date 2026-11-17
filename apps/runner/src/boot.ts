@@ -57,6 +57,8 @@ async function main(): Promise<void> {
   setUsageSink(redis); // per-model AI usage for the chat's "AI models" circle
   const agent = new Agent(db, supervisor, redis);
   await agent.resetStates();
+  // Messages sent while the runner was down get answered now.
+  await agent.answerUnanswered().catch((err) => log.warn({ err }, "Couldn't check for unanswered messages"));
   // Subscribe only once both connections are fully ready: a subscribe issued
   // while ioredis is still connecting could leave the runner deaf to start/
   // stop commands (seen once in the all-in-one container). A self-test

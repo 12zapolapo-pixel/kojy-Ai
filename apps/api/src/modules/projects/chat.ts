@@ -45,3 +45,16 @@ export async function addToThread(db: any, thread: string, projectId: number, ro
 export async function agentProgress(key: string): Promise<string | null> {
   try { return (await getRedis()?.get(`agent_progress:${key}`)) ?? null; } catch { return null; }
 }
+
+/**
+ * Whether the runner (which runs Kojy) is up: it writes a heartbeat every 15s.
+ * A message sent while it's down is kept and answered when it's back; the
+ * chat says so instead of just going quiet.
+ */
+export async function runnerOnline(): Promise<boolean> {
+  try {
+    const raw = await getRedis()?.get("runner:heartbeat");
+    if (!raw) return false;
+    return Date.now() - Number((JSON.parse(raw) as { ts?: number }).ts ?? 0) < 45_000;
+  } catch { return true; } // can't tell: don't alarm the owner
+}

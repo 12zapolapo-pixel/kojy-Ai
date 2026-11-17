@@ -138,6 +138,12 @@ def announce_connections(bot, check_rights: bool = True) -> None:
 
 FROZEN_EXIT = 3
 NOT_IN_ROOM_EXIT = 4
+# The SDK's main() only returns (instead of reconnecting for ever) when
+# Highrise refused the connection for good — a wrong token or room, which it
+# prints as "ERROR: Error(message=…)" — or on a websocket error. The runner
+# reads this code with the last ERROR line and doesn't restart a refused bot
+# in a loop.
+SDK_ENDED_EXIT = 5
 
 
 def env_seconds(name: str, default: float) -> float:
@@ -305,6 +311,8 @@ def main() -> None:
         await sdk_main([BotDefinition(bot, room_id, token)])
 
     asyncio.run(run())
+    print("[kojy] The Highrise connection ended and the SDK stopped reconnecting.", flush=True)
+    raise SystemExit(SDK_ENDED_EXIT)
 
 
 if __name__ == "__main__":

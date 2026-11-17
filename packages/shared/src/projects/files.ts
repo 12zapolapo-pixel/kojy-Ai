@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 export const PROJECTS_DIR = path.resolve(process.env.PROJECTS_DIR ?? "./data/projects");
 export const LOG_DIR = path.join(PROJECTS_DIR, ".logs");
 const SNAPSHOT_DIR = path.join(PROJECTS_DIR, ".snapshots");
-const MAX_SNAPSHOTS = 15;
+const MAX_SNAPSHOTS = 25;
 
 /** Never shown, uploaded or zipped. */
 const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", "__MACOSX", ".pythonlibs", ".cache", ".upm"]);
@@ -226,7 +226,7 @@ export function readLogs(uuid: string, cursor: number | undefined, maxBytes = 64
 
 export interface Snapshot { id: string; reason: string; createdAt: number; files: number }
 
-/** Zips the project's code (not its data/ or database files). Keeps the last 15. */
+/** Zips the project's code (not its data/ or database files). Keeps the last 25. */
 export function snapshotProject(uuid: string, reason: string): Snapshot {
   const root = ensureProjectDir(uuid);
   const entries: Record<string, Uint8Array> = {};
@@ -236,13 +236,20 @@ export function snapshotProject(uuid: string, reason: string): Snapshot {
   }
   const dir = path.join(SNAPSHOT_DIR, uuid);
   mkdirSync(dir, { recursive: true });
-  const createdAt = Date.now();
+  // Two snapshots in the same millisecond would overwrite each other.
+  let createdAt = Date.now();
+  while (existsSync(path.join(dir, `${createdAt}.zip`))) createdAt++;
   const id = String(createdAt);
-  entries[".kojy-snapshot.json"] = new TextEncoder().encode(JSON.stringify({ reason, createdAt }));
+  entries[".kojy-snapshot.json"] = new TextEncoder().encode(JSON.stringify({ reason: reason.slice(0, 200), createdAt }));
   writeFileSync(path.join(dir, `${id}.zip`), zipSync(entries, { level: 6 }));
   const all = readdirSync(dir).filter((n) => n.endsWith(".zip")).sort();
   for (const old of all.slice(0, Math.max(0, all.length - MAX_SNAPSHOTS))) rmSync(path.join(dir, old), { force: true });
   return { id, reason, createdAt, files: Object.keys(entries).length - 1 };
+}
+
+/** True when the project has code worth snapshotting (anything but data/ and databases). */
+export function hasCode(uuid: string): boolean {
+  return listFiles(uuid).some((f) => !f.isDir && !isPersistentData(f.path));
 }
 
 export function listSnapshots(uuid: string): Snapshot[] {
@@ -264,12 +271,15 @@ export function listSnapshots(uuid: string): Snapshot[] {
 /**
  * Puts the code back exactly as it was in the snapshot: changed files are
  * restored and files added since are removed. data/ and databases are untouched.
+ * With `saveCurrentAs`, the code as it is now is saved first (so undo can be undone).
  */
-export function restoreSnapshot(uuid: string, id: string): number {
+export function restoreSnapshot(uuid: string, id: string, saveCurrentAs?: string): number {
   if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
   const file = path.join(SNAPSHOT_DIR, uuid, `${id}.zip`);
   if (!existsSync(file)) throw new ProjectFileError("That snapshot no longer exists");
+  // Read it before saving the current code: that save may prune the oldest snapshot.
   const files = unzipSync(readFileSync(file));
+  if (saveCurrentAs && hasCode(uuid)) snapshotProject(uuid, saveCurrentAs);
   delete files[".kojy-snapshot.json"];
   const root = ensureProjectDir(uuid);
   for (const f of listFiles(uuid)) {

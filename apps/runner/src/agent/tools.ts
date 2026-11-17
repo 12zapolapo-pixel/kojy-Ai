@@ -32,6 +32,8 @@ export interface ToolContext {
   project: Project;
   /** Set once the AI has snapshotted the code in this run (for "undo"). */
   snapshotted: boolean;
+  /** What the snapshot is called in the Undo list (the owner's request). */
+  snapshotLabel?: string;
   changedFiles: Set<string>;
 }
 
@@ -151,7 +153,7 @@ export function searchInWorker(pattern: string, files: { rel: string; abs: strin
 
 function ensureSnapshot(ctx: ToolContext): void {
   if (ctx.snapshotted) return;
-  snapshotProject(ctx.project.uuid, "Before the coder AI's changes");
+  snapshotProject(ctx.project.uuid, ctx.snapshotLabel ?? "Before Kojy's changes");
   ctx.snapshotted = true;
 }
 

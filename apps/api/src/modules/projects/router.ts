@@ -24,10 +24,10 @@ import { emitAuditLog } from "../../events/audit.js";
 import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
 import {
   ProjectFileError, MAX_UPLOAD_BYTES, ensureProjectDir, removeProjectDir, listFiles, readProjectFile,
-  writeProjectFile, deleteProjectPath, extractZip, zipProject, detectEntrypoint, readLogs, cleanRelPath, removeSnapshots, listSnapshots, restoreSnapshot, BOT_TEMPLATES,
+  writeProjectFile, deleteProjectPath, extractZip, zipProject, detectEntrypoint, readLogs, cleanRelPath, removeSnapshots, listSnapshots, restoreSnapshot, snapshotProject, hasCode, BOT_TEMPLATES,
 } from "@kojyai/shared/projects";
 import { listDatabases, describeDatabase, readTable } from "./data.js";
-import { listThread, addToThread, agentProgress } from "./chat.js";
+import { listThread, addToThread, agentProgress, runnerOnline } from "./chat.js";
 
 const { botProjects, projectSecrets, projectMessages } = schema;
 
@@ -189,6 +189,8 @@ export const projectsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
       await zipThrottle(ctx.user.id);
+      // Uploads replace files: keep the code as it was, so "Undo" can bring it back.
+      files(() => { if (hasCode(project.uuid)) snapshotProject(project.uuid, "Before a zip upload"); });
       const result = await filesAsync(() => extractZip(project.uuid, Buffer.from(input.zipBase64, "base64")));
       let detected: string | null = null;
       if (!project.entrypoint) {
@@ -270,6 +272,7 @@ export const projectsRouter = router({
       return {
         agentState: project.agentState,
         progress: project.agentState === "working" ? await agentProgress(project.uuid) : null,
+        runnerOnline: await runnerOnline(),
         ...thread,
       };
     }),
@@ -381,8 +384,9 @@ export const projectsRouter = router({
       const project = await loadProject(ctx, input.id);
       if (project.agentState === "working") throw new TRPCError({ code: "CONFLICT", message: "Stop the AI first." });
       await zipThrottle(ctx.user.id);
-      const count = files(() => restoreSnapshot(project.uuid, input.snapshotId));
       const when = new Date(Number(input.snapshotId)).toISOString().replace("T", " ").slice(0, 16);
+      // Undo itself can be undone: save the code as it is now first.
+      const count = files(() => restoreSnapshot(project.uuid, input.snapshotId, `Before going back to the version from ${when} UTC`));
       await ctx.db.insert(projectMessages).values({
         thread: `project:${project.id}`, projectId: project.id, role: "user", kind: "event",
         content: `The owner undid code changes: the code is back to how it was at ${when} UTC (${count} files). Restart the bot to use it.`,

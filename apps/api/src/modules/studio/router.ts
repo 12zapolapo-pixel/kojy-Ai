@@ -16,7 +16,7 @@ import { schema } from "../../db/client.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { getRedis, getRedisPublisher } from "../../utils/redis.js";
 import { signBotControlMessage } from "@kojyai/shared/crypto";
-import { listThread, addToThread, agentProgress } from "../projects/chat.js";
+import { listThread, addToThread, agentProgress, runnerOnline } from "../projects/chat.js";
 
 const { botProjects, bots, projectMessages, agentMemories } = schema;
 const studioKey = (orgId: number) => `studio-${orgId}`;
@@ -68,6 +68,7 @@ export const studioRouter = router({
     return {
       agentState,
       progress: agentState === "working" ? await agentProgress(studioKey(orgId)) : null,
+      runnerOnline: await runnerOnline(),
       ...(await listThread(ctx.db, `studio:${orgId}`, input.afterId)),
     };
   }),
@@ -112,7 +113,7 @@ export const studioRouter = router({
     const bot = await loadJsBot(ctx, input.id);
     const key = `jsbot-${bot.uuid}`;
     const agentState = await stateOf(key);
-    return { agentState, progress: agentState === "working" ? await agentProgress(key) : null, ...(await listThread(ctx.db, `bot:${bot.id}`, input.afterId)) };
+    return { agentState, progress: agentState === "working" ? await agentProgress(key) : null, runnerOnline: await runnerOnline(), ...(await listThread(ctx.db, `bot:${bot.id}`, input.afterId)) };
   }),
 
   jsChatSend: permittedProc("bots:update").input(jsId.extend({ text: z.string().trim().min(1).max(8000) })).mutation(async ({ ctx, input }) => {
