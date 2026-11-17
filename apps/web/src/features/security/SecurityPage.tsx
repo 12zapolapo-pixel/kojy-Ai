@@ -10,14 +10,12 @@ import { trpc, trpcClient }      from "../../lib/trpc";
 import type { SecurityEvent } from "@kojyai/shared/types";
 import clsx          from "clsx";
 
-type Tab = "events" | "audit" | "flags" | "toxicity" | "fraud";
+type Tab = "events" | "audit" | "flags";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "events",   label: "Security Events", icon: "⚠"  },
   { id: "audit",    label: "Audit Log",        icon: "📋" },
   { id: "flags",    label: "Feature Flags",    icon: "⚑"  },
-  { id: "toxicity", label: "Toxicity",         icon: "🛡" },
-  { id: "fraud",    label: "Fraud Detection",  icon: "🔍" },
 ];
 
 const SEVERITY_COLOR: Record<string, string> = {
@@ -51,8 +49,6 @@ export default function SecurityPage() {
         {tab === "events"   && <SecurityEventsTab />}
         {tab === "audit"    && <AuditLogTab />}
         {tab === "flags"    && <FeatureFlagsTab />}
-        {tab === "toxicity" && <ToxicityTab />}
-        {tab === "fraud"    && <FraudTab />}
       </div>
     </div>
   );
@@ -209,70 +205,6 @@ function FeatureFlagsTab() {
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-/* ─── Toxicity ────────────────────────────────────────────────────────────── */
-function ToxicityTab() {
-  const stats = [
-    { label: "Messages Scanned Today",  value: "4,821" },
-    { label: "Flagged (Fast Scan)",     value: "23"    },
-    { label: "Blocked (Hard Block)",    value: "7"     },
-    { label: "Deep Scan Accuracy",      value: "94.2%" },
-  ];
-
-  return (
-    <div className="h-full overflow-y-auto scrollbar-thin p-6 space-y-6">
-      <div className="grid grid-cols-2 gap-4">
-        {stats.map((s) => (
-          <div key={s.label} className="bg-[#0b1220] border border-white/5 rounded-xl p-4">
-            <p className="text-xs text-white/30 mb-1">{s.label}</p>
-            <p className="text-2xl font-semibold text-white/70">{s.value}</p>
-          </div>
-        ))}
-      </div>
-      <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4 space-y-3">
-        <p className="text-[10px] font-mono tracking-widest text-white/25">DETECTION PIPELINE</p>
-        <div className="space-y-2">
-          {[
-            { stage: "Tier 1 — Fast Regex",  latency: "< 1ms",  desc: "Hard-block patterns + keyword scoring" },
-            { stage: "Tier 2 — Claude Haiku", latency: "~200ms", desc: "Deep semantic analysis for edge cases" },
-            { stage: "Tier 3 — Human Review", latency: "async",  desc: "Escalated high-score messages" },
-          ].map((s) => (
-            <div key={s.stage} className="flex items-start gap-3 p-3 bg-white/[0.02] rounded-lg">
-              <div className="w-2 h-2 rounded-full bg-[#49dcb5] mt-1.5 flex-shrink-0" />
-              <div className="flex-1">
-                <p className="text-xs font-medium text-white/60">{s.stage}</p>
-                <p className="text-[10px] text-white/35">{s.desc}</p>
-              </div>
-              <span className="text-[10px] font-mono text-[#34d399]">{s.latency}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ─── Fraud ───────────────────────────────────────────────────────────────── */
-function FraudTab() {
-  return (
-    <div className="h-full overflow-y-auto scrollbar-thin p-6 space-y-4">
-      <div className="grid grid-cols-3 gap-4">
-        <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4"><p className="text-xs text-white/30 mb-1">Transactions Checked</p><p className="text-2xl font-semibold text-white/70">—</p></div>
-        <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4"><p className="text-xs text-white/30 mb-1">Flagged for Review</p><p className="text-2xl font-semibold text-amber-400">—</p></div>
-        <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4"><p className="text-xs text-white/30 mb-1">Blocked</p><p className="text-2xl font-semibold text-red-400">—</p></div>
-      </div>
-      <div className="p-5 bg-[#0b1220] border border-white/5 rounded-xl space-y-3">
-        <p className="text-[10px] font-mono tracking-widest text-white/25">FRAUD SIGNALS MONITORED</p>
-        {["Transaction velocity (>5/hr)", "Large amount threshold (>$500)", "Multi-account from same IP (>10)", "Suspicious device change", "Geographic anomaly"].map((sig) => (
-          <div key={sig} className="flex items-center gap-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#49dcb5] flex-shrink-0" />
-            <span className="text-xs text-white/50">{sig}</span>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

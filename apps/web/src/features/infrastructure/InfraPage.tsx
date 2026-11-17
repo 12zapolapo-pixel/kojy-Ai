@@ -91,7 +91,7 @@ export default function InfraPage() {
             <h2 className="text-sm text-white/70">Bots</h2>
             <p className="text-xs text-white/55">🐍 Python: {sum(py)} total · {py.running ?? 0} running{py.crashed ? ` · ${py.crashed} crashed` : ""}{py.error ? ` · ${py.error} error` : ""}</p>
             <p className="text-xs text-white/55">JS: {sum(js)} total · {js.online ?? 0} online{js.error ? ` · ${js.error} error` : ""}{js.suspended ? ` · ${js.suspended} suspended` : ""}</p>
-            <p className="text-xs text-white/40 pt-2">Coder AI: {data.ai.groq ? "Groq key set" : "no Groq key — set GROQ_API_KEY in .env"} · Alerts: {data.ai.alertsWebhook ? "webhook on" : "set ALERT_WEBHOOK_URL in .env to get alerts in Discord"}</p>
+            <p className="text-xs text-white/40 pt-2">Coder AI: {data.ai.providers.length ? data.ai.providers.join(", ") : "no AI key — set GROQ_API_KEY or AGENT_API_KEY (Gemini) in .env"} · Alerts: {data.ai.alertsWebhook ? "webhook on" : "set ALERT_WEBHOOK_URL in .env to get alerts in Discord"}</p>
           </section>
 
           <section className={clsx("border rounded-xl p-4 space-y-2", backup && !backup.ok ? "border-red-500/30 bg-red-500/5" : backupStale ? "border-amber-500/30 bg-amber-500/5" : "border-white/8 bg-white/[0.02]")}>

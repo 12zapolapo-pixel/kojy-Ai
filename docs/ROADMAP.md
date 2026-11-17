@@ -21,11 +21,17 @@ the JavaScript scripts stay as a simple option · the owner's Replit bot
 | 6 | **Stripe + marketplace** — kept in the code and switched off cleanly: no billing tab or paid checkout while `BILLING_DISABLED=true`, marketplace shows only real (free) items. Turn on later with Stripe keys | ✅ off by design |
 | 7 | **Hardening** — integration tests for projects/secrets/chat/analytics/status in CI, unit tests for files, history pairing and JS bots, service heartbeats, Discord alerts, backup verification + weekly restore drill, activity retention | ✅ done (ongoing) |
 
+| 8 | **Quiet failures** — the bell checks every minute; a bot Highrise refuses is stopped instead of restarted for ever; messages sent during a runner restart get answered; undo and uploads save the current code first; Stop is a stop | ✅ done |
+| 9 | **Kojy proves more** — fake room with tips, whispers, DMs, leaves, emotes, owner commands and no-moderator mode; cut-off tool calls explained, long files in parts; longer history on big models; "yes please" keeps the request; lessons by size | ✅ done |
+| 10 | **Studio day to day** — instant messages, Markdown, older messages, stale plans locked; JSON data shown and editable; upload a bot from New bot; "needs you" marks; History diffs and "undo this request" | ✅ done |
+| 11 | **Numbers and safety net** — gold tipped, per-bot filter, previous-period comparison; bot files in the daily backup; logs read across rotation; less polling | ✅ done |
+| 12 | **Edges** — every Settings button works; ⌘K rebuilt for Studio; old onboarding removed; sample tabs removed; AI providers on Server status; account menu; sign-in shared across tabs and back to the link you opened | ✅ done |
+
 Phase 2 is intentionally after 3 and 4: Python bots are the main engine.
 
 ## Known issues carried into later phases
 
 - The JavaScript bots (phase 2) still run inside the API process; Python
   bots run in the separate `runner` service.
-- Pages that still show sample data: Security, Analytics heatmap,
-  Infrastructure, Marketplace "featured" items (phase 5).
+- No page shows sample data any more (the Security page's sample Toxicity
+  and Fraud tabs were removed).

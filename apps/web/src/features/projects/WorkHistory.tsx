@@ -67,7 +67,7 @@ function Changes({ projectId, entryId }: { projectId: string; entryId: number })
       {q.data.files.map((f) => <div key={f.path}><p className="font-mono text-white/70">{f.path}</p><DiffView before={f.before} after={f.after} /></div>)}
       {undo.isSuccess ? <p className="text-[#49dcb5]">✓ Code put back. Restart the bot to use it.</p> : (
         <button disabled={undo.isPending} className="px-2 py-1 rounded border border-amber-400/30 text-amber-200 hover:bg-amber-400/10 disabled:opacity-40"
-          onClick={() => { if (window.confirm("Put the code back to how it was before this request? Changes made after it are undone too. The code as it is now is saved first, so you can come back.")) undo.mutate({ id: projectId, snapshotId: q.data!.snapshotId! }); }}>
+          onClick={() => { if (window.confirm("Put the code back to how it was before this request? Changes made after it are undone too. The code as it is now is saved first, so you can come back.")) undo.mutate({ id: projectId, snapshotId: q.data.snapshotId! }); }}>
           ↶ Undo this request
         </button>
       )}

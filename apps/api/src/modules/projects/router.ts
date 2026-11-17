@@ -453,6 +453,15 @@ export const projectsRouter = router({
     return { success: true };
   }),
 
+  /** Stops every Python bot in the org (⌘K "Stop all bots"). */
+  stopAll: permittedProc("bots:stop").mutation(async ({ ctx }) => {
+    const orgId = await resolveOrgId(ctx);
+    const rows = await ctx.db.update(botProjects).set({ desiredState: "stopped" })
+      .where(and(eq(botProjects.orgId, orgId), eq(botProjects.desiredState, "running"))).returning({ uuid: botProjects.uuid });
+    for (const r of rows as { uuid: string }[]) await control(r.uuid, "stop").catch(() => undefined);
+    return { stopped: rows.length };
+  }),
+
   restart: permittedProc("bots:start").input(projectId).mutation(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
     if (!project.entrypoint) throw new TRPCError({ code: "BAD_REQUEST", message: "Set the bot entrypoint (module.path:ClassName) first." });

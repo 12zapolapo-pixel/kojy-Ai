@@ -3,7 +3,7 @@
  * OWNERSHIP: apps/web/src/components
  *
  * FEATURES:
- * - Full-text search across bots, rooms, simulations, nav items
+ * - Search across every bot (Python and JS), pages and actions
  * - Recent items shown when search is empty
  * - Keyboard: ArrowUp/Down to navigate, Enter to confirm, Escape to close
  * - Results grouped by category with section headers
@@ -12,12 +12,12 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { useBotStore } from "../state/botStore";
+import { trpc, trpcClient } from "../lib/trpc";
 import clsx from "clsx";
 
 interface CommandItem {
   id:       string;
-  type:     "bot" | "nav" | "action" | "simulation" | "setting";
+  type:     "bot" | "nav" | "action" | "setting";
   label:    string;
   subtitle?: string;
   icon:     string;
@@ -25,15 +25,16 @@ interface CommandItem {
   keywords: string[];
 }
 
-const NAV_ITEMS: CommandItem[] = [
-  { id: "nav-studio", type: "nav", icon: "✦", label: "Bot Studio",        keywords: ["studio","home","kojy","chat","python","bots","code"], subtitle: "Every bot + Kojy", action: () => {} },
-  { id: "nav-bots", type: "nav", icon: "◉", label: "Bots",               keywords: ["bots","agents","bot","list"],            subtitle: "Manage", action: () => {} },
-  { id: "nav-intel",type: "nav", icon: "◈", label: "Intelligence",        keywords: ["intelligence","memory","personality"],   subtitle: "AI systems", action: () => {} },
-  { id: "nav-analytics", type: "nav", icon: "▦", label: "Analytics",     keywords: ["analytics","metrics","stats","data"],    subtitle: "Data & insights", action: () => {} },
-  { id: "nav-mkt",  type: "nav", icon: "◎", label: "Marketplace",        keywords: ["marketplace","store","plugins","buy"],   subtitle: "Browse & sell", action: () => {} },
-  { id: "nav-infra",type: "nav", icon: "⟁", label: "Server status",      keywords: ["infra","server","status","workers","backups"], subtitle: "Health & backups", action: () => {} },
-  { id: "nav-sec",  type: "nav", icon: "⛨", label: "Security",           keywords: ["security","threats","audit","logs"],     subtitle: "Safety & audit", action: () => {} },
-  { id: "nav-set",  type: "nav", icon: "⚙", label: "Settings",           keywords: ["settings","profile","billing","org"],    subtitle: "Preferences", action: () => {} },
+const NAV: { path: string; icon: string; label: string; subtitle: string; keywords: string[] }[] = [
+  { path: "/studio",         icon: "✦", label: "Bot Studio",          subtitle: "Every bot + Kojy",    keywords: ["studio", "home", "kojy", "chat", "bots", "code"] },
+  { path: "/studio/new",     icon: "+", label: "New bot",             subtitle: "Describe, upload or start from a template", keywords: ["new", "create", "bot", "add", "upload", "template"] },
+  { path: "/analytics",      icon: "▦", label: "Analytics",           subtitle: "Room activity",       keywords: ["analytics", "metrics", "stats", "gold", "tips"] },
+  { path: "/infrastructure", icon: "⟁", label: "Server status",       subtitle: "Health & backups",    keywords: ["infra", "server", "status", "backups", "disk"] },
+  { path: "/bots",           icon: "◉", label: "JS bots (classic)",   subtitle: "Older JavaScript bots page", keywords: ["js", "javascript", "classic"] },
+  { path: "/intelligence",   icon: "◈", label: "Intelligence",        subtitle: "Memory & relationships", keywords: ["intelligence", "memory", "personality"] },
+  { path: "/marketplace",    icon: "◎", label: "Marketplace",         subtitle: "Browse",              keywords: ["marketplace", "store"] },
+  { path: "/security",       icon: "⛨", label: "Security",            subtitle: "Events & audit log",  keywords: ["security", "audit", "logs"] },
+  { path: "/settings",       icon: "⚙", label: "Settings",            subtitle: "Profile, organization, sessions", keywords: ["settings", "profile", "password", "org"] },
 ];
 
 interface Props {
@@ -43,39 +44,35 @@ interface Props {
 export function CommandPalette({ onClose }: Props) {
   const [query,    setQuery]    = useState("");
   const [selected, setSelected] = useState(0);
+  const [note,     setNote]     = useState<string | null>(null);
   const inputRef  = useRef<HTMLInputElement>(null);
   const listRef   = useRef<HTMLDivElement>(null);
   const navigate  = useNavigate();
-  const bots      = useBotStore((s) => s.bots);
+  const utils     = trpc.useUtils();
+  const bots      = trpc.studio.bots.useQuery(undefined, { staleTime: 10_000 });
 
   // Focus input on mount
   useEffect(() => { inputRef.current?.focus(); }, []);
 
-  // Build all items dynamically
   const allItems = useMemo<CommandItem[]>(() => {
-    const navItems = NAV_ITEMS.map((n) => ({
-      ...n,
-      action: () => { navigate(n.id.replace("nav-", "/").replace("mc", "mission-control").replace("mkt","marketplace").replace("intel","intelligence").replace("infra","infrastructure").replace("sim","simulation").replace("set","settings").replace("sec","security")); onClose(); },
+    const go = (path: string) => () => { navigate(path); onClose(); };
+    const navItems: CommandItem[] = NAV.map((n) => ({ id: `nav-${n.path}`, type: "nav", icon: n.icon, label: n.label, subtitle: n.subtitle, keywords: n.keywords, action: go(n.path) }));
+    const botItems: CommandItem[] = (bots.data ?? []).map((b) => ({
+      id: `bot-${b.kind}-${b.id}`, type: "bot", icon: b.kind === "python" ? "🐍" : "◉", label: b.name,
+      subtitle: `${b.kind === "python" ? "Python" : "JavaScript"} · ${b.status}${b.waiting ? " · Kojy needs you" : ""}`,
+      keywords: [b.name, b.status, b.kind], action: go(`/studio/${b.kind === "python" ? "p" : "j"}/${b.id}`),
     }));
-
-    const botItems: CommandItem[] = bots.slice(0, 20).map((b) => ({
-      id:       `bot-${b.id}`,
-      type:     "bot",
-      icon:     "◉",
-      label:    b.name,
-      subtitle: `${b.status} · ${b.runtimeMode}`,
-      keywords: [b.name, b.status, ...(b.tags ?? [])],
-      action:   () => { navigate(`/bots/${b.id}`); onClose(); },
-    }));
-
+    const stopAll = async () => {
+      if (!window.confirm("Stop every bot (Python and JavaScript)?")) return;
+      const [py] = await Promise.allSettled([trpcClient.projects.stopAll.mutate(), trpcClient.bots.stopAll.mutate()]);
+      setNote(py.status === "fulfilled" ? `Stopping ${py.value.stopped} Python bot(s) and every JS bot.` : "Couldn't stop the bots.");
+      void utils.studio.bots.invalidate();
+    };
     const actionItems: CommandItem[] = [
-      { id: "act-newbot",  type: "action", icon: "+", label: "Create New Bot",        keywords: ["create","new","bot","add"],       subtitle: "Quick action", action: () => { navigate("/bots?new=true"); onClose(); } },
-      { id: "act-newsim",  type: "action", icon: "⚡", label: "New Simulation",        keywords: ["new","simulation","create","run"], subtitle: "Quick action", action: () => { navigate("/simulation"); onClose(); } },
-      { id: "act-stopall", type: "action", icon: "⬛", label: "Stop All Bots",         keywords: ["stop","all","bots","halt"],        subtitle: "Danger zone",  action: () => { onClose(); } },
+      { id: "act-stopall", type: "action", icon: "⬛", label: "Stop all bots", keywords: ["stop", "all", "bots", "halt"], subtitle: "Python and JavaScript", action: () => void stopAll() },
     ];
-
-    return [...navItems, ...botItems, ...actionItems];
-  }, [bots, navigate, onClose]);
+    return [...botItems, ...navItems, ...actionItems];
+  }, [bots.data, navigate, onClose, utils]);
 
   // Filter by query
   const filtered = useMemo(() => {
@@ -116,7 +113,6 @@ export function CommandPalette({ onClose }: Props) {
     nav:        "text-[#49dcb5]/60",
     bot:        "text-[#34d399]/60",
     action:     "text-amber-400/60",
-    simulation: "text-violet-400/60",
     setting:    "text-white/30",
   };
 
@@ -182,6 +178,7 @@ export function CommandPalette({ onClose }: Props) {
           )}
         </div>
 
+        {note && <p className="px-4 py-2 text-xs text-[#49dcb5] border-t border-white/5">{note}</p>}
         {/* Footer */}
         <div className="flex items-center gap-4 px-4 py-2 border-t border-white/5">
           <FooterHint keys="↑↓" label="navigate" />

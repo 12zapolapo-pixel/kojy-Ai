@@ -149,7 +149,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
       setText("");
       // Show it right away; the real row replaces this stand-in on the next poll.
       stick.current = true;
-      setMessages((prev) => [...prev, { id: -Date.now(), role: "user", kind: "text", content: msg.trim(), createdAt: new Date(), summary: null, ok: null, tool: null, card: null } as Msg]);
+      setMessages((prev) => [...prev, { id: -Date.now(), role: "user", kind: "text", content: msg.trim(), createdAt: new Date(), summary: null, ok: null, tool: null, card: null }]);
       setState((s) => ({ ...s, agentState: "working", progress: "Thinking…" }));
       pollNow.current();
     } catch (e) { setError((e as Error).message); }
@@ -363,11 +363,11 @@ function Inline({ text }: { text: string }) {
   let last = 0;
   for (const m of text.matchAll(re)) {
     const t = m[0];
-    if (m.index! > last) out.push(text.slice(last, m.index));
+    if (m.index > last) out.push(text.slice(last, m.index));
     if (t.startsWith("`")) out.push(<code key={m.index} className="px-1 rounded bg-black/40 font-mono text-[0.85em]">{t.slice(1, -1)}</code>);
     else if (t.startsWith("**")) out.push(<strong key={m.index} className="font-semibold text-white">{t.slice(2, -2)}</strong>);
     else out.push(<em key={m.index}>{t.slice(1, -1)}</em>);
-    last = m.index! + t.length;
+    last = m.index + t.length;
   }
   if (last < text.length) out.push(text.slice(last));
   return <>{out}</>;

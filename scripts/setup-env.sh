@@ -42,6 +42,7 @@ case "$mode" in
 esac
 
 read -rp "Groq API key (https://console.groq.com/keys, Enter to add later): " groq
+read -rp "Gemini API key for Kojy (https://aistudio.google.com/apikey, Enter to skip): " gemini
 
 umask 077
 sed \
@@ -52,10 +53,11 @@ sed \
   -e "s|^JWT_SECRET=.*|JWT_SECRET=$(hex 64)|" \
   -e "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$(hex 32)|" \
   -e "s|^GROQ_API_KEY=.*|GROQ_API_KEY=${groq}|" \
+  -e "s|^AGENT_API_KEY=.*|AGENT_API_KEY=${gemini}|" \
   .env.example > .env
 
 echo
 echo "Wrote .env (only readable by you). Site address: ${frontend}"
 echo "Keep a private copy of ENCRYPTION_KEY — without it saved bot tokens can't be read."
-[[ -z "$groq" ]] && echo "Remember to put your GROQ_API_KEY into .env before starting."
+[[ -z "$groq" && -z "$gemini" ]] && echo "Remember to put an AI key (GROQ_API_KEY or AGENT_API_KEY) into .env before starting."
 echo "Next: docker compose up -d --build"
