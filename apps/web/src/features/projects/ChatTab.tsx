@@ -11,6 +11,7 @@ import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
 import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
 import { AiUsageCircle } from "./AiUsage";
+import { useWsStore } from "../../state/wsStore";
 import { WorkHistoryButton } from "./WorkHistory";
 
 type Project = RouterOutputs["projects"]["get"];
@@ -60,6 +61,10 @@ export function ChatTab({ project, jsBot, onPanel }: {
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const lastId = useRef(0);
+  /** Older messages: the oldest one shown, and whether there are more before it. */
+  const [older, setOlder] = useState<{ firstId: number | null; hasMore: boolean; loading: boolean }>({ firstId: null, hasMore: false, loading: false });
+  /** Set while older messages are put on top, so the view doesn't jump to the bottom. */
+  const keepScroll = useRef<number | null>(null);
   const box = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const textArea = useRef<HTMLTextAreaElement>(null);
@@ -68,20 +73,37 @@ export function ChatTab({ project, jsBot, onPanel }: {
   const pid = project?.id ?? null;
   const jid = jsBot?.id ?? null;
 
-  // Poll for new messages: fast while the AI works, slow otherwise.
+  // New messages: fetched right away when the runner announces a change over
+  // the WebSocket (chat_update), and polled as a fallback — fast while Kojy
+  // works, slower when the WebSocket is up.
+  const pollNow = useRef<() => void>(() => undefined);
+  const wsConnected = useWsStore((st) => st.connected);
+  const wsConnectedRef = useRef(wsConnected);
+  wsConnectedRef.current = wsConnected;
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
+    let inFlight = false;
+    let again = false;
     lastId.current = 0;
     setMessages([]);
     const poll = async () => {
+      if (inFlight) { again = true; return; }
+      inFlight = true;
+      clearTimeout(timer);
+      let next = 5000;
       try {
         const afterId = lastId.current || undefined;
-        const res: { agentState: string; progress: string | null; lastId: number; messages: Msg[] } = pid
+        const res: { agentState: string; progress: string | null; lastId: number; messages: Msg[]; hasMore: boolean; firstId: number | null; orgId: number } = pid
           ? await trpcClient.projects.chatList.query({ id: pid, afterId })
           : jid ? await trpcClient.studio.jsChatList.query({ id: jid, afterId })
           : await trpcClient.studio.chatList.query({ afterId });
         if (stopped) return;
+        if (!afterId) {
+          setOlder({ firstId: res.firstId, hasMore: res.hasMore, loading: false });
+          const ws = useWsStore.getState();
+          if (res.orgId && !ws.subscribedOrgs.has(String(res.orgId))) ws.subscribeOrg(String(res.orgId));
+        }
         const fresh = res.messages.filter((m) => m.id > lastId.current);
         if (fresh.length) setMessages((prev) => [...prev, ...fresh]);
         // A new "show the console" card from Kojy switches the panel (old ones don't).
@@ -91,16 +113,50 @@ export function ChatTab({ project, jsBot, onPanel }: {
           if (prev.agentState === "working" && res.agentState !== "working") { void utils.projects.invalidate(); void utils.studio.invalidate(); }
           return { agentState: res.agentState, progress: res.progress };
         });
-        timer = setTimeout(() => void poll(), res.agentState === "working" ? 1200 : 4000);
-      } catch {
-        if (!stopped) timer = setTimeout(() => void poll(), 5000);
-      }
+        const live = wsConnectedRef.current;
+        next = res.agentState === "working" ? (live ? 4000 : 1200) : (live ? 15_000 : 4000);
+      } catch { /* try again below */ }
+      finally { inFlight = false; }
+      if (stopped) return;
+      if (again) { again = false; void poll(); return; }
+      timer = setTimeout(() => void poll(), next);
     };
+    pollNow.current = () => void poll();
     void poll();
-    return () => { stopped = true; clearTimeout(timer); };
+    return () => { stopped = true; clearTimeout(timer); pollNow.current = () => undefined; };
   }, [pid, jid, utils]);
 
-  useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [messages.length, state.progress]);
+  const chatUpdate = useWsStore((st) => st.lastChatUpdate);
+  useEffect(() => {
+    if (!chatUpdate) return;
+    const mine = pid ? chatUpdate.thread === pid : jid ? chatUpdate.thread === `jsbot-${jid}` : chatUpdate.thread.startsWith("studio-");
+    if (mine) pollNow.current();
+  }, [chatUpdate, pid, jid]);
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    // After loading older messages, stay where the reader was.
+    if (keepScroll.current !== null) { el.scrollTop = el.scrollHeight - keepScroll.current; keepScroll.current = null; return; }
+    el.scrollTo({ top: el.scrollHeight });
+  }, [messages.length, state.progress]);
+
+  const loadOlder = async () => {
+    if (!older.firstId || older.loading) return;
+    setOlder((o) => ({ ...o, loading: true }));
+    try {
+      const beforeId = older.firstId;
+      const res = pid ? await trpcClient.projects.chatList.query({ id: pid, beforeId })
+        : jid ? await trpcClient.studio.jsChatList.query({ id: jid, beforeId })
+        : await trpcClient.studio.chatList.query({ beforeId });
+      keepScroll.current = box.current ? box.current.scrollHeight - box.current.scrollTop : null;
+      setMessages((prev) => [...res.messages.filter((m) => !prev.some((p) => p.id === m.id)), ...prev]);
+      setOlder({ firstId: res.firstId, hasMore: res.hasMore, loading: false });
+    } catch (e) {
+      setError((e as Error).message);
+      setOlder((o) => ({ ...o, loading: false }));
+    }
+  };
 
   const send = async (msg: string) => {
     if (!msg.trim()) return;
@@ -111,6 +167,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
       else await trpcClient.studio.chatSend.mutate({ text: msg.trim() });
       setText("");
       setState((s) => ({ ...s, agentState: "working", progress: "Thinking…" }));
+      pollNow.current();
     } catch (e) { setError((e as Error).message); }
   };
 
@@ -131,7 +188,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
   const stop = () => void (pid ? trpcClient.projects.chatStop.mutate({ id: pid })
     : jid ? trpcClient.studio.jsChatStop.mutate({ id: jid }) : trpcClient.studio.chatStop.mutate());
   const working = state.agentState === "working";
-  const cleared = () => { lastId.current = 0; setMessages([]); };
+  const cleared = () => { lastId.current = 0; setMessages([]); setOlder({ firstId: null, hasMore: false, loading: false }); };
   /** Puts text in the message box (e.g. "Change the plan: ") and focuses it. */
   const draft = (t: string) => { setText(t); setTimeout(() => { const el = textArea.current; if (el) { el.focus(); el.setSelectionRange(t.length, t.length); } }, 0); };
   const openBot = (kind: string, id: string) => navigate(`/studio/${kind === "javascript" ? "j" : "p"}/${id}`);
@@ -145,6 +202,13 @@ export function ChatTab({ project, jsBot, onPanel }: {
 
       {project && <BuildProgress messages={messages} working={working} />}
       <div ref={box} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3">
+        {older.hasMore && (
+          <div className="text-center">
+            <button onClick={() => void loadOlder()} disabled={older.loading} className="text-xs text-white/45 hover:text-white/75 disabled:opacity-50">
+              {older.loading ? "Loading…" : "↑ Load earlier messages"}
+            </button>
+          </div>
+        )}
         {messages.length === 0 && !working && (
           <div className="max-w-xl mx-auto text-center space-y-4 pt-8">
             {project ? (
@@ -327,16 +391,78 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
 
 // ── messages ─────────────────────────────────────────────────────────────────
 
-/** Renders text with ``` code blocks; everything else as plain text. */
+/**
+ * Kojy's replies as light markdown: ``` code blocks, `inline code`, **bold**,
+ * *italic*, "- " and "1. " lists, "#" headings and [links](https://…).
+ * Built from React elements — never raw HTML — and only http(s) links.
+ */
 function RichText({ text }: { text: string }) {
-  const parts = text.split(/```(?:\w+)?\n?/);
+  const parts = text.split(/```(?:[\w+-]+)?\n?/);
   return (
     <>
       {parts.map((p, i) => i % 2
         ? <pre key={i} className="my-2 p-2 bg-black/40 rounded text-xs overflow-x-auto font-mono">{p.replace(/\n$/, "")}</pre>
-        : <span key={i} className="whitespace-pre-wrap">{p}</span>)}
+        : <MarkdownBlocks key={i} text={p} />)}
     </>
   );
+}
+
+function MarkdownBlocks({ text }: { text: string }) {
+  const blocks: React.ReactNode[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length) blocks.push(<p key={`p${blocks.length}`} className="whitespace-pre-wrap">{inline(para.join("\n"))}</p>);
+    para = [];
+  };
+  const flushList = () => {
+    if (!list) return;
+    const items = list.items.map((it, n) => <li key={n}>{inline(it)}</li>);
+    blocks.push(list.ordered
+      ? <ol key={`l${blocks.length}`} className="list-decimal pl-5 space-y-0.5">{items}</ol>
+      : <ul key={`l${blocks.length}`} className="list-disc pl-5 space-y-0.5">{items}</ul>);
+    list = null;
+  };
+  for (const line of text.split("\n")) {
+    const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    const heading = /^\s*#{1,4}\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      flushPara();
+      const ordered = !!numbered;
+      if (list && list.ordered !== ordered) flushList();
+      list ??= { ordered, items: [] };
+      list.items.push((bullet ?? numbered)![1]!);
+    } else if (heading) {
+      flushPara(); flushList();
+      blocks.push(<p key={`h${blocks.length}`} className="font-semibold text-white/95">{inline(heading[1]!)}</p>);
+    } else if (!line.trim()) {
+      flushPara(); flushList();
+    } else {
+      flushList();
+      para.push(line);
+    }
+  }
+  flushPara(); flushList();
+  return <div className="space-y-2">{blocks}</div>;
+}
+
+/** `code`, **bold**, *italic* and [text](https://link) inside one paragraph. */
+export function inline(text: string): React.ReactNode[] {
+  const out: React.ReactNode[] = [];
+  const re = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|(?<![\w*])\*([^*\n]+)\*(?!\w)|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const k = out.length;
+    if (m[1] !== undefined) out.push(<code key={k} className="px-1 rounded bg-black/40 font-mono text-[0.85em]">{m[1]}</code>);
+    else if (m[2] !== undefined) out.push(<strong key={k} className="font-semibold text-white">{m[2]}</strong>);
+    else if (m[3] !== undefined) out.push(<em key={k}>{m[3]}</em>);
+    else out.push(<a key={k} href={m[5]} target="_blank" rel="noopener noreferrer nofollow" className="text-[#49dcb5] underline">{m[4]}</a>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
 }
 
 /** A line diff ("@@ line N @@", " kept", "-removed", "+added") with colours. */

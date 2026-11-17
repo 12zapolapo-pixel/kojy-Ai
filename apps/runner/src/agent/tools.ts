@@ -12,7 +12,7 @@ import path from "node:path";
 import { asc, eq } from "drizzle-orm";
 import WebSocket from "ws";
 import type { Database } from "@kojyai/db";
-import { botProjects, projectSecrets, agentMemories } from "@kojyai/db/schema";
+import { botProjects, projectSecrets, agentMemories, roomTests } from "@kojyai/db/schema";
 import { decryptApiKey } from "@kojyai/shared/crypto";
 import {
   listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
@@ -20,7 +20,7 @@ import {
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { BOTCHECK, LAUNCHER } from "../supervisor.js";
-import { runRoomTest, normalizeEvents, chatToEvents, ROOM_EVENT_TYPES } from "./mockRoom.js";
+import { runRoomTest, normalizeEvents, chatToEvents, ROOM_EVENT_TYPES, type RoomEvent } from "./mockRoom.js";
 import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
 import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js";
@@ -83,8 +83,18 @@ export const TOOL_SPECS: ToolSpec[] = [
         }, required: ["type"] },
       },
       moderator: { type: "boolean", description: "is the bot a moderator in the test room (default true)" },
+      expect: { type: "array", items: { type: "string" }, description: "texts the bot's replies/actions must contain, e.g. [\"Welcome\", \"emote-wave\"]; the test fails if one is missing" },
       seconds: { type: "integer" },
     }),
+  fn("save_test", "Keep a test that passed so it can be run again after later changes (regression test). Same events/chat/moderator as test_in_room, plus expect (texts the bot must say or do) and a short name. Saving under an existing name replaces it.",
+    {
+      name: str("short name, e.g. 'greets new people'"),
+      chat: { type: "array", items: { type: "string" } }, join: { type: "boolean" },
+      events: { type: "array", items: { type: "object" }, description: "as in test_in_room" },
+      expect: { type: "array", items: { type: "string" }, description: "texts the bot's actions must contain" },
+      moderator: { type: "boolean" },
+    }, ["name", "expect"]),
+  fn("run_saved_tests", "Run every saved test of this bot in the fake room and report which pass. Do this after changing code, so a feature that worked before still works."),
   fn("find_env_vars", "Find the environment variables (secrets/settings) the code reads, and which are already set."),
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
@@ -217,6 +227,57 @@ async function checkBearer(url: string, key: string): Promise<string> {
   } catch (e) { return `couldn't check: ${(e as Error).message}`; }
 }
 
+// ── fake-room tests ──────────────────────────────────────────────────────────
+
+const MAX_SAVED_TESTS = 20;
+
+/** Up to 8 short texts the bot's actions must contain. */
+function cleanExpect(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw : []).map((x) => String(x).trim().slice(0, 120)).filter(Boolean).slice(0, 8);
+}
+
+/** Expectations no bot action contains (case-insensitive). Lines in brackets are the room's, not the bot's. */
+export function missingExpectations(actions: string[], expect: string[]): string[] {
+  const said = actions.filter((a) => !a.startsWith("(")).map((a) => a.toLowerCase());
+  return expect.filter((e) => !said.some((a) => a.includes(e.toLowerCase())));
+}
+
+async function inBatches<T, R>(items: T[], size: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += size) out.push(...await Promise.all(items.slice(i, i + size).map(fn)));
+  return out;
+}
+
+/** Runs one scenario in the fake room and judges it: connected, no crash, no errors, every expectation met. */
+async function roomTest(ctx: ToolContext, t: { events: RoomEvent[]; expect: string[]; moderator: boolean; seconds?: number }): Promise<ToolResult> {
+  if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
+  if (!t.events.length) return { ok: false, output: "Give chat lines or events to test with.", summary: "Can't test: nothing happens in the room" };
+  const uuid = ctx.project.uuid;
+  const dir = projectDir(uuid);
+  const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
+  const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
+  const r = await runRoomTest({
+    uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env,
+    events: t.events, moderator: t.moderator, ...(t.seconds !== undefined ? { seconds: t.seconds } : {}),
+  });
+  const missing = missingExpectations(r.actions, t.expect);
+  const verdict = !r.connected ? "The bot never connected to the test room."
+    : r.exitedEarly ? `The bot crashed during the test (exit code ${r.exitCode}).`
+    : r.errors.length ? "The bot ran, but errors were printed."
+    : missing.length ? "The bot ran without errors, but didn't do everything expected." : "The bot ran without errors.";
+  const output = [
+    verdict,
+    `What happened:\n${r.actions.join("\n") || "(nothing)"}`,
+    missing.length ? `Expected but not seen in what the bot did:\n${missing.map((m) => `- ${m}`).join("\n")}` : "",
+    r.errors.length ? `Errors:\n${r.errors.join("\n")}` : "",
+    `Console (last lines):\n${r.output.slice(-40).join("\n")}`,
+  ].filter(Boolean).join("\n\n");
+  const replies = r.actions.filter((a) => !a.startsWith("(")).length;
+  const ok = r.connected && !r.exitedEarly && r.errors.length === 0 && missing.length === 0;
+  const state = ok ? "no errors" : r.exitedEarly ? "crashed" : !r.connected ? "didn't connect" : r.errors.length ? "errors" : `${missing.length} expectation${missing.length > 1 ? "s" : ""} not met`;
+  return { ok, output: clip(output, 8000), summary: `Tested in a fake room: ${state}, ${replies} bot actions` };
+}
+
 // ── tools ────────────────────────────────────────────────────────────────────
 
 type Args = Record<string, unknown>;
@@ -329,29 +390,47 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       case "test_in_room": {
-        if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
         const events = normalizeEvents(args.events);
         const scenario = events.length ? events : chatToEvents(chat, args.join === true);
-        if (!scenario.length) return { ok: false, output: "Give chat lines or events to test with.", summary: "Can't test: nothing happens in the room" };
-        const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
-        const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
-        const r = await runRoomTest({
-          uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env,
-          events: scenario, moderator: args.moderator !== false, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
+        const t = await roomTest(ctx, { events: scenario, expect: cleanExpect(args.expect), moderator: args.moderator !== false, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}) });
+        return t;
+      }
+
+      case "save_test": {
+        const name = s(args.name).trim().slice(0, 80);
+        if (!name) return { ok: false, output: "Give the test a short name.", summary: "Test not saved" };
+        const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
+        const events = normalizeEvents(args.events);
+        const scenario = events.length ? events : chatToEvents(chat, args.join === true);
+        if (!scenario.length) return { ok: false, output: "A saved test needs chat lines or events.", summary: "Test not saved" };
+        const expect = cleanExpect(args.expect);
+        const existing = await ctx.db.select({ name: roomTests.name }).from(roomTests).where(eq(roomTests.projectId, ctx.project.id));
+        if (existing.length >= MAX_SAVED_TESTS && !existing.some((x) => x.name === name)) {
+          return { ok: false, output: `This bot already has ${MAX_SAVED_TESTS} saved tests. Replace one by saving under its name.`, summary: "Test not saved (too many)" };
+        }
+        const moderator = args.moderator !== false;
+        await ctx.db.insert(roomTests).values({ projectId: ctx.project.id, name, events: scenario as unknown as Record<string, unknown>[], expect, moderator })
+          .onConflictDoUpdate({ target: [roomTests.projectId, roomTests.name], set: { events: scenario as unknown as Record<string, unknown>[], expect, moderator, updatedAt: new Date() } });
+        return { ok: true, output: `Saved "${name}". run_saved_tests runs it again with the others after later changes.`, summary: `Saved the test “${name}”` };
+      }
+
+      case "run_saved_tests": {
+        const tests = await ctx.db.select().from(roomTests).where(eq(roomTests.projectId, ctx.project.id)).orderBy(asc(roomTests.id));
+        if (!tests.length) return { ok: true, output: "This bot has no saved tests yet. After a feature works, save its test with save_test.", summary: "No saved tests yet" };
+        const results = await inBatches(tests, 3, async (t) => {
+          const r = await roomTest(ctx, { events: normalizeEvents(t.events), expect: t.expect, moderator: t.moderator });
+          await ctx.db.update(roomTests).set({ lastResult: r.ok ? "passed" : "failed", lastRunAt: new Date() }).where(eq(roomTests.id, t.id));
+          return { name: t.name, r };
         });
-        const verdict = !r.connected ? "The bot never connected to the test room."
-          : r.exitedEarly ? `The bot crashed during the test (exit code ${r.exitCode}).`
-          : r.errors.length ? "The bot ran, but errors were printed." : "The bot ran without errors.";
-        const output = [
-          verdict,
-          `What happened:\n${r.actions.join("\n") || "(nothing)"}`,
-          r.errors.length ? `Errors:\n${r.errors.join("\n")}` : "",
-          `Console (last lines):\n${r.output.slice(-40).join("\n")}`,
-        ].filter(Boolean).join("\n\n");
-        const replies = r.actions.filter((a) => !a.startsWith("(")).length;
-        const ok = r.connected && !r.exitedEarly && r.errors.length === 0;
-        return { ok, output: clip(output, 8000), summary: `Tested in a fake room: ${ok ? "no errors" : r.exitedEarly ? "crashed" : r.connected ? "errors" : "didn't connect"}, ${replies} bot actions` };
+        const failed = results.filter((x) => !x.r.ok);
+        const lines = results.map((x) => `${x.r.ok ? "PASS" : "FAIL"} ${x.name}: ${x.r.summary}`);
+        const details = failed.map((x) => `── ${x.name} ──\n${x.r.output}`).join("\n\n");
+        return {
+          ok: failed.length === 0,
+          output: clip(`${lines.join("\n")}${details ? `\n\nWhat went wrong:\n${details}` : ""}`, 10_000),
+          summary: failed.length ? `Saved tests: ${failed.length} of ${results.length} failed` : `Saved tests: all ${results.length} passed`,
+        };
       }
 
       case "find_env_vars": {

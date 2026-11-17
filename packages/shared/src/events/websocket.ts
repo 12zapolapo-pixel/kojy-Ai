@@ -94,7 +94,20 @@ export type ServerEvent =
   | NotificationEvent
   | SystemAlertEvent
   | DelegationStatusEvent
+  | ChatUpdateEvent
   | ErrorEvent;
+
+/**
+ * A Kojy chat changed (a new message, or what Kojy is doing now). Sent on
+ * the org's channel by the runner; it carries no message content — the open
+ * chat fetches the new messages through the API as usual.
+ * thread: the chat's key — a Python bot's uuid, "jsbot-<uuid>" or "studio-<org id>".
+ */
+export interface ChatUpdateEvent {
+  type: "chat_update";
+  thread: string;
+  ts: number;
+}
 
 export interface AuthAckEvent {
   type: "auth_ack";

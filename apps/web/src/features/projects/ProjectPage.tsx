@@ -359,6 +359,40 @@ export function SecretsTab({ project }: { project: Project }) {
   );
 }
 
+// ── saved tests ──────────────────────────────────────────────────────────────
+
+/** Fake-room tests Kojy keeps for this bot and runs again after changes. */
+function SavedTests({ projectId }: { projectId: string }) {
+  const utils = trpc.useUtils();
+  const tests = trpc.projects.roomTests.useQuery({ id: projectId }, { refetchInterval: 15_000 });
+  const del = trpc.projects.deleteRoomTest.useMutation({ onSuccess: () => void utils.projects.roomTests.invalidate({ id: projectId }) });
+  return (
+    <section className="space-y-2">
+      <h2 className="text-sm font-medium text-white">Saved tests</h2>
+      <p className="text-xs text-white/40">When a feature works, Kojy saves a short test for it and runs them all again after every change, so features that worked keep working. Ask Kojy to “save a test for …” or “run the saved tests”.</p>
+      {tests.data?.length === 0 && <p className="text-xs text-white/35">No saved tests yet.</p>}
+      <ul className="divide-y divide-white/5 border border-white/5 rounded-lg empty:hidden">
+        {tests.data?.map((t) => (
+          <li key={t.id} className="p-3 flex items-start gap-3 text-sm">
+            <span className={t.lastResult === "passed" ? "text-[#49dcb5]" : t.lastResult === "failed" ? "text-red-300" : "text-white/30"} title={t.lastResult ?? "not run yet"}>
+              {t.lastResult === "passed" ? "✓" : t.lastResult === "failed" ? "✗" : "•"}
+            </span>
+            <span className="flex-1 min-w-0">
+              <span className="text-white/80">{t.name}</span>
+              <span className="block text-[11px] text-white/35 truncate">
+                {t.events} event{t.events === 1 ? "" : "s"}{t.expect.length ? ` · expects “${t.expect.join("”, “")}”` : ""}{t.moderator ? "" : " · without moderator rights"}
+                {t.lastRunAt ? ` · last run ${new Date(t.lastRunAt).toLocaleString()}` : ""}
+              </span>
+            </span>
+            <button className="text-xs text-red-400/70 hover:text-red-400" disabled={del.isPending}
+              onClick={() => { if (window.confirm(`Delete the test “${t.name}”?`)) del.mutate({ id: projectId, testId: t.id }); }}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 // ── settings: upload / entrypoint / download / delete ────────────────────────
 
 async function fileToBase64(file: File): Promise<string> {
@@ -406,6 +440,7 @@ export function SettingsTab({ project }: { project: Project }) {
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="max-w-xl space-y-8">
+        <SavedTests projectId={project.id} />
         <section className="space-y-2">
           <h2 className="text-sm font-medium text-white">Upload code</h2>
           <p className="text-xs text-white/40">

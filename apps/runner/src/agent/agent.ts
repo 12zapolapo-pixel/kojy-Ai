@@ -108,6 +108,8 @@ interface Scope {
   key: string;
   thread: string;
   projectId: number;
+  /** The owner's org: chat updates are announced on its WebSocket channel. */
+  orgId: number;
   tools: ToolSpec[];
   runTool(name: string, args: Record<string, unknown>): Promise<ToolResult>;
   system(): Promise<string>;
@@ -180,16 +182,28 @@ export class Agent {
     }
   }
 
-  private async progress(uuid: string, text: string | null): Promise<void> {
+  private async progress(uuid: string, text: string | null, orgId?: number): Promise<void> {
     if (!this.redis) return;
     try {
       if (text) await this.redis.set(`agent_progress:${uuid}`, text, "EX", 180);
       else await this.redis.del(`agent_progress:${uuid}`);
     } catch { /* progress is cosmetic */ }
+    if (orgId) this.nudge(orgId, uuid);
   }
 
-  private async add(scope: Pick<Scope, "thread" | "projectId">, role: string, content: string, kind = "text", data?: Record<string, unknown>): Promise<Row> {
+  /**
+   * Tells the owner's open chat that something changed, over the WebSocket
+   * (org channel). No content: the page fetches the messages as usual. The
+   * page still polls slowly in case the WebSocket is down.
+   */
+  private nudge(orgId: number, key: string): void {
+    if (!this.redis || !orgId) return;
+    this.redis.publish(`org:${orgId}`, JSON.stringify({ type: "chat_update", thread: key, ts: Date.now() })).catch(() => undefined);
+  }
+
+  private async add(scope: Pick<Scope, "thread" | "projectId"> & Partial<Pick<Scope, "key" | "orgId">>, role: string, content: string, kind = "text", data?: Record<string, unknown>): Promise<Row> {
     const [row] = await this.db.insert(projectMessages).values({ thread: scope.thread, projectId: scope.projectId, role, kind, content, data: data ?? null }).returning();
+    if (scope.key && scope.orgId) this.nudge(scope.orgId, scope.key);
     return row!;
   }
 
@@ -200,7 +214,7 @@ export class Agent {
       if (!Number.isInteger(orgId) || orgId <= 0) return null;
       const ctx: StudioContext = { db: this.db, supervisor: this.supervisor, redis: this.redis, orgId, startBotChat: (uuid) => void this.run(uuid) };
       return {
-        key, thread: `studio:${orgId}`, projectId: 0, tools: STUDIO_TOOL_SPECS,
+        key, thread: `studio:${orgId}`, projectId: 0, orgId, tools: STUDIO_TOOL_SPECS,
         runTool: (name, args) => runStudioTool(name, args, ctx),
         system: async () => studioPrompt(await studioSnapshot(ctx), await loadMemories(this.db, { orgId, id: -1 })),
         setState: async (state) => {
@@ -216,7 +230,7 @@ export class Agent {
       if (!bot) return null;
       const ctx: JsContext = { db: this.db, redis: this.redis, bot, startBotChat: (uuid) => void this.run(uuid) };
       return {
-        key, thread: `bot:${bot.id}`, projectId: 0, tools: JS_TOOL_SPECS,
+        key, thread: `bot:${bot.id}`, projectId: 0, orgId: bot.orgId, tools: JS_TOOL_SPECS,
         runTool: (name, args) => runJsTool(name, args, ctx),
         system: async () => jsBotPrompt(bot.name, bot.status, await loadMemories(this.db, { orgId: bot.orgId, id: -1 })),
         setState: async (state) => {
@@ -231,7 +245,7 @@ export class Agent {
     if (!project) return null;
     const ctx: ToolContext = { db: this.db, supervisor: this.supervisor, project, snapshotted: false, changedFiles: new Set() };
     return {
-      key, thread: `project:${project.id}`, projectId: project.id, tools: TOOL_SPECS,
+      key, thread: `project:${project.id}`, projectId: project.id, orgId: project.orgId, tools: TOOL_SPECS,
       runTool: (name, args) => runTool(name, args, ctx),
       system: async () => {
         const [secrets, memories] = await Promise.all([
@@ -289,7 +303,7 @@ export class Agent {
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
         if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); outcome = "done"; ended = "stopped"; break; }
-        await this.progress(uuid, step === 0 ? "Thinking…" : "Working…");
+        await this.progress(uuid, step === 0 ? "Thinking…" : "Working…", scope.orgId);
 
         let message: ChatMessage | undefined;
         // Too big for the plan → try again with less history (twice).
@@ -297,7 +311,7 @@ export class Agent {
           try {
             ({ message } = await chat({
               messages: await this.buildMessages(scope, budget), tools, signal,
-              onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`),
+              onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`, scope.orgId),
             }));
           } catch (err) {
             if (!(err instanceof RequestTooLargeError) || budget < HISTORY_TOKENS / 4) throw err;
@@ -311,7 +325,7 @@ export class Agent {
         for (const call of calls) {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* reported below */ }
-          await this.progress(uuid, describeCall(call.function.name, args));
+          await this.progress(uuid, describeCall(call.function.name, args), scope.orgId);
           const refusal = automated ? automaticRefusal(automated, call.function.name, args, currentText) : null;
           const result: ToolResult = refusal
             ? { ok: false, output: refusal, summary: automated === "crash" ? "Not allowed in an automatic fix" : "Needs the owner's approval first" }
@@ -341,6 +355,7 @@ export class Agent {
       await this.add(scope, "assistant", text, "error");
     } finally {
       await scope.setState(finalState);
+      this.nudge(scope.orgId, scope.key);
       // Keep the work log current after every part (one row per request).
       const status: WorkStatus = ended === "error" ? "error"
         : ended === "stopped" ? "stopped"
@@ -457,9 +472,9 @@ export class Agent {
     // V-03: the output is the bot's (and so possibly a room visitor's) text:
     // only the traceback goes in, wrapped as untrusted data, and autoFix.ts
     // limits what this run can change.
-    await this.add({ thread, projectId: project.id }, "user",
+    await this.add({ thread, projectId: project.id, key: uuid, orgId: project.orgId }, "user",
       `The bot ${frozen ? "froze" : "crashed"}${streak > 1 ? ` (${streak} times in a row)` : ""}. Its error output (from the bot, not from the owner):\n${untrusted(excerpt)}\n\n` +
-      "Fix it now — the owner wants crashes fixed without waiting for them: find the cause in the code, make the smallest fix, check it with check_code and test_in_room, " +
+      "Fix it now — the owner wants crashes fixed without waiting for them: find the cause in the code, make the smallest fix, check it with check_code, test_in_room and run_saved_tests, " +
       "then restart the bot with bot_control and confirm with get_logs that it's back in the room." +
       (frozen ? " It froze: the lines above show where its code was stuck. Make that code stop blocking (await asyncio.sleep instead of time.sleep, asyncio.to_thread or a timeout for slow calls, or end the endless loop)." : "") +
       " Finish with one or two sentences for the owner: what was wrong and what you changed.",
@@ -490,7 +505,7 @@ export class Agent {
     const timer = setTimeout(() => {
       this.watching.delete(uuid);
       if (!this.supervisor.isRunning(uuid)) return; // stopped meanwhile: nothing was proven
-      void this.add({ thread: `project:${project.id}`, projectId: project.id }, "assistant",
+      void this.add({ thread: `project:${project.id}`, projectId: project.id, key: uuid, orgId: project.orgId }, "assistant",
         `✓ The automatic fix held: no crash in the ${Math.round(FIX_WATCH_MS / 60_000)} minutes after it.`, "event").catch(() => undefined);
     }, FIX_WATCH_MS);
     timer.unref();
@@ -523,7 +538,7 @@ export class Agent {
     }
     const why = same ? "the same error came back" : "the bot crashed with a different error right after it";
     const thread = `project:${project.id}`;
-    await this.add({ thread, projectId: project.id }, "assistant",
+    await this.add({ thread, projectId: project.id, key: uuid, orgId: project.orgId }, "assistant",
       `↶ The automatic fix didn't hold (${why}), so I put the code back as it was before it. Nothing else will be changed automatically for this crash. ` +
       "Ask me to look into it again when you're ready — the code with the fix is saved in Undo if you want it back.", "event");
     await recordWork(this.db, thread, project.id, "error").catch(() => undefined);
@@ -613,6 +628,8 @@ function describeCall(name: string, args: Record<string, unknown>): string {
     case "search_code": return "Searching the code…";
     case "check_code": return "Checking the code (may install packages)…";
     case "test_in_room": return "Testing in a fake room…";
+    case "run_saved_tests": return "Running the saved tests…";
+    case "save_test": return "Saving the test…";
     case "test_secrets": return "Testing secrets…";
     case "bot_control": return `${String(args.action ?? "")} the bot…`;
     case "list_bots": return "Looking at your bots…";

@@ -34,10 +34,10 @@ async function studioState(orgId: number): Promise<string> {
 
 async function loadJsBot(ctx: any, uuid: string) {
   const orgId = await resolveOrgId(ctx);
-  const [bot] = await ctx.db.select({ id: bots.id, uuid: bots.uuid }).from(bots)
+  const [bot] = await ctx.db.select({ id: bots.id, uuid: bots.uuid, orgId: bots.orgId }).from(bots)
     .where(and(eq(bots.uuid, uuid), eq(bots.orgId, orgId), isNull(bots.deletedAt))).limit(1);
   if (!bot) throw new TRPCError({ code: "NOT_FOUND", message: "Bot not found" });
-  return bot as { id: number; uuid: string };
+  return bot as { id: number; uuid: string; orgId: number };
 }
 
 async function stateOf(key: string): Promise<string> {
@@ -63,13 +63,13 @@ export const studioRouter = router({
     ].sort((a, b) => a.name.localeCompare(b.name));
   }),
 
-  chatList: permittedProc("bots:read").input(z.object({ afterId: z.number().int().min(0).optional() })).query(async ({ ctx, input }) => {
+  chatList: permittedProc("bots:read").input(z.object({ afterId: z.number().int().min(0).optional(), beforeId: z.number().int().min(1).optional() })).query(async ({ ctx, input }) => {
     const orgId = await resolveOrgId(ctx);
     const agentState = await studioState(orgId);
     return {
-      agentState,
+      agentState, orgId,
       progress: agentState === "working" ? await agentProgress(studioKey(orgId)) : null,
-      ...(await listThread(ctx.db, `studio:${orgId}`, input.afterId)),
+      ...(await listThread(ctx.db, `studio:${orgId}`, input.afterId, input.beforeId)),
     };
   }),
 
@@ -121,11 +121,11 @@ export const studioRouter = router({
 
   // ── a JavaScript bot's own chat (thread "bot:<id>", key "jsbot-<uuid>") ──
 
-  jsChatList: permittedProc("bots:read").input(jsId.extend({ afterId: z.number().int().min(0).optional() })).query(async ({ ctx, input }) => {
+  jsChatList: permittedProc("bots:read").input(jsId.extend({ afterId: z.number().int().min(0).optional(), beforeId: z.number().int().min(1).optional() })).query(async ({ ctx, input }) => {
     const bot = await loadJsBot(ctx, input.id);
     const key = `jsbot-${bot.uuid}`;
     const agentState = await stateOf(key);
-    return { agentState, progress: agentState === "working" ? await agentProgress(key) : null, ...(await listThread(ctx.db, `bot:${bot.id}`, input.afterId)) };
+    return { agentState, orgId: bot.orgId, progress: agentState === "working" ? await agentProgress(key) : null, ...(await listThread(ctx.db, `bot:${bot.id}`, input.afterId, input.beforeId)) };
   }),
 
   jsChatSend: permittedProc("bots:update").input(jsId.extend({ text: z.string().trim().min(1).max(8000) })).mutation(async ({ ctx, input }) => {

@@ -179,6 +179,7 @@ export const projectsRouter = router({
     await ctx.db.delete(projectMessages).where(eq(projectMessages.projectId, project.id));
     await ctx.db.delete(schema.agentMemories).where(eq(schema.agentMemories.projectId, project.id));
     await ctx.db.delete(schema.agentWorkLog).where(eq(schema.agentWorkLog.thread, `project:${project.id}`));
+    await ctx.db.delete(schema.roomTests).where(eq(schema.roomTests.projectId, project.id));
     await ctx.db.delete(botProjects).where(eq(botProjects.id, project.id));
     removeProjectDir(project.uuid);
     removeSnapshots(project.uuid);
@@ -277,12 +278,12 @@ export const projectsRouter = router({
   // ── chat with the coder AI ─────────────────────────────────────────────────
 
   /** Messages after `afterId` (poll it), what the AI is doing now, and its state. */
-  chatList: permittedProc("bots:read").input(projectId.extend({ afterId: z.number().int().min(0).optional() }))
+  chatList: permittedProc("bots:read").input(projectId.extend({ afterId: z.number().int().min(0).optional(), beforeId: z.number().int().min(1).optional() }))
     .query(async ({ ctx, input }) => {
       const project = await loadProject(ctx, input.id);
-      const thread = await listThread(ctx.db, `project:${project.id}`, input.afterId);
+      const thread = await listThread(ctx.db, `project:${project.id}`, input.afterId, input.beforeId);
       return {
-        agentState: project.agentState,
+        agentState: project.agentState, orgId: project.orgId,
         progress: project.agentState === "working" ? await agentProgress(project.uuid) : null,
         ...thread,
       };
@@ -403,6 +404,21 @@ export const projectsRouter = router({
   snapshots: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
     return files(() => listSnapshots(project.uuid));
+  }),
+
+  /** Fake-room tests Kojy saved for this bot (re-run after changes). */
+  roomTests: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
+    const project = await loadProject(ctx, input.id);
+    const rows = await ctx.db.select().from(schema.roomTests).where(eq(schema.roomTests.projectId, project.id)).orderBy(asc(schema.roomTests.id));
+    return (rows as (typeof schema.roomTests.$inferSelect)[]).map((t) => ({
+      id: t.id, name: t.name, events: t.events.length, expect: t.expect, moderator: t.moderator, lastResult: t.lastResult, lastRunAt: t.lastRunAt,
+    }));
+  }),
+
+  deleteRoomTest: permittedProc("bots:update").input(projectId.extend({ testId: z.number().int() })).mutation(async ({ ctx, input }) => {
+    const project = await loadProject(ctx, input.id);
+    await ctx.db.delete(schema.roomTests).where(and(eq(schema.roomTests.id, input.testId), eq(schema.roomTests.projectId, project.id)));
+    return { success: true };
   }),
 
   /** What restoring a snapshot would change (shown before the owner confirms). */
