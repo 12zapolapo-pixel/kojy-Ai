@@ -50,6 +50,13 @@
       "when": 1793750400000,
       "tag": "0006_agent_work_log",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795400000000,
+      "tag": "0007_activity_amount",
+      "breakpoints": true
     }
   ]
 }

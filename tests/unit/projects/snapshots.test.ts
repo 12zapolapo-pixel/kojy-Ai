@@ -40,3 +40,16 @@ describe("snapshots", () => {
     expect(files.hasCode(id)).toBe(false);
   });
 });
+
+describe("recent console lines across the log's rotation", () => {
+  it("reads the end of .log.1 when the new log is still short", async () => {
+    const { mkdirSync } = await import("node:fs");
+    const id = "00000000-0000-4000-8000-0000000000dd";
+    mkdirSync(files.LOG_DIR, { recursive: true });
+    const line = (n: number) => JSON.stringify({ ts: n, stream: "stdout", line: `line ${n}` });
+    writeFileSync(path.join(files.LOG_DIR, `${id}.log.1`), [1, 2, 3].map(line).join("\n") + "\n");
+    writeFileSync(path.join(files.LOG_DIR, `${id}.log`), [4, 5].map(line).join("\n") + "\n");
+    expect(files.readRecentLogs(id, 10_000).map((l) => l.ts)).toEqual([1, 2, 3, 4, 5]);
+    expect(files.readLogs(id, undefined).lines.map((l) => l.ts)).toEqual([4, 5]);
+  });
+});

@@ -244,8 +244,8 @@ export class Supervisor {
     return env;
   }
 
-  private record(run: Running, kind: string, actorId?: string | null, actorName?: string | null): void {
-    this.activity.record({ orgId: run.project.orgId, source: "project", sourceId: run.project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null });
+  private record(run: Running, kind: string, actorId?: string | null, actorName?: string | null, amount?: number | null): void {
+    this.activity.record({ orgId: run.project.orgId, source: "project", sourceId: run.project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null, amount: amount ?? null });
   }
 
   private readActivity(run: Running): void {
@@ -258,8 +258,9 @@ export class Supervisor {
       partial = lines.pop() ?? "";
       for (const line of lines) {
         try {
-          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null };
-          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n);
+          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null; a?: unknown };
+          const amount = typeof e.a === "number" && Number.isInteger(e.a) && e.a > 0 && e.a < 1e9 ? e.a : null;
+          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n, amount);
         } catch { /* not ours */ }
       }
     });

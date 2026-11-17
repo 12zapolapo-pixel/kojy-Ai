@@ -55,7 +55,7 @@ export default function InfraPage() {
 
   const runner = data.runner.heartbeat as null | { bots: number; rssMb: number; load: number[]; cpus: number; memTotalMb: number; memFreeMb: number; hostUptimeS: number; uptimeS: number; disk: { totalGb: number; freeGb: number } | null };
   const worker = data.worker.heartbeat as null | { rssMb: number; uptimeS: number };
-  const backup = data.backup as null | { ok: boolean; file?: string; size?: number; at: number; entries?: number; error?: string; drill?: Record<string, number> | null; drillAt?: number | null };
+  const backup = data.backup as null | { ok: boolean; file?: string; size?: number; at: number; entries?: number; error?: string; drill?: Record<string, number> | null; drillAt?: number | null; projectsFile?: string; projectsSize?: number; projectsError?: string };
   const py = data.bots.python as Record<string, number>;
   const js = data.bots.js as Record<string, number>;
   const sum = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
@@ -103,6 +103,9 @@ export default function InfraPage() {
                 <p className="text-xs text-white/45">{backup.drill
                   ? `Restore drill passed ${ago(backup.drillAt!)}: ${backup.drill.users} users, ${backup.drill.bots} JS bots, ${backup.drill.projects} Python bots restored into a test database.`
                   : "A full restore drill runs every Sunday."}</p>
+                <p className={clsx("text-xs", backup.projectsFile ? "text-white/60" : "text-amber-300")}>{backup.projectsFile
+                  ? `Bot files and saved data: ${((backup.projectsSize ?? 0) / 1048576).toFixed(1)} MB, packed with the same backup.`
+                  : `Bot files and saved data were NOT backed up: ${backup.projectsError ?? "update the worker"}`}</p>
                 {backupStale && <p className="text-xs text-amber-300">The last backup is over a day and a half old — check the worker.</p>}
               </>
             )}

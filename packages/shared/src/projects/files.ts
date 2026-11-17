@@ -222,6 +222,29 @@ export function readLogs(uuid: string, cursor: number | undefined, maxBytes = 64
   return { lines, cursor: start + Buffer.byteLength(text.slice(0, lastNl + 1)) };
 }
 
+/**
+ * The newest console lines, up to about `maxBytes`, across the log's rotation:
+ * at 2 MB the runner renames the log to .log.1 and starts a new one, and
+ * reading only the new file just after that shows almost nothing.
+ */
+export function readRecentLogs(uuid: string, maxBytes: number): LogLine[] {
+  const current = readLogs(uuid, undefined, maxBytes).lines;
+  const file = path.join(LOG_DIR, `${uuid}.log`);
+  const used = existsSync(file) ? Math.min(statSync(file).size, maxBytes) : 0;
+  const old = path.join(LOG_DIR, `${uuid}.log.1`);
+  if (used >= maxBytes || !existsSync(old)) return current;
+  const size = statSync(old).size;
+  const want = maxBytes - used;
+  const text = strFromU8(readFileSync(old).subarray(Math.max(0, size - want)));
+  const lines: LogLine[] = [];
+  const body = size > want ? text.slice(text.indexOf("\n") + 1) : text;
+  for (const raw of body.split("\n")) {
+    if (!raw) continue;
+    try { lines.push(JSON.parse(raw) as LogLine); } catch { /* torn line */ }
+  }
+  return [...lines, ...current];
+}
+
 // ── snapshots (undo for the coder AI's changes) ──────────────────────────────
 
 export interface Snapshot { id: string; reason: string; createdAt: number; files: number }

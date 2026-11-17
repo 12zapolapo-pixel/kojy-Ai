@@ -23,6 +23,7 @@ const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 function downloadCsv(data: Data) {
   const rows = [["day", "chats", "replies", "joins", "visitors"], ...data.daily.map((d) => [d.day, d.chats, d.replies, d.joins, d.visitors])];
+  rows.push([], ["bot", "chats", "replies", "joins", "tips", "gold", "crashes"], ...data.bots.map((b) => [`"${b.name.replace(/"/g, '""')}"`, b.chats, b.replies, b.joins, b.tips, b.gold, b.crashes]));
   const url = URL.createObjectURL(new Blob([rows.map((r) => r.join(",")).join("\n")], { type: "text/csv" }));
   Object.assign(document.createElement("a"), { href: url, download: `kojyai-activity-${new Date().toISOString().slice(0, 10)}.csv` }).click();
   URL.revokeObjectURL(url);
@@ -30,8 +31,11 @@ function downloadCsv(data: Data) {
 
 export default function AnalyticsPage() {
   const [days, setDays] = useState(7);
+  const [bot, setBot] = useState("");
+  const bots = trpc.studio.bots.useQuery(undefined, { staleTime: 60_000 });
   const tzOffsetMin = new Date().getTimezoneOffset();
-  const input = { days, tzOffsetMin };
+  const [kind, id] = bot.split(":") as ["python" | "javascript", string];
+  const input = { days, tzOffsetMin, ...(bot ? { bot: { kind, id } } : {}) };
   const { data, isLoading, isError, error } = useQuery({
     queryKey: getQueryKey(trpc.analytics.activity, input, "query"),
     queryFn: () => trpcClient.analytics.activity.query(input),
@@ -51,7 +55,11 @@ export default function AnalyticsPage() {
           <h1 className="text-lg font-semibold text-white/90">Analytics</h1>
           <p className="text-xs text-white/35 mt-0.5">Real activity in your bots' rooms — JavaScript and Python bots</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <select value={bot} onChange={(e) => setBot(e.target.value)} className="bg-white/[0.04] border border-white/8 rounded-lg px-2 py-1 text-xs text-white/70">
+            <option value="">All bots</option>
+            {bots.data?.map((b) => <option key={`${b.kind}:${b.id}`} value={`${b.kind}:${b.id}`}>{b.name}</option>)}
+          </select>
           {RANGES.map((r) => (
             <button key={r.days} onClick={() => setDays(r.days)}
               className={clsx("px-3 py-1 rounded-lg border text-xs transition-colors",
@@ -76,11 +84,21 @@ export default function AnalyticsPage() {
   );
 }
 
-function Stat({ label, value, hint }: { label: string; value: number | string; hint?: string | undefined }) {
+/** "+12% vs previous 7 days" (null when there's nothing to compare). */
+function change(now: number, before: number | undefined): { text: string; up: boolean } | null {
+  if (before === undefined || (now === 0 && before === 0)) return null;
+  if (before === 0) return { text: "new this period", up: true };
+  const pct = Math.round(((now - before) / before) * 100);
+  return { text: `${pct > 0 ? "+" : ""}${pct}% vs before`, up: pct >= 0 };
+}
+
+function Stat({ label, value, hint, before, invert }: { label: string; value: number | string; hint?: string | undefined; before?: number | undefined; invert?: boolean }) {
+  const c = typeof value === "number" ? change(value, before) : null;
   return (
     <div className="bg-white/[0.03] border border-white/8 rounded-xl p-4">
       <p className="text-[11px] uppercase tracking-wide text-white/35">{label}</p>
       <p className="text-2xl font-semibold text-white mt-1">{typeof value === "number" ? value.toLocaleString() : value}</p>
+      {c && <p className={clsx("text-[11px] mt-0.5", c.up !== !!invert ? "text-emerald-300/80" : "text-amber-300/80")}>{c.text}</p>}
       {hint && <p className="text-[11px] text-white/35 mt-1">{hint}</p>}
     </div>
   );
@@ -89,6 +107,7 @@ function Stat({ label, value, hint }: { label: string; value: number | string; h
 function Dashboard({ data, chats }: { data: Data; chats: number }) {
   const navigate = useNavigate();
   const t = data.totals;
+  const p = data.previous.totals;
   const replyRate = chats ? Math.round(((t.reply ?? 0) / chats) * 100) : 0;
 
   const grid = useMemo(() => {
@@ -102,13 +121,14 @@ function Dashboard({ data, chats }: { data: Data; chats: number }) {
 
   return (
     <>
-      <div className="grid gap-3 grid-cols-2 lg:grid-cols-6">
-        <Stat label="Messages" value={chats} hint={t.whisper ? `${t.whisper} whispers` : undefined} />
-        <Stat label="Bot replies" value={t.reply ?? 0} hint={chats ? (replyRate > 100 ? `about ${Math.round(replyRate / 100)} per message` : `${replyRate}% of messages`) : undefined} />
-        <Stat label="Visitors" value={data.visitors} hint="different people" />
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-7">
+        <Stat label="Messages" value={chats} before={(p.chat ?? 0) + (p.whisper ?? 0)} hint={t.whisper ? `${t.whisper} whispers` : undefined} />
+        <Stat label="Bot replies" value={t.reply ?? 0} before={p.reply} hint={chats ? (replyRate > 100 ? `about ${Math.round(replyRate / 100)} per message` : `${replyRate}% of messages`) : undefined} />
+        <Stat label="Visitors" value={data.visitors} before={data.previous.visitors} hint="different people" />
         <Stat label="Returning" value={data.returning} hint="came back on 2+ days" />
-        <Stat label="Joins" value={t.join ?? 0} hint={t.tip ? `${t.tip} tips` : undefined} />
-        <Stat label="Crashes" value={t.crash ?? 0} hint={`${t.start ?? 0} starts`} />
+        <Stat label="Joins" value={t.join ?? 0} before={p.join} />
+        <Stat label="Gold tipped" value={data.gold} before={data.previous.gold} hint={t.tip ? `${t.tip} tips` : "to your bots"} />
+        <Stat label="Crashes" value={t.crash ?? 0} before={p.crash} invert hint={`${t.start ?? 0} starts`} />
       </div>
 
       <section className="bg-white/[0.02] border border-white/8 rounded-xl p-4">
@@ -155,15 +175,15 @@ function Dashboard({ data, chats }: { data: Data; chats: number }) {
           <h2 className="text-sm text-white/70 mb-3">By bot</h2>
           <table className="w-full text-xs">
             <thead className="text-white/35 text-left">
-              <tr><th className="py-1 pr-3">Bot</th><th className="pr-3">Messages</th><th className="pr-3">Replies</th><th className="pr-3">Visitors</th><th className="pr-3">Joins</th><th className="pr-3">Tips</th><th className="pr-3">Crashes</th><th>Last activity</th></tr>
+              <tr><th className="py-1 pr-3">Bot</th><th className="pr-3">Messages</th><th className="pr-3">Replies</th><th className="pr-3">Visitors</th><th className="pr-3">Joins</th><th className="pr-3">Tips</th><th className="pr-3">Gold</th><th className="pr-3">Crashes</th><th>Last activity</th></tr>
             </thead>
             <tbody className="text-white/75">
               {data.bots.map((b) => (
                 <tr key={`${b.kind}-${b.id ?? b.name}`} className="border-t border-white/5 hover:bg-white/[0.03] cursor-pointer"
-                  onClick={() => b.id && navigate(b.kind === "python" ? `/projects/${b.id}` : `/bots/${b.id}`)}>
+                  onClick={() => b.id && navigate(`/studio/${b.kind === "python" ? "p" : "j"}/${b.id}`)}>
                   <td className="py-1.5 pr-3">{b.name} <span className="text-white/30">{b.kind === "python" ? "🐍" : "JS"}</span></td>
                   <td className="pr-3">{b.chats}</td><td className="pr-3">{b.replies}</td><td className="pr-3">{b.visitors}</td>
-                  <td className="pr-3">{b.joins}</td><td className="pr-3">{b.tips}</td>
+                  <td className="pr-3">{b.joins}</td><td className="pr-3">{b.tips}</td><td className="pr-3">{b.gold}</td>
                   <td className={clsx("pr-3", b.crashes > 0 && "text-amber-300")}>{b.crashes}</td>
                   <td className="text-white/40">{b.lastActivity ? new Date(b.lastActivity).toLocaleString() : "—"}</td>
                 </tr>

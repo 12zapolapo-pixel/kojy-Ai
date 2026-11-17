@@ -15,7 +15,7 @@ import type { Database } from "@kojyai/db";
 import { botProjects, projectSecrets, agentMemories } from "@kojyai/db/schema";
 import { decryptApiKey } from "@kojyai/shared/crypto";
 import {
-  listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
+  listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readRecentLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { BOTCHECK, LAUNCHER } from "../supervisor.js";
@@ -442,7 +442,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       case "get_logs": {
         const n = Math.min(Math.max(Number(args.lines) || 40, 5), 120);
         // A day of output for the connection summary; only the newest lines are shown.
-        const lines = readLogs(uuid, undefined, 512 * 1024).lines;
+        const lines = readRecentLogs(uuid, 512 * 1024);
         const [p] = await ctx.db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage, restartCount: botProjects.restartCount, lastStartedAt: botProjects.lastStartedAt })
           .from(botProjects).where(eq(botProjects.id, ctx.project.id));
         const now = Date.now();

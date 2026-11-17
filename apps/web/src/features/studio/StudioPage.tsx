@@ -30,7 +30,7 @@ const PANELS: { id: Panel; label: string }[] = [
 
 export default function StudioPage() {
   const { kind, id } = useParams();
-  const bots = trpc.studio.bots.useQuery(undefined, { refetchInterval: 5000 });
+  const bots = trpc.studio.bots.useQuery(undefined, { refetchInterval: 10_000 });
 
   return (
     <div className="h-full flex min-h-0">
@@ -107,7 +107,7 @@ function Split({ chat, panel, panelTabs, active }: {
 
 function PythonBot({ id }: { id: string }) {
   const navigate = useNavigate();
-  const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 4000 });
+  const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 8000 });
   const [panel, setPanel] = useState<Panel>("console");
   const [kojyPanel, setKojyPanel] = useState<string | undefined>();
 
