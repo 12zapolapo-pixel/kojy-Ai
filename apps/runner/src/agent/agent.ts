@@ -22,7 +22,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, desc, eq, gt, ne } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
 import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
@@ -32,7 +32,7 @@ import { createLogger } from "../logger.js";
 import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
-import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, type PartOutcome } from "./taskMemory.js";
+import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
 import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
@@ -121,7 +121,6 @@ export const JSBOT_PREFIX = "jsbot-";
 export class Agent {
   private active = new Map<string, AbortController>();
   private again = new Set<string>();
-  private autofixLog = new Map<string, number[]>();
 
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
     supervisor.onCrash = (uuid, streak, tail) => void this.onCrash(uuid, streak, tail);
@@ -351,8 +350,10 @@ export class Agent {
    * asked for or approved — else null. autoFix.ts says what such a run may do.
    */
   private async automatedKind(thread: string): Promise<AutomatedKind | null> {
+    // "The owner edited a file" notes are information, not an approval: they
+    // don't end an automatic run's limits.
     const [last] = await this.db.select({ kind: projectMessages.kind }).from(projectMessages)
-      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.role, "user")))
+      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.role, "user"), ne(projectMessages.kind, "owner_edit")))
       .orderBy(desc(projectMessages.id)).limit(1);
     return last && AUTOMATED_KINDS.has(last.kind) ? (last.kind as AutomatedKind) : null;
   }
@@ -390,7 +391,7 @@ export class Agent {
         if (calls && !full) calls = calls.map((c) => ({ ...c, function: { ...c.function, arguments: shrinkArgs(c.function.arguments) } }));
         return { role: "assistant", content: r.content || null, ...(calls?.length ? { tool_calls: calls } : {}) };
       }
-      return { role: "user", content: r.kind === "event" ? `[app] ${r.content}` : r.content };
+      return { role: "user", content: APP_NOTE_KINDS.has(r.kind) ? `[app] ${r.content}` : r.content };
     };
 
     // Newest first, until the budget runs out; results after the last user message stay full.
@@ -431,16 +432,13 @@ export class Agent {
     if (!project?.autoFix || project.desiredState !== "running") return;
     if (!configuredLanes().length) return; // no AI key of any kind
 
+    // The limits are counted from the chat itself (one "crash" message per
+    // automatic fix), so a runner restart doesn't reset them.
     const now = Date.now();
-    const recent = (this.autofixLog.get(uuid) ?? []).filter((t) => now - t < 24 * 3600_000);
-    if (recent.length >= AUTOFIX_PER_DAY) return;
-    // A fix that didn't hold gets another try, but not in a tight loop.
     const thread = `project:${project.id}`;
-    const [last] = await this.db.select({ id: projectMessages.id }).from(projectMessages)
-      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.kind, "crash"), gt(projectMessages.createdAt, new Date(now - AUTOFIX_GAP_MS)))).limit(1);
-    if (last) return;
-    recent.push(now);
-    this.autofixLog.set(uuid, recent);
+    const fixes = await this.db.select({ at: projectMessages.createdAt }).from(projectMessages)
+      .where(and(eq(projectMessages.thread, thread), eq(projectMessages.kind, "crash"), gt(projectMessages.createdAt, new Date(now - 24 * 3600_000))));
+    if (!autoFixAllowed(fixes.map((f) => (f.at as Date | undefined)?.getTime() ?? now), now)) return;
 
     const frozen = excerpt.includes("BotFrozenError");
     // V-03: the output is the bot's (and so possibly a room visitor's) text:
@@ -465,6 +463,16 @@ export class Agent {
       void sendAlert(`🛠️ ${title}: ${summary}`);
     }).catch((err) => log.warn({ err, uuid }, "Auto-fix follow-up failed"));
   }
+}
+
+/**
+ * Whether another automatic fix may start: at most AUTOFIX_PER_DAY in 24
+ * hours, and a fix that didn't hold gets another try, but not in a tight loop.
+ * `starts` = when earlier automatic fixes started (ms).
+ */
+export function autoFixAllowed(starts: number[], now: number): boolean {
+  const today = starts.filter((t) => now - t < 24 * 3600_000);
+  return today.length < AUTOFIX_PER_DAY && !today.some((t) => now - t < AUTOFIX_GAP_MS);
 }
 
 /**

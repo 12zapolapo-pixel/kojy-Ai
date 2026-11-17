@@ -14,7 +14,7 @@ export interface SecretCard { secrets: { name: string; description: string; alre
 /** "ui" cards: open a panel, or a button into a bot's chat. */
 export interface UiCard { panel?: string; openBot?: { kind: "python" | "javascript"; id: string; name: string } }
 /** "plan" cards: Kojy's plan before a bigger change, approved with a button. */
-export interface PlanCard { title?: string; steps?: string[] }
+export interface PlanCard { title?: string; steps?: string[]; rejected?: boolean }
 
 export async function listThread(db: any, thread: string, afterId: number | undefined) {
   type Row = typeof projectMessages.$inferSelect;
@@ -40,6 +40,27 @@ export async function listThread(db: any, thread: string, afterId: number | unde
 
 export async function addToThread(db: any, thread: string, projectId: number, role: string, kind: string, content: string) {
   await db.insert(projectMessages).values({ thread, projectId, role, kind, content });
+}
+
+/**
+ * Message kind for "the owner changed the code themselves". Kept apart from
+ * "event" because, unlike other app notes, it must neither start a new
+ * request nor end the limits of an automatic run (see the runner's
+ * automatedKind / requestIndex).
+ */
+export const OWNER_EDIT_KIND = "owner_edit";
+
+/**
+ * Tells Kojy the owner changed files outside the chat, so it re-reads them
+ * instead of working from an old copy. A note identical to the newest message
+ * isn't repeated (saving the same file five times is one note).
+ */
+export async function noteOwnerEdit(db: any, projectId: number, content: string) {
+  const thread = `project:${projectId}`;
+  const [last] = await db.select({ kind: projectMessages.kind, content: projectMessages.content }).from(projectMessages)
+    .where(eq(projectMessages.thread, thread)).orderBy(desc(projectMessages.id)).limit(1);
+  if (last && last.kind === OWNER_EDIT_KIND && last.content === content) return;
+  await addToThread(db, thread, projectId, "user", OWNER_EDIT_KIND, content);
 }
 
 export async function agentProgress(key: string): Promise<string | null> {

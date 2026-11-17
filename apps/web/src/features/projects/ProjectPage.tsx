@@ -249,9 +249,19 @@ export function SecretsTab({ project }: { project: Project }) {
   const utils = trpc.useUtils();
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
+  const [changed, setChanged] = useState(false);
   const refresh = () => void utils.projects.get.invalidate({ id: project.id });
-  const set = trpc.projects.setSecret.useMutation({ onSuccess: () => { setKey(""); setValue(""); refresh(); } });
-  const del = trpc.projects.deleteSecret.useMutation({ onSuccess: refresh });
+  const restart = trpc.projects.restart.useMutation({ onSuccess: () => { setChanged(false); refresh(); } });
+  const running = project.desiredState === "running";
+  const [thenRestart, setThenRestart] = useState(false);
+  const set = trpc.projects.setSecret.useMutation({
+    onSuccess: () => {
+      setKey(""); setValue(""); refresh();
+      // The running bot only reads its secrets when it starts.
+      if (thenRestart && running) restart.mutate({ id: project.id }); else setChanged(true);
+    },
+  });
+  const del = trpc.projects.deleteSecret.useMutation({ onSuccess: () => { refresh(); setChanged(true); } });
   const missing = ["HIGHRISE_ROOM_ID", "HIGHRISE_BOT_TOKEN"].filter((k) => !project.secrets.some((s) => s.key === k));
 
   return (
@@ -268,8 +278,22 @@ export function SecretsTab({ project }: { project: Project }) {
           <input className={`${input} font-mono`} placeholder="NAME (e.g. GROQ_API_KEY)" value={key} onChange={(e) => setKey(e.target.value)} maxLength={100} />
           <input className={`${input} font-mono`} type="password" placeholder="value" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="off" />
           {set.isError && <p className="text-xs text-red-400">{set.error.message}</p>}
-          <button className={primaryBtn} disabled={!key.trim() || set.isPending}>{set.isPending ? "Saving…" : "Save secret"}</button>
+          <div className="flex flex-wrap gap-2">
+            <button className={primaryBtn} disabled={!key.trim() || set.isPending} onClick={() => setThenRestart(false)}>{set.isPending && !thenRestart ? "Saving…" : "Save secret"}</button>
+            {running && (
+              <button className={ghostBtn} disabled={!key.trim() || set.isPending || restart.isPending} onClick={() => setThenRestart(true)}>
+                {(set.isPending && thenRestart) || restart.isPending ? "Saving…" : "Save & restart bot"}
+              </button>
+            )}
+          </div>
         </form>
+        {changed && running && (
+          <div className="flex items-center gap-3 text-xs text-amber-300/80 border border-amber-400/20 rounded-lg px-3 py-2">
+            <span className="flex-1">The running bot still uses the old secrets until it restarts.</span>
+            <button className={`${ghostBtn} text-xs`} disabled={restart.isPending} onClick={() => restart.mutate({ id: project.id })}>{restart.isPending ? "Restarting…" : "Restart now"}</button>
+          </div>
+        )}
+        {restart.isError && <p className="text-xs text-red-400">{restart.error.message}</p>}
         <ul className="divide-y divide-white/5 border border-white/5 rounded-lg">
           {project.secrets.length === 0 && <li className="p-3 text-sm text-white/40">No secrets yet.</li>}
           {project.secrets.map((s) => (

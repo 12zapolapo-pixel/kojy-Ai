@@ -18,7 +18,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 export const PROJECTS_DIR = path.resolve(process.env.PROJECTS_DIR ?? "./data/projects");
 export const LOG_DIR = path.join(PROJECTS_DIR, ".logs");
 const SNAPSHOT_DIR = path.join(PROJECTS_DIR, ".snapshots");
-const MAX_SNAPSHOTS = 15;
+const MAX_SNAPSHOTS = 30;
 
 /** Never shown, uploaded or zipped. */
 const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", "__MACOSX", ".pythonlibs", ".cache", ".upm"]);
@@ -226,7 +226,7 @@ export function readLogs(uuid: string, cursor: number | undefined, maxBytes = 64
 
 export interface Snapshot { id: string; reason: string; createdAt: number; files: number }
 
-/** Zips the project's code (not its data/ or database files). Keeps the last 15. */
+/** Zips the project's code (not its data/ or database files). Keeps the last 30. */
 export function snapshotProject(uuid: string, reason: string): Snapshot {
   const root = ensureProjectDir(uuid);
   const entries: Record<string, Uint8Array> = {};
@@ -243,6 +243,18 @@ export function snapshotProject(uuid: string, reason: string): Snapshot {
   const all = readdirSync(dir).filter((n) => n.endsWith(".zip")).sort();
   for (const old of all.slice(0, Math.max(0, all.length - MAX_SNAPSHOTS))) rmSync(path.join(dir, old), { force: true });
   return { id, reason, createdAt, files: Object.keys(entries).length - 1 };
+}
+
+/**
+ * Snapshot before an owner's own change (a save in the code editor, a delete,
+ * a zip upload) — unless the newest snapshot already has this reason and is
+ * younger than `withinMs`, so a burst of saves doesn't push out older versions.
+ */
+export function snapshotUnlessRecent(uuid: string, reason: string, withinMs: number): Snapshot | null {
+  if (!listFiles(uuid).some((f) => !f.isDir && !isPersistentData(f.path))) return null; // nothing to keep yet
+  const newest = listSnapshots(uuid)[0];
+  if (newest && newest.reason === reason && Date.now() - newest.createdAt < withinMs) return null;
+  return snapshotProject(uuid, reason);
 }
 
 export function listSnapshots(uuid: string): Snapshot[] {

@@ -17,6 +17,7 @@ import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { getRedis, getRedisPublisher } from "../../utils/redis.js";
 import { signBotControlMessage } from "@kojyai/shared/crypto";
 import { listThread, addToThread, agentProgress } from "../projects/chat.js";
+import { pickMemories } from "@kojyai/shared/projects";
 
 const { botProjects, bots, projectMessages, agentMemories } = schema;
 const studioKey = (orgId: number) => `studio-${orgId}`;
@@ -88,15 +89,27 @@ export const studioRouter = router({
 
   memories: permittedProc("bots:read").query(async ({ ctx }) => {
     const orgId = await resolveOrgId(ctx);
-    const rows = await ctx.db.select({ id: agentMemories.id, content: agentMemories.content, projectId: agentMemories.projectId, createdAt: agentMemories.createdAt, bot: botProjects.name })
+    const rows = await ctx.db.select({ id: agentMemories.id, content: agentMemories.content, projectId: agentMemories.projectId, source: agentMemories.source, pinned: agentMemories.pinned, createdAt: agentMemories.createdAt, bot: botProjects.name })
       .from(agentMemories).leftJoin(botProjects, eq(botProjects.id, agentMemories.projectId))
       .where(eq(agentMemories.orgId, orgId)).orderBy(desc(agentMemories.id)).limit(300);
-    return rows.map((r) => ({ id: r.id, content: r.content, bot: r.projectId ? (r.bot ?? "(deleted bot)") : null, createdAt: r.createdAt }));
+    // Which notes Kojy reads in the Studio chat right now (bot chats add that bot's own notes).
+    const read = new Set(pickMemories(rows, -1).map((r) => r.id));
+    return rows.map((r) => ({
+      id: r.id, content: r.content, bot: r.projectId ? (r.bot ?? "(deleted bot)") : null, createdAt: r.createdAt,
+      source: r.source, pinned: r.pinned, read: r.projectId !== null || read.has(r.id),
+    }));
   }),
 
   addMemory: permittedProc("bots:update").input(z.object({ content: z.string().trim().min(1).max(300) })).mutation(async ({ ctx, input }) => {
     const orgId = await resolveOrgId(ctx);
-    await ctx.db.insert(agentMemories).values({ orgId, projectId: null, content: input.content });
+    await ctx.db.insert(agentMemories).values({ orgId, projectId: null, content: input.content, source: "owner" });
+    return { success: true };
+  }),
+
+  /** A pinned note is always read, however many others there are. */
+  pinMemory: permittedProc("bots:update").input(z.object({ id: z.number().int(), pinned: z.boolean() })).mutation(async ({ ctx, input }) => {
+    const orgId = await resolveOrgId(ctx);
+    await ctx.db.update(agentMemories).set({ pinned: input.pinned }).where(and(eq(agentMemories.id, input.id), eq(agentMemories.orgId, orgId)));
     return { success: true };
   }),
 

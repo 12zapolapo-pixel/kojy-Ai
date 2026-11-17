@@ -273,9 +273,10 @@ function KojyMemory() {
   const [note, setNote] = useState("");
   const add = trpc.studio.addMemory.useMutation({ onSuccess: () => { setNote(""); void utils.studio.memories.invalidate(); } });
   const del = trpc.studio.deleteMemory.useMutation({ onSuccess: () => void utils.studio.memories.invalidate() });
+  const pin = trpc.studio.pinMemory.useMutation({ onSuccess: () => void utils.studio.memories.invalidate() });
   return (
     <div className="h-full overflow-y-auto p-4 space-y-3">
-      <p className="text-xs text-white/45">Kojy saves short lessons as it works and reads them before every task. Remove anything wrong, or teach it something yourself.</p>
+      <p className="text-xs text-white/45">Kojy saves short lessons as it works and reads them before every task. What you teach and what you pin (📌) is always read; Kojy's own notes are read newest first until there's no more room. Remove anything wrong, or teach it something yourself.</p>
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (note.trim()) add.mutate({ content: note.trim() }); }}>
         <input value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} placeholder="e.g. My room's theme is a beach club; keep messages short and fun."
           className="flex-1 bg-white/[0.03] border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white/85 focus:outline-none focus:border-[#49dcb5]/40" />
@@ -284,8 +285,13 @@ function KojyMemory() {
       {memories.data?.length === 0 && <p className="text-sm text-white/40">Nothing yet — Kojy learns as it fixes and builds things.</p>}
       <ul className="space-y-1.5">
         {memories.data?.map((m) => (
-          <li key={m.id} className="flex items-start gap-2 text-sm text-white/75 border border-white/8 rounded-lg px-3 py-2">
-            <span className="flex-1">{m.content}<span className="block text-[10px] text-white/30 mt-0.5">{m.bot ? `About ${m.bot}` : "All bots"} · {new Date(m.createdAt).toLocaleDateString()}</span></span>
+          <li key={m.id} className={clsx("flex items-start gap-2 text-sm border border-white/8 rounded-lg px-3 py-2", m.read ? "text-white/75" : "text-white/40")}>
+            <span className="flex-1">{m.content}<span className="block text-[10px] text-white/30 mt-0.5">
+              {m.bot ? `About ${m.bot}` : "All bots"} · {m.source === "owner" ? "taught by you" : "saved by Kojy"} · {new Date(m.createdAt).toLocaleDateString()}
+              {!m.read && <span className="text-amber-300/70"> · not read right now (older note — pin it to keep it)</span>}
+            </span></span>
+            <button title={m.pinned ? "Unpin" : "Pin: always read this"} disabled={pin.isPending} onClick={() => pin.mutate({ id: m.id, pinned: !m.pinned })}
+              className={clsx("text-xs", m.pinned ? "opacity-100" : "opacity-30 hover:opacity-80")}>📌</button>
             <button title="Forget this" onClick={() => del.mutate({ id: m.id })} className="text-white/30 hover:text-red-300 text-xs">✕</button>
           </li>
         ))}

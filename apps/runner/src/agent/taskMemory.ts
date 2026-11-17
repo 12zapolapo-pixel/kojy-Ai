@@ -30,11 +30,18 @@ export const TASK_MAX_CHARS = 1200;
 export const DONE_MAX_ITEMS = 25;
 export const ITEM_MAX_CHARS = 120;
 
+/**
+ * User-role rows written by the app, not typed by the owner: notes such as
+ * "secrets saved" (event) or "the owner edited bot.py" (owner_edit). They
+ * never start a request.
+ */
+export const APP_NOTE_KINDS = new Set(["event", "owner_edit"]);
+
 /** Index of the owner's message that started the current request (-1 if none). Oldest-first rows. */
 export function requestIndex(rows: { role: string; kind: string; content: string }[]): number {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
-    if (r.role === "user" && r.kind !== "event" && !CONTINUE.test(r.content)) return i;
+    if (r.role === "user" && !APP_NOTE_KINDS.has(r.kind) && !CONTINUE.test(r.content)) return i;
   }
   return -1;
 }

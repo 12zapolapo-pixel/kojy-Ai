@@ -16,6 +16,7 @@ import { botProjects, projectSecrets, agentMemories } from "@kojyai/db/schema";
 import { decryptApiKey } from "@kojyai/shared/crypto";
 import {
   listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
+  pickMemories, normalizeNote,
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { BOTCHECK, LAUNCHER } from "../supervisor.js";
@@ -465,6 +466,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       case "remember": {
         const note = s(args.note).trim().slice(0, 300);
         if (!note) return { ok: false, output: "Empty note.", summary: "Nothing to remember" };
+        const existing = await ctx.db.select({ content: agentMemories.content }).from(agentMemories).where(eq(agentMemories.orgId, ctx.project.orgId));
+        if (existing.some((m) => normalizeNote(m.content) === normalizeNote(note))) return { ok: true, output: "Already saved earlier.", summary: `Already knew: ${note}` };
         await ctx.db.insert(agentMemories).values({ orgId: ctx.project.orgId, projectId: args.scope === "all" ? null : ctx.project.id, content: note });
         return { ok: true, output: "Saved.", summary: `Remembered: ${note}` };
       }
@@ -479,8 +482,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 }
 
 export async function loadMemories(db: Database, project: { orgId: number; id: number }): Promise<string[]> {
-  const rows = await db.select({ content: agentMemories.content, projectId: agentMemories.projectId }).from(agentMemories)
-    .where(eq(agentMemories.orgId, project.orgId)).orderBy(asc(agentMemories.id));
-  return rows.filter((r) => r.projectId === null || r.projectId === project.id).slice(-15).map((r) => r.content);
+  const rows = await db.select({ id: agentMemories.id, content: agentMemories.content, projectId: agentMemories.projectId, source: agentMemories.source, pinned: agentMemories.pinned })
+    .from(agentMemories).where(eq(agentMemories.orgId, project.orgId)).orderBy(asc(agentMemories.id));
+  return pickMemories(rows, project.id).map((r) => r.content);
 }
 

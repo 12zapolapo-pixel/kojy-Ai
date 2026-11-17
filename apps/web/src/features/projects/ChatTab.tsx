@@ -62,6 +62,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
   const lastId = useRef(0);
   const box = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const textArea = useRef<HTMLTextAreaElement>(null);
   const onPanelRef = useRef(onPanel);
   onPanelRef.current = onPanel;
   const pid = project?.id ?? null;
@@ -131,6 +132,8 @@ export function ChatTab({ project, jsBot, onPanel }: {
     : jid ? trpcClient.studio.jsChatStop.mutate({ id: jid }) : trpcClient.studio.chatStop.mutate());
   const working = state.agentState === "working";
   const cleared = () => { lastId.current = 0; setMessages([]); };
+  /** Puts text in the message box (e.g. "Change the plan: ") and focuses it. */
+  const draft = (t: string) => { setText(t); setTimeout(() => { const el = textArea.current; if (el) { el.focus(); el.setSelectionRange(t.length, t.length); } }, 0); };
   const openBot = (kind: string, id: string) => navigate(`/studio/${kind === "javascript" ? "j" : "p"}/${id}`);
 
   return (
@@ -161,8 +164,8 @@ export function ChatTab({ project, jsBot, onPanel }: {
             </div>
           </div>
         )}
-        {messages.map((m) => <Fragment key={m.id}><MessageView m={m} projectId={pid} onPanel={onPanel} onOpenBot={openBot} onResolved={(id, saved) =>
-          setMessages((prev) => prev.map((x) => (x.id === id && x.card ? { ...x, card: { ...x.card, resolved: true, saved } } : x)))} /></Fragment>)}
+        {messages.map((m) => <Fragment key={m.id}><MessageView m={m} projectId={pid} onPanel={onPanel} onOpenBot={openBot} onDraft={draft} onResolved={(id, saved, extra) =>
+          setMessages((prev) => prev.map((x) => (x.id === id && x.card ? { ...x, card: { ...x.card, ...extra, resolved: true, saved } } : x)))} /></Fragment>)}
         {working && (
           <div className="flex items-center gap-2 text-xs text-white/50">
             <span className="inline-block w-2 h-2 rounded-full bg-[#49dcb5] animate-pulse" />
@@ -182,7 +185,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
                 className="px-3 py-2 border border-white/10 rounded-lg text-white/60 hover:bg-white/5 disabled:opacity-50">{uploading ? "…" : "📎"}</button>
             </>
           )}
-          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={Math.min(6, Math.max(1, text.split("\n").length))}
+          <textarea ref={textArea} value={text} onChange={(e) => setText(e.target.value)} rows={Math.min(6, Math.max(1, text.split("\n").length))}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(text); } }}
             placeholder={working ? "Kojy is working — you can still add a message" : project || jsBot ? "Ask Kojy to build, fix or explain something…" : "Ask Kojy about your bots…"}
             className="flex-1 resize-none bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white/85 focus:outline-none focus:border-[#49dcb5]/40" maxLength={8000} />
@@ -319,9 +322,9 @@ const PANEL_LABEL: Record<string, string> = {
 // Studio cards that point at a whole page rather than a bot panel.
 const PANEL_PAGE: Record<string, string> = { analytics: "/analytics", status: "/infrastructure" };
 
-function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
-  m: Msg; projectId: string | null; onResolved: (id: number, saved: string[]) => void;
-  onPanel?: ((panel: string) => void) | undefined; onOpenBot: (kind: string, id: string) => void;
+function MessageView({ m, projectId, onResolved, onPanel, onOpenBot, onDraft }: {
+  m: Msg; projectId: string | null; onResolved: (id: number, saved: string[], extra?: Record<string, unknown>) => void;
+  onPanel?: ((panel: string) => void) | undefined; onOpenBot: (kind: string, id: string) => void; onDraft?: ((text: string) => void) | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
@@ -367,9 +370,9 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
   }
   if (m.role === "user") {
     // App events ("secrets saved", "code restored"): shown small, without the AI-facing instructions.
-    return <p className="text-center text-[11px] text-white/35">{m.content.replace(/ (Test them|Restart the bot).*$/, "")}</p>;
+    return <p className="text-center text-[11px] text-white/35">{m.content.replace(/ (Test them|Restart the bot|Read it again|Files you read|Go ahead|Stop and).*$/, "")}</p>;
   }
-  if (m.kind === "plan" && m.card && projectId) return <PlanCardView m={m} projectId={projectId} onResolved={onResolved} />;
+  if (m.kind === "plan" && m.card && projectId) return <PlanCardView m={m} projectId={projectId} onResolved={onResolved} onDraft={onDraft} />;
   if (m.kind === "secret_request" && m.card && projectId) return <SecretCard m={m} projectId={projectId} onResolved={onResolved} />;
   if (m.role === "tool") {
     return (
@@ -386,9 +389,13 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
   return <div className="max-w-[85%] text-sm text-white/85 leading-relaxed"><RichText text={m.content} /></div>;
 }
 
-function PlanCardView({ m, projectId, onResolved }: { m: Msg; projectId: string; onResolved: (id: number, saved: string[]) => void }) {
+function PlanCardView({ m, projectId, onResolved, onDraft }: {
+  m: Msg; projectId: string; onResolved: (id: number, saved: string[], extra?: Record<string, unknown>) => void; onDraft?: ((text: string) => void) | undefined;
+}) {
   const card = m.card!;
   const approve = trpc.projects.chatApprovePlan.useMutation({ onSuccess: () => onResolved(m.id, []) });
+  const reject = trpc.projects.chatRejectPlan.useMutation({ onSuccess: () => onResolved(m.id, [], { rejected: true }) });
+  const busy = approve.isPending || reject.isPending;
   return (
     <div className="max-w-lg border border-white/15 bg-white/[0.03] rounded-xl p-4 space-y-3">
       <p className="text-sm text-white/85">📋 {card.title ?? "Plan"}</p>
@@ -396,15 +403,20 @@ function PlanCardView({ m, projectId, onResolved }: { m: Msg; projectId: string;
         {(card.steps ?? []).map((s, i) => <li key={i}>{s}</li>)}
       </ol>
       {card.resolved ? (
-        <p className="text-xs text-[#49dcb5]">✓ Approved</p>
+        card.rejected ? <p className="text-xs text-white/40">✕ Declined</p> : <p className="text-xs text-[#49dcb5]">✓ Approved</p>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
-          <button disabled={approve.isPending} onClick={() => approve.mutate({ id: projectId, messageId: m.id })}
+          <button disabled={busy} onClick={() => approve.mutate({ id: projectId, messageId: m.id })}
             className="px-4 py-1.5 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg disabled:opacity-40">{approve.isPending ? "…" : "Approve"}</button>
-          <span className="text-xs text-white/40">or type what to change below</span>
+          {onDraft && (
+            <button disabled={busy} onClick={() => onDraft("Change the plan: ")}
+              className="px-3 py-1.5 border border-white/15 text-white/70 text-sm rounded-lg hover:bg-white/5 disabled:opacity-40">Change…</button>
+          )}
+          <button disabled={busy} onClick={() => reject.mutate({ id: projectId, messageId: m.id })}
+            className="px-3 py-1.5 text-white/45 text-sm rounded-lg hover:text-red-300 disabled:opacity-40">{reject.isPending ? "…" : "Decline"}</button>
         </div>
       )}
-      {approve.isError && <p className="text-xs text-red-400">{approve.error.message}</p>}
+      {(approve.error ?? reject.error) && <p className="text-xs text-red-400">{(approve.error ?? reject.error)!.message}</p>}
     </div>
   );
 }
