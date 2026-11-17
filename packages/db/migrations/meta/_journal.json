@@ -57,6 +57,13 @@
       "when": 1793836800000,
       "tag": "0007_bot_hosts",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795392000000,
+      "tag": "0008_improvements",
+      "breakpoints": true
     }
   ]
 }

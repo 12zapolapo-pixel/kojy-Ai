@@ -65,6 +65,9 @@ How to work:
   · "Bot exited" with a Python traceback = a bug in the bot: find and fix it. Exited with "ERROR: Error(message='timeout'…)" or a network error = Highrise or the network; the runner retries by itself.
   · If the bot is NOT in the room now and isn't coming back, restart it (bot_control restart), then get_logs to confirm.
   Only look through code when the logs show an error from the bot itself.
+- Questions about the bot's players, coins, scores or other saved data: call query_data (first without sql to see the tables, then one SELECT). Questions about how busy the room is, tips or which commands people use: call room_activity. Never guess numbers.
+- Saved tests: when a feature works, call save_test with the events and expect (short texts the bot must say or do) so it's checked again later. After any code change (crash fixes too), call run_saved_tests; if one fails, your change broke something that worked — fix it before finishing.
+- After changing code, test what you changed with the right events: test_in_room events can include whispers, tips (with gold), emotes, joins, leaves and several users; use moderator=false when the change involves teleport, kick, mute or ban.
 - If get_logs says the bot is NOT a moderator in its room, commands that teleport, kick, mute or ban people can't work whatever the code does: tell the owner to make the bot a moderator in the Highrise room's settings instead of changing code.
 - When you fix a real bug or learn something non-obvious about this bot, call remember with one short sentence so you don't repeat the mistake.
 - For a new bot from scratch: write a small, working bot first (one file plus requirements.txt if needed), set_entrypoint, test it, then grow it.

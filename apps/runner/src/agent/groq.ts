@@ -68,6 +68,8 @@ const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY.tri
 const GROQ_SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
 const GROQ_FAST = process.env.AGENT_FALLBACK_MODEL ?? process.env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
 const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);
+/** One AI call (headers and body) gives up after this; the next AI is tried. */
+const REQUEST_TIMEOUT_MS = Number(process.env.AGENT_REQUEST_TIMEOUT_MS ?? 120_000);
 
 /**
  * More models through OpenAI-compatible endpoints, each switched on by its
@@ -363,14 +365,18 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     };
     if (lane.provider === "groq") body.reasoning_effort = "medium";
 
+    // The owner's Stop AND a timeout: a provider that hangs must not hold the
+    // request until someone presses Stop (the agent always passes a signal).
+    const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const res = await fetch(`${lane.base}/chat/completions`, {
       method: "POST",
-      signal: opts.signal ?? AbortSignal.timeout(120_000),
+      signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
       headers: { "content-type": "application/json", authorization: `Bearer ${lane.key}` },
       body: JSON.stringify(body),
     }).catch((err: Error) => {
       if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
-      cool(lane, 30_000, `${lane.label} couldn't be reached (${err.message})`, "unavailable");
+      const why = timeout.aborted ? `didn't answer within ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s` : `couldn't be reached (${err.message})`;
+      cool(lane, timeout.aborted ? 60_000 : 30_000, `${lane.label} ${why}`, "unavailable");
       return null;
     });
     if (!res) continue;
@@ -381,7 +387,13 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
 
     if (res.ok) {
-      const data = await res.json() as { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      type Completion = { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      // The body can time out or be cut off too.
+      const data = await (res.json() as Promise<Completion>).catch((): null => {
+        if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
+        return null;
+      });
+      if (!data) { cool(lane, 60_000, `${lane.label} sent an incomplete answer`, "unavailable"); continue; }
       const message = data.choices?.[0]?.message;
       if (!message) { cool(lane, 30_000, `${lane.label} returned an empty answer`); continue; }
       recordUsage(lane, { req: 1, tokensIn: data.usage?.prompt_tokens ?? 0, tokensOut: data.usage?.completion_tokens ?? 0 });

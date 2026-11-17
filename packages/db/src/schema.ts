@@ -940,12 +940,15 @@ export const projectMessages = pgTable("project_messages", {
 
 // What the coder AI learned (fixes that worked, how a bot is built). Notes
 // with a projectId are about that bot; notes without one apply to all of the
-// org's bots.
+// org's bots. source: "kojy" (saved by Kojy with remember) or "owner" (typed
+// in "What Kojy knows"). Pinned notes and the owner's own are always read.
 export const agentMemories = pgTable("agent_memories", {
   id:        serial("id").primaryKey(),
   orgId:     integer("org_id").notNull(),
   projectId: integer("project_id"),
   content:   text("content").notNull(),
+  source:    varchar("source", { length: 10 }).default("kojy").notNull(),
+  pinned:    boolean("pinned").default(false).notNull(),
   createdAt: createdAt(),
 }, (t) => ({
   orgIdx: index("agent_memories_org_idx").on(t.orgId, t.projectId),
@@ -976,12 +979,32 @@ export const agentWorkLog = pgTable("agent_work_log", {
   threadIdx:  index("agent_work_log_thread_idx").on(t.thread, t.updatedAt),
 }));
 
+// Saved room tests: a fake-room scenario Kojy (or the owner) keeps for a bot
+// and re-runs after later changes, so a feature that worked keeps working.
+// events = the test_in_room events; expect = text the bot's actions must contain.
+export const roomTests = pgTable("room_tests", {
+  id:         serial("id").primaryKey(),
+  projectId:  integer("project_id").notNull(),
+  name:       varchar("name", { length: 80 }).notNull(),
+  events:     jsonb("events").$type<Record<string, unknown>[]>().notNull(),
+  expect:     jsonb("expect").$type<string[]>().default([]).notNull(),
+  moderator:  boolean("moderator").default(true).notNull(),
+  lastResult: varchar("last_result", { length: 12 }),
+  lastRunAt:  ts("last_run_at"),
+  createdAt:  createdAt(),
+  updatedAt:  updatedAt(),
+}, (t) => ({
+  projectNameIdx: uniqueIndex("room_tests_project_name_idx").on(t.projectId, t.name),
+}));
+
 // What bots did, for analytics — written by both runtimes:
 //   source "bot"     → JS bots (sourceId = bots.id), from the API's runtime
 //   source "project" → Python bots (sourceId = bot_projects.id), from the
 //                      runner (the launcher reports the SDK events it sees)
 // kind: chat, whisper, reply, join, leave, tip, emote, start, stop, crash.
 // actorId/actorName are the Highrise user (not a KojyAI account).
+// amount: gold for a tip. detail: the command word of a chat that starts
+// with ! or / (e.g. "!dance") — never the rest of the message.
 export const botActivity = pgTable("bot_activity", {
   id:        bigserial("id", { mode: "number" }).primaryKey(),
   orgId:     integer("org_id").notNull(),
@@ -990,6 +1013,8 @@ export const botActivity = pgTable("bot_activity", {
   kind:      varchar("kind", { length: 20 }).notNull(),
   actorId:   varchar("actor_id", { length: 64 }),
   actorName: varchar("actor_name", { length: 100 }),
+  amount:    integer("amount"),
+  detail:    varchar("detail", { length: 40 }),
   createdAt: createdAt(),
 }, (t) => ({
   orgTimeIdx:    index("bot_activity_org_time_idx").on(t.orgId, t.createdAt),

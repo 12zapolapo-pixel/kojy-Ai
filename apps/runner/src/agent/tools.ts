@@ -12,17 +12,19 @@ import path from "node:path";
 import { asc, eq } from "drizzle-orm";
 import WebSocket from "ws";
 import type { Database } from "@kojyai/db";
-import { botProjects, projectSecrets, agentMemories } from "@kojyai/db/schema";
+import { botProjects, projectSecrets, agentMemories, roomTests } from "@kojyai/db/schema";
 import { decryptApiKey } from "@kojyai/shared/crypto";
 import {
   listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
+  pickMemories, normalizeNote, lineDiff,
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { BOTCHECK, LAUNCHER } from "../supervisor.js";
-import { runRoomTest } from "./mockRoom.js";
+import { runRoomTest, normalizeEvents, chatToEvents, ROOM_EVENT_TYPES, type RoomEvent } from "./mockRoom.js";
 import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
 import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js";
+import { queryData, roomActivity } from "./dataTools.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -33,6 +35,8 @@ export interface ToolContext {
   /** Set once the AI has snapshotted the code in this run (for "undo"). */
   snapshotted: boolean;
   changedFiles: Set<string>;
+  /** What this run is for, as the undo label ("Before Kojy: add a !dance command"). */
+  label?: string;
 }
 
 export interface ToolResult {
@@ -47,6 +51,8 @@ export interface ToolResult {
   cardKind?: string;
   /** Stop the run after this tool (waiting on the owner). */
   pause?: boolean;
+  /** For file changes: the diff shown in the chat (never sent to the model). */
+  diff?: string;
 }
 
 const fn = (name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = []): ToolSpec => ({
@@ -65,8 +71,30 @@ export const TOOL_SPECS: ToolSpec[] = [
     { path: str("file path"), content: str("full file content") }, ["path", "content"]),
   fn("delete_file", "Delete a file.", { path: str("file path") }, ["path"]),
   fn("check_code", "Compile every .py file and import the bot's entrypoint in the bot's Python environment (installs requirements.txt changes first). Shows errors with tracebacks."),
-  fn("test_in_room", "Run a copy of the bot for a few seconds in a fake Highrise room (real room and data are untouched). User 'tester' joins (optional) and says the chat lines. Returns what the bot did and any errors.",
-    { chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" }, join: { type: "boolean" }, seconds: { type: "integer" } }, ["chat"]),
+  fn("test_in_room", "Run a copy of the bot for a few seconds in a fake Highrise room (real room and data are untouched) and return what the bot did and any errors. Use `chat` for simple tests (user 'tester' says the lines); use `events` to test whispers, tips, emotes, joins, leaves or several users. Set moderator=false to check how the bot behaves without moderator rights.",
+    {
+      chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" },
+      join: { type: "boolean", description: "with chat: 'tester' joins first" },
+      events: {
+        type: "array", description: "what happens, in order (up to 12), e.g. [{type:'join',user:'amy'},{type:'tip',user:'amy',amount:50},{type:'whisper',user:'bob',message:'!balance'}]",
+        items: { type: "object", properties: {
+          type: { type: "string", enum: [...ROOM_EVENT_TYPES] }, user: str("username, default tester"), message: str("chat/whisper text"),
+          amount: { type: "integer", description: "tip gold" }, emote: str("emote id"), seconds: { type: "number", description: "wait length" },
+        }, required: ["type"] },
+      },
+      moderator: { type: "boolean", description: "is the bot a moderator in the test room (default true)" },
+      expect: { type: "array", items: { type: "string" }, description: "texts the bot's replies/actions must contain, e.g. [\"Welcome\", \"emote-wave\"]; the test fails if one is missing" },
+      seconds: { type: "integer" },
+    }),
+  fn("save_test", "Keep a test that passed so it can be run again after later changes (regression test). Same events/chat/moderator as test_in_room, plus expect (texts the bot must say or do) and a short name. Saving under an existing name replaces it.",
+    {
+      name: str("short name, e.g. 'greets new people'"),
+      chat: { type: "array", items: { type: "string" } }, join: { type: "boolean" },
+      events: { type: "array", items: { type: "object" }, description: "as in test_in_room" },
+      expect: { type: "array", items: { type: "string" }, description: "texts the bot's actions must contain" },
+      moderator: { type: "boolean" },
+    }, ["name", "expect"]),
+  fn("run_saved_tests", "Run every saved test of this bot in the fake room and report which pass. Do this after changing code, so a feature that worked before still works."),
   fn("find_env_vars", "Find the environment variables (secrets/settings) the code reads, and which are already set."),
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
@@ -80,6 +108,10 @@ export const TOOL_SPECS: ToolSpec[] = [
     { query: str("word to search, or empty for a sample") }),
   fn("open_panel", "Show the owner a panel next to the chat: console (logs), code, data (the bot's database), secrets or settings.",
     { panel: { type: "string", enum: ["console", "code", "data", "secrets", "settings"] } }, ["panel"]),
+  fn("query_data", "Read the bot's own saved data (its SQLite database, read-only). Without sql: lists the databases, tables, columns and row counts (and any JSON data files). With sql: runs ONE SELECT and returns up to 50 rows. Use it to answer questions about players, coins, scores, warnings, or to check a data bug.",
+    { sql: str("one SELECT, e.g. SELECT name, coins FROM players ORDER BY coins DESC LIMIT 10"), db: str("database path if the bot has several, e.g. data/bot.db") }),
+  fn("room_activity", "This bot's room activity: chats, whispers, replies, joins, different visitors, tips (and gold), emotes, crashes, most used commands, top tippers.",
+    { days: { type: "integer", description: "1-90, default 7" } }),
   fn("remember", "Save one short lesson for the future (a fix that worked, how this bot is built). scope 'all' = useful for every bot.",
     { note: str("one sentence"), scope: { type: "string", enum: ["project", "all"] } }, ["note"]),
 ];
@@ -151,8 +183,14 @@ export function searchInWorker(pattern: string, files: { rel: string; abs: strin
 
 function ensureSnapshot(ctx: ToolContext): void {
   if (ctx.snapshotted) return;
-  snapshotProject(ctx.project.uuid, "Before the coder AI's changes");
+  const label = ctx.label?.replace(/\s+/g, " ").trim();
+  snapshotProject(ctx.project.uuid, label ? `Before Kojy: ${label.length > 100 ? `${label.slice(0, 100)}…` : label}` : "Before the coder AI's changes");
   ctx.snapshotted = true;
+}
+
+/** The chat's diff for a file change ("" when nothing to show). */
+function changeDiff(before: string, after: string): string {
+  return lineDiff(before, after, 2, 4000)?.text ?? "";
 }
 
 async function secretsMap(ctx: ToolContext): Promise<Map<string, string>> {
@@ -187,6 +225,57 @@ async function checkBearer(url: string, key: string): Promise<string> {
     const res = await fetch(url, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10_000) });
     return res.ok ? "OK — key accepted" : res.status === 401 || res.status === 403 ? "rejected — the key is wrong or revoked" : `unexpected answer (HTTP ${res.status})`;
   } catch (e) { return `couldn't check: ${(e as Error).message}`; }
+}
+
+// ── fake-room tests ──────────────────────────────────────────────────────────
+
+const MAX_SAVED_TESTS = 20;
+
+/** Up to 8 short texts the bot's actions must contain. */
+function cleanExpect(raw: unknown): string[] {
+  return (Array.isArray(raw) ? raw : []).map((x) => String(x).trim().slice(0, 120)).filter(Boolean).slice(0, 8);
+}
+
+/** Expectations no bot action contains (case-insensitive). Lines in brackets are the room's, not the bot's. */
+export function missingExpectations(actions: string[], expect: string[]): string[] {
+  const said = actions.filter((a) => !a.startsWith("(")).map((a) => a.toLowerCase());
+  return expect.filter((e) => !said.some((a) => a.includes(e.toLowerCase())));
+}
+
+async function inBatches<T, R>(items: T[], size: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += size) out.push(...await Promise.all(items.slice(i, i + size).map(fn)));
+  return out;
+}
+
+/** Runs one scenario in the fake room and judges it: connected, no crash, no errors, every expectation met. */
+async function roomTest(ctx: ToolContext, t: { events: RoomEvent[]; expect: string[]; moderator: boolean; seconds?: number }): Promise<ToolResult> {
+  if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
+  if (!t.events.length) return { ok: false, output: "Give chat lines or events to test with.", summary: "Can't test: nothing happens in the room" };
+  const uuid = ctx.project.uuid;
+  const dir = projectDir(uuid);
+  const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
+  const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
+  const r = await runRoomTest({
+    uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env,
+    events: t.events, moderator: t.moderator, ...(t.seconds !== undefined ? { seconds: t.seconds } : {}),
+  });
+  const missing = missingExpectations(r.actions, t.expect);
+  const verdict = !r.connected ? "The bot never connected to the test room."
+    : r.exitedEarly ? `The bot crashed during the test (exit code ${r.exitCode}).`
+    : r.errors.length ? "The bot ran, but errors were printed."
+    : missing.length ? "The bot ran without errors, but didn't do everything expected." : "The bot ran without errors.";
+  const output = [
+    verdict,
+    `What happened:\n${r.actions.join("\n") || "(nothing)"}`,
+    missing.length ? `Expected but not seen in what the bot did:\n${missing.map((m) => `- ${m}`).join("\n")}` : "",
+    r.errors.length ? `Errors:\n${r.errors.join("\n")}` : "",
+    `Console (last lines):\n${r.output.slice(-40).join("\n")}`,
+  ].filter(Boolean).join("\n\n");
+  const replies = r.actions.filter((a) => !a.startsWith("(")).length;
+  const ok = r.connected && !r.exitedEarly && r.errors.length === 0 && missing.length === 0;
+  const state = ok ? "no errors" : r.exitedEarly ? "crashed" : !r.connected ? "didn't connect" : r.errors.length ? "errors" : `${missing.length} expectation${missing.length > 1 ? "s" : ""} not met`;
+  return { ok, output: clip(output, 8000), summary: `Tested in a fake room: ${state}, ${replies} bot actions` };
 }
 
 // ── tools ────────────────────────────────────────────────────────────────────
@@ -242,10 +331,11 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           return { ok: false, output: count === 0 ? "old_text was not found. Read the file again and copy the exact text (indentation matters)." : `old_text matches ${count} places; include more surrounding lines so it is unique.`, summary: `Edit to ${rel} didn't apply` };
         }
         ensureSnapshot(ctx);
-        writeFileSync(file, text.replace(oldText, () => s(args.new_text)));
+        const edited = text.replace(oldText, () => s(args.new_text));
+        writeFileSync(file, edited);
         ctx.changedFiles.add(rel);
         const delta = s(args.new_text).split("\n").length - oldText.split("\n").length;
-        return { ok: true, output: "Edited.", summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}` };
+        return { ok: true, output: "Edited.", summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}`, diff: changeDiff(text, edited) };
       }
 
       case "write_file": {
@@ -254,11 +344,12 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         const content = s(args.content);
         if (content.length > MAX_EDIT_BYTES) return { ok: false, output: "Content is over 1 MB.", summary: `${rel} too big` };
         const existed = existsSync(file);
+        const before = existed && statSync(file).size <= MAX_EDIT_BYTES ? readFileSync(file, "utf8") : "";
         ensureSnapshot(ctx);
         mkdirSync(path.dirname(file), { recursive: true });
         writeFileSync(file, content);
         ctx.changedFiles.add(rel);
-        return { ok: true, output: existed ? "File replaced." : "File created.", summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)` };
+        return { ok: true, output: existed ? "File replaced." : "File created.", summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)`, diff: changeDiff(before, content) };
       }
 
       case "delete_file": {
@@ -299,26 +390,47 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       case "test_in_room": {
-        if (!ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first (set_entrypoint).", summary: "Can't test: no entrypoint" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
-        const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
-        const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
-        const r = await runRoomTest({
-          uid: sandboxUid(ctx.project.id), projectDir: dir, python, launcher: LAUNCHER, entrypoint: ctx.project.entrypoint, env, chat,
-          join: args.join === true, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}),
+        const events = normalizeEvents(args.events);
+        const scenario = events.length ? events : chatToEvents(chat, args.join === true);
+        const t = await roomTest(ctx, { events: scenario, expect: cleanExpect(args.expect), moderator: args.moderator !== false, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}) });
+        return t;
+      }
+
+      case "save_test": {
+        const name = s(args.name).trim().slice(0, 80);
+        if (!name) return { ok: false, output: "Give the test a short name.", summary: "Test not saved" };
+        const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
+        const events = normalizeEvents(args.events);
+        const scenario = events.length ? events : chatToEvents(chat, args.join === true);
+        if (!scenario.length) return { ok: false, output: "A saved test needs chat lines or events.", summary: "Test not saved" };
+        const expect = cleanExpect(args.expect);
+        const existing = await ctx.db.select({ name: roomTests.name }).from(roomTests).where(eq(roomTests.projectId, ctx.project.id));
+        if (existing.length >= MAX_SAVED_TESTS && !existing.some((x) => x.name === name)) {
+          return { ok: false, output: `This bot already has ${MAX_SAVED_TESTS} saved tests. Replace one by saving under its name.`, summary: "Test not saved (too many)" };
+        }
+        const moderator = args.moderator !== false;
+        await ctx.db.insert(roomTests).values({ projectId: ctx.project.id, name, events: scenario as unknown as Record<string, unknown>[], expect, moderator })
+          .onConflictDoUpdate({ target: [roomTests.projectId, roomTests.name], set: { events: scenario as unknown as Record<string, unknown>[], expect, moderator, updatedAt: new Date() } });
+        return { ok: true, output: `Saved "${name}". run_saved_tests runs it again with the others after later changes.`, summary: `Saved the test “${name}”` };
+      }
+
+      case "run_saved_tests": {
+        const tests = await ctx.db.select().from(roomTests).where(eq(roomTests.projectId, ctx.project.id)).orderBy(asc(roomTests.id));
+        if (!tests.length) return { ok: true, output: "This bot has no saved tests yet. After a feature works, save its test with save_test.", summary: "No saved tests yet" };
+        const results = await inBatches(tests, 3, async (t) => {
+          const r = await roomTest(ctx, { events: normalizeEvents(t.events), expect: t.expect, moderator: t.moderator });
+          await ctx.db.update(roomTests).set({ lastResult: r.ok ? "passed" : "failed", lastRunAt: new Date() }).where(eq(roomTests.id, t.id));
+          return { name: t.name, r };
         });
-        const verdict = !r.connected ? "The bot never connected to the test room."
-          : r.exitedEarly ? `The bot crashed during the test (exit code ${r.exitCode}).`
-          : r.errors.length ? "The bot ran, but errors were printed." : "The bot ran without errors.";
-        const output = [
-          verdict,
-          `What happened:\n${r.actions.join("\n") || "(nothing)"}`,
-          r.errors.length ? `Errors:\n${r.errors.join("\n")}` : "",
-          `Console (last lines):\n${r.output.slice(-40).join("\n")}`,
-        ].filter(Boolean).join("\n\n");
-        const replies = r.actions.filter((a) => !a.startsWith("(")).length;
-        const ok = r.connected && !r.exitedEarly && r.errors.length === 0;
-        return { ok, output: clip(output, 8000), summary: `Tested in a fake room: ${ok ? "no errors" : r.exitedEarly ? "crashed" : r.connected ? "errors" : "didn't connect"}, ${replies} bot actions` };
+        const failed = results.filter((x) => !x.r.ok);
+        const lines = results.map((x) => `${x.r.ok ? "PASS" : "FAIL"} ${x.name}: ${x.r.summary}`);
+        const details = failed.map((x) => `── ${x.name} ──\n${x.r.output}`).join("\n\n");
+        return {
+          ok: failed.length === 0,
+          output: clip(`${lines.join("\n")}${details ? `\n\nWhat went wrong:\n${details}` : ""}`, 10_000),
+          summary: failed.length ? `Saved tests: ${failed.length} of ${results.length} failed` : `Saved tests: all ${results.length} passed`,
+        };
       }
 
       case "find_env_vars": {
@@ -464,9 +576,17 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         return { ok: true, output: `The ${panel} panel is open next to the chat.`, summary: `Opened ${panel}`, cardKind: "ui", card: { panel } };
       }
 
+      case "query_data":
+        return await queryData(uuid, args);
+
+      case "room_activity":
+        return await roomActivity(ctx.db, ctx.project.id, args);
+
       case "remember": {
         const note = s(args.note).trim().slice(0, 300);
         if (!note) return { ok: false, output: "Empty note.", summary: "Nothing to remember" };
+        const existing = await ctx.db.select({ content: agentMemories.content }).from(agentMemories).where(eq(agentMemories.orgId, ctx.project.orgId));
+        if (existing.some((m) => normalizeNote(m.content) === normalizeNote(note))) return { ok: true, output: "Already saved earlier.", summary: `Already knew: ${note}` };
         await ctx.db.insert(agentMemories).values({ orgId: ctx.project.orgId, projectId: args.scope === "all" ? null : ctx.project.id, content: note });
         return { ok: true, output: "Saved.", summary: `Remembered: ${note}` };
       }
@@ -481,8 +601,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 }
 
 export async function loadMemories(db: Database, project: { orgId: number; id: number }): Promise<string[]> {
-  const rows = await db.select({ content: agentMemories.content, projectId: agentMemories.projectId }).from(agentMemories)
-    .where(eq(agentMemories.orgId, project.orgId)).orderBy(asc(agentMemories.id));
-  return rows.filter((r) => r.projectId === null || r.projectId === project.id).slice(-15).map((r) => r.content);
+  const rows = await db.select({ id: agentMemories.id, content: agentMemories.content, projectId: agentMemories.projectId, source: agentMemories.source, pinned: agentMemories.pinned })
+    .from(agentMemories).where(eq(agentMemories.orgId, project.orgId)).orderBy(asc(agentMemories.id));
+  return pickMemories(rows, project.id).map((r) => r.content);
 }
 

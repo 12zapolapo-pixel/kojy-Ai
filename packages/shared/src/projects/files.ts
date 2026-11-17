@@ -14,11 +14,12 @@ import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, lst
 import path from "node:path";
 import { unzip, unzipSync, zip, zipSync, strFromU8, type Unzipped } from "fflate";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lineDiff, type FileDiff } from "./diff.js";
 
 export const PROJECTS_DIR = path.resolve(process.env.PROJECTS_DIR ?? "./data/projects");
 export const LOG_DIR = path.join(PROJECTS_DIR, ".logs");
 const SNAPSHOT_DIR = path.join(PROJECTS_DIR, ".snapshots");
-const MAX_SNAPSHOTS = 15;
+const MAX_SNAPSHOTS = 30;
 
 /** Never shown, uploaded or zipped. */
 const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", "__MACOSX", ".pythonlibs", ".cache", ".upm"]);
@@ -226,7 +227,7 @@ export function readLogs(uuid: string, cursor: number | undefined, maxBytes = 64
 
 export interface Snapshot { id: string; reason: string; createdAt: number; files: number }
 
-/** Zips the project's code (not its data/ or database files). Keeps the last 15. */
+/** Zips the project's code (not its data/ or database files). Keeps the last 30. */
 export function snapshotProject(uuid: string, reason: string): Snapshot {
   const root = ensureProjectDir(uuid);
   const entries: Record<string, Uint8Array> = {};
@@ -243,6 +244,18 @@ export function snapshotProject(uuid: string, reason: string): Snapshot {
   const all = readdirSync(dir).filter((n) => n.endsWith(".zip")).sort();
   for (const old of all.slice(0, Math.max(0, all.length - MAX_SNAPSHOTS))) rmSync(path.join(dir, old), { force: true });
   return { id, reason, createdAt, files: Object.keys(entries).length - 1 };
+}
+
+/**
+ * Snapshot before an owner's own change (a save in the code editor, a delete,
+ * a zip upload) — unless the newest snapshot already has this reason and is
+ * younger than `withinMs`, so a burst of saves doesn't push out older versions.
+ */
+export function snapshotUnlessRecent(uuid: string, reason: string, withinMs: number): Snapshot | null {
+  if (!listFiles(uuid).some((f) => !f.isDir && !isPersistentData(f.path))) return null; // nothing to keep yet
+  const newest = listSnapshots(uuid)[0];
+  if (newest && newest.reason === reason && Date.now() - newest.createdAt < withinMs) return null;
+  return snapshotProject(uuid, reason);
 }
 
 export function listSnapshots(uuid: string): Snapshot[] {
@@ -281,6 +294,38 @@ export function restoreSnapshot(uuid: string, id: string): number {
     writeFileSync(target, data);
   }
   return Object.keys(files).length;
+}
+
+/**
+ * What restoring a snapshot would change, file by file: "added" = the
+ * snapshot brings it back, "removed" = restoring deletes it (it was added
+ * since), "modified" = with the diff from now to the snapshot's version.
+ */
+export function compareSnapshot(uuid: string, id: string, maxFiles = 30): { files: FileDiff[]; more: number } {
+  if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
+  const file = path.join(SNAPSHOT_DIR, uuid, `${id}.zip`);
+  if (!existsSync(file)) throw new ProjectFileError("That snapshot no longer exists");
+  const snap = unzipSync(readFileSync(file));
+  delete snap[".kojy-snapshot.json"];
+  const root = ensureProjectDir(uuid);
+  const current = new Set(listFiles(uuid).filter((f) => !f.isDir && !isPersistentData(f.path) && f.size <= 5 * 1024 * 1024).map((f) => f.path));
+  const text = (b: Uint8Array): string | null => (b.length > MAX_EDIT_BYTES || b.includes(0) ? null : strFromU8(b));
+  const out: FileDiff[] = [];
+  for (const rel of [...new Set([...current, ...Object.keys(snap)])].sort()) {
+    const then = snap[rel];
+    if (!current.has(rel)) {
+      const t = then ? text(then) : null;
+      out.push({ path: rel, change: "added", added: t ? t.split("\n").length : 0, removed: 0, diff: null });
+      continue;
+    }
+    const nowBytes = readFileSync(path.join(root, rel));
+    if (!then) { out.push({ path: rel, change: "removed", added: 0, removed: (text(nowBytes) ?? "").split("\n").length, diff: null }); continue; }
+    if (Buffer.from(nowBytes).equals(Buffer.from(then))) continue;
+    const a = text(nowBytes), b = text(then);
+    const d = a !== null && b !== null ? lineDiff(a, b, 2, 4000) : null;
+    out.push({ path: rel, change: "modified", added: d?.added ?? 0, removed: d?.removed ?? 0, diff: d?.text ?? null });
+  }
+  return { files: out.slice(0, maxFiles), more: Math.max(0, out.length - maxFiles) };
 }
 
 export function removeSnapshots(uuid: string): void {

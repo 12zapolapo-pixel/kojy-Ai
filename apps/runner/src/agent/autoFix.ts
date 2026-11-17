@@ -21,7 +21,7 @@ export type AutomatedKind = "crash" | "checkup";
 export const AUTOMATED_KINDS = new Set<string>(["crash", "checkup"]);
 
 /** A check-up run can't use these until the owner approves a plan. */
-export const NEEDS_OWNER = new Set(["write_file", "edit_file", "delete_file", "bot_control", "set_entrypoint", "request_secrets", "remember"]);
+export const NEEDS_OWNER = new Set(["write_file", "edit_file", "delete_file", "bot_control", "set_entrypoint", "request_secrets", "remember", "save_test"]);
 export const OWNER_APPROVAL_NEEDED =
   "Not allowed yet: this run was started by the daily check-up, not by the owner. " +
   "Investigate and test as much as you like, then explain the cause and call propose_plan with the fix. Once the owner approves, you can change files and restart the bot.";
@@ -32,6 +32,7 @@ const CRASH_RUN_LOCKED: Record<string, string> = {
   set_entrypoint: "changing the entrypoint",
   request_secrets: "asking for secrets",
   remember: "saving long-term notes",
+  save_test: "saving tests",
 };
 
 /** Kinds of code a crash fix may not add (counted before and after the change). */
@@ -92,6 +93,45 @@ export function lastException(tail: string[]): string {
     if (EXCEPTION_LINE.test(t) && !/^(?:Base)?ExceptionGroup\b/.test(t)) return t;
   }
   return "";
+}
+
+/**
+ * An error line with what changes from one time to the next taken out
+ * (quoted text, numbers, ids, addresses), so the same bug hit by different
+ * visitors counts as one error. "KeyError: 'amy'" and "KeyError: 'bob'" →
+ * "KeyError: '…'".
+ */
+export function normalizeError(line: string): string {
+  return undecorate(line).trim()
+    .replace(/(['"])(?:(?!\1)[^\\\n]|\\.)*\1/g, "'…'")
+    .replace(/\b0x[0-9a-f]+\b/gi, "0x…")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "…")
+    .replace(/\b\d+(\.\d+)?\b/g, "N")
+    .replace(/\s+/g, " ")
+    .slice(0, 200);
+}
+
+/** Where in the bot's own code an error happened ("bot.py:302 in on_user_join"), from its traceback lines. */
+export function crashLocation(lines: string[]): string {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /File "([^"]+)", line (\d+), in (\S+)/.exec(lines[i]!);
+    if (!m) continue;
+    const file = m[1]!;
+    if (/site-packages|[/\\]lib[/\\]python3|<frozen|launcher\.py$/.test(file)) continue;
+    const rel = file.replace(/^.*?[/\\]projects[/\\][^/\\]+[/\\]/, "").replace(/^.*?[/\\]kojy-(?:test|check)-[^/\\]+[/\\]/, "");
+    return `${rel}:${m[2]} in ${m[3]}`;
+  }
+  return "";
+}
+
+/**
+ * Two crashes with the same signature are the same bug: the same error in
+ * the same function. Line numbers are left out — a fix that adds lines above
+ * moves the crash without changing it.
+ */
+export function crashSignature(tail: string[]): string {
+  const ex = lastException(tail);
+  return ex ? `${normalizeError(ex)} @ ${crashLocation(tail).replace(/:\d+ in /, " in ")}` : "";
 }
 
 /** The network or Highrise being away (DNS, refused, reset, timeout) — not a bug in the bot's code. */

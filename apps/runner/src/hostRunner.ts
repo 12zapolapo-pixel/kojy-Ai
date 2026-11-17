@@ -80,7 +80,7 @@ export interface HostHooks {
   startFailed(uuid: string, message: string): Promise<void>;
   /** Try starting again in a while (the server is still being set up). */
   later(uuid: string, seconds: number): void;
-  activity(project: RunProject, kind: string, actorId: string | null, actorName: string | null): void;
+  activity(project: RunProject, kind: string, actorId: string | null, actorName: string | null, extra?: { amount?: number | null; detail?: string | null }): void;
   roomRights(uuid: string, project: RunProject, line: string): void;
 }
 
@@ -491,8 +491,8 @@ export class HostRunner {
   private take(s: Session, text: string): void {
     if (text.startsWith(ACTIVITY_PREFIX)) {
       try {
-        const e = JSON.parse(text.slice(ACTIVITY_PREFIX.length)) as { k?: string; id?: string | null; n?: string | null };
-        if (e.k && ACTIVITY_KINDS.has(e.k)) this.hooks.activity(s.project, e.k, e.id ?? null, e.n ?? null);
+        const e = JSON.parse(text.slice(ACTIVITY_PREFIX.length)) as { k?: string; id?: string | null; n?: string | null; a?: number; d?: string };
+        if (e.k && ACTIVITY_KINDS.has(e.k)) this.hooks.activity(s.project, e.k, e.id ?? null, e.n ?? null, { amount: e.a ?? null, detail: e.d ?? null });
       } catch { /* not ours */ }
       return;
     }

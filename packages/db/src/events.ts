@@ -25,7 +25,12 @@ export class ActivityRecorder {
 
   record(row: ActivityRow): void {
     // A runaway bot can't grow this without bound.
-    if (this.queue.length < 5000) this.queue.push({ ...row, actorName: row.actorName?.slice(0, 100) ?? null, actorId: row.actorId?.slice(0, 64) ?? null });
+    if (this.queue.length >= 5000) return;
+    const amount = typeof row.amount === "number" && Number.isFinite(row.amount) ? Math.min(Math.max(Math.round(row.amount), 0), 1_000_000_000) : null;
+    this.queue.push({
+      ...row, actorName: row.actorName?.slice(0, 100) ?? null, actorId: row.actorId?.slice(0, 64) ?? null,
+      amount, detail: row.detail ? row.detail.slice(0, 40) : null,
+    });
   }
 
   async flush(): Promise<void> {

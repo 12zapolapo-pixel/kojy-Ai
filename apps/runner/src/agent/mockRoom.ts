@@ -17,17 +17,88 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 
+/** Answers to the bot's requests; GetRoomUsers and GetRoomPrivilege are worked out per test. */
 const RESPONSES: Record<string, Record<string, unknown>> = {
-  GetRoomUsersRequest: { content: [[{ id: "u-tester", username: "tester" }, { x: 5, y: 0, z: 5, facing: "FrontRight" }]] },
   GetWalletRequest: { content: [{ type: "gold", amount: 1000 }] },
   GetUserOutfitRequest: { outfit: [] },
   GetBackpackRequest: { backpack: [] },
   GetConversationsRequest: { conversations: [], not_joined: 0 },
   GetMessagesRequest: { messages: [] },
-  GetRoomPrivilegeRequest: { content: { moderator: true, designer: true } },
   GetInventoryRequest: { items: [] },
   GetBotInfoRequest: { content: { user_id: "bot-test" } },
 };
+
+/** One thing that happens in the test room. */
+export interface RoomEvent {
+  type: "chat" | "whisper" | "join" | "leave" | "tip" | "emote" | "wait";
+  /** Who does it (default "tester"). */
+  user?: string;
+  message?: string;
+  /** tip: gold amount (default 10). */
+  amount?: number;
+  /** emote: the emote id (default "emote-wave"). */
+  emote?: string;
+  /** wait: seconds before the next event (default 3). */
+  seconds?: number;
+}
+
+export const ROOM_EVENT_TYPES = ["chat", "whisper", "join", "leave", "tip", "emote", "wait"] as const;
+const MAX_EVENTS = 12;
+
+/** Cleans what the AI asked for: known types, short texts, a few users. */
+export function normalizeEvents(raw: unknown): RoomEvent[] {
+  if (!Array.isArray(raw)) return [];
+  const out: RoomEvent[] = [];
+  for (const x of raw.slice(0, MAX_EVENTS)) {
+    if (!x || typeof x !== "object") continue;
+    const e = x as Record<string, unknown>;
+    const type = String(e.type ?? "chat") as RoomEvent["type"];
+    if (!ROOM_EVENT_TYPES.includes(type)) continue;
+    const user = typeof e.user === "string" && /^[\w.-]{1,20}$/.test(e.user) ? e.user : "tester";
+    const ev: RoomEvent = { type, user };
+    if (typeof e.message === "string") ev.message = e.message.slice(0, 500);
+    if (typeof e.amount === "number" && Number.isFinite(e.amount)) ev.amount = Math.min(Math.max(Math.round(e.amount), 1), 10_000);
+    if (typeof e.emote === "string") ev.emote = e.emote.slice(0, 60);
+    if (typeof e.seconds === "number") ev.seconds = Math.min(Math.max(e.seconds, 0.5), 15);
+    out.push(ev);
+  }
+  return out;
+}
+
+/** The old form (tester's chat lines, optional join first) as events. */
+export function chatToEvents(chat: string[], join: boolean): RoomEvent[] {
+  return [...(join ? [{ type: "join" as const, user: "tester" }] : []), ...chat.map((message) => ({ type: "chat" as const, user: "tester", message }))];
+}
+
+const userOf = (name: string) => ({ id: `u-${name}`, username: name });
+const SPOT = { x: 5, y: 0, z: 5, facing: "FrontRight" };
+
+/** The SDK message for one event (null for "wait"). */
+export function eventMessage(e: RoomEvent): Record<string, unknown> | null {
+  const user = userOf(e.user ?? "tester");
+  switch (e.type) {
+    case "chat": return { _type: "ChatEvent", user, message: e.message ?? "", whisper: false };
+    case "whisper": return { _type: "ChatEvent", user, message: e.message ?? "", whisper: true };
+    case "join": return { _type: "UserJoinedEvent", user, position: SPOT, anchor: null };
+    case "leave": return { _type: "UserLeftEvent", user };
+    case "tip": return { _type: "TipReactionEvent", sender: user, receiver: { id: "bot-test", username: "bot" }, item: { type: "gold", amount: e.amount ?? 10 } };
+    case "emote": return { _type: "EmoteEvent", user, emote_id: e.emote ?? "emote-wave", receiver: null };
+    default: return null;
+  }
+}
+
+function eventLine(e: RoomEvent): string {
+  const who = e.user ?? "tester";
+  switch (e.type) {
+    case "chat": return `(${who} says: ${e.message ?? ""})`;
+    case "whisper": return `(${who} whispers to the bot: ${e.message ?? ""})`;
+    case "join": return `(${who} joins)`;
+    case "leave": return `(${who} leaves)`;
+    case "tip": return `(${who} tips the bot ${e.amount ?? 10} gold)`;
+    case "emote": return `(${who} does ${e.emote ?? "emote-wave"})`;
+    default: return `(wait ${e.seconds ?? 3}s)`;
+  }
+}
 
 export interface RoomTestResult {
   connected: boolean;
@@ -48,10 +119,10 @@ export interface RoomTestOptions {
   launcher: string;
   entrypoint: string;
   env: NodeJS.ProcessEnv;
-  /** Chat lines sent by user "tester" after the bot starts, ~2.5s apart. */
-  chat: string[];
-  /** Also send a join event for "tester" first. */
-  join?: boolean;
+  /** What happens in the room after the bot starts, ~2.5s apart. */
+  events: RoomEvent[];
+  /** Whether the bot is a moderator in the test room (default true). */
+  moderator?: boolean;
   seconds?: number;
 }
 
@@ -68,7 +139,10 @@ function describe(msg: Record<string, unknown>): string | null {
 
 export async function runRoomTest(opts: RoomTestOptions): Promise<RoomTestResult> {
   const result: RoomTestResult = { connected: false, exitedEarly: false, exitCode: null, actions: [], output: [], errors: [] };
-  const seconds = Math.min(Math.max(opts.seconds ?? 12 + opts.chat.length * 2.5, 8), 60);
+  const waits = opts.events.reduce((n, e) => n + (e.type === "wait" ? (e.seconds ?? 3) : 2.5), 0);
+  const seconds = Math.min(Math.max(opts.seconds ?? 12 + waits, 8), 60);
+  /** Who is in the room: everyone who did something, minus who left. */
+  const present = new Map<string, ReturnType<typeof userOf>>([["tester", userOf("tester")]]);
 
   const work = mkdtempSync(path.join(tmpdir(), "kojy-test-"));
   cpSync(opts.projectDir, work, { recursive: true, filter: (src) => !/[/\\](\.git|node_modules|__pycache__|\.venv)$/.test(src) });
@@ -91,17 +165,31 @@ export async function runRoomTest(opts: RoomTestOptions): Promise<RoomTestResult
       if (msg._type === "KeepaliveRequest") return send({ _type: "KeepaliveResponse" });
       const line = describe(msg);
       if (line && result.actions.length < 80) result.actions.push(line.slice(0, 300));
-      if (msg.rid != null) send({ _type: String(msg._type).replace(/Request$/, "Response"), rid: msg.rid, ...(RESPONSES[String(msg._type)] ?? {}) });
+      if (msg.rid != null) {
+        const type = String(msg._type);
+        const extra = type === "GetRoomUsersRequest" ? { content: [...present.values()].map((u) => [u, SPOT]) }
+          : type === "GetRoomPrivilegeRequest" ? { content: { moderator: opts.moderator !== false, designer: opts.moderator !== false } }
+          : RESPONSES[type] ?? {};
+        // Without moderator rights Highrise refuses moving, kicking, muting and banning.
+        if (opts.moderator === false && /^(Teleport|ModerateRoom|MoveUserToRoom)Request$/.test(type)) {
+          result.actions.push(`(Highrise refused ${type}: the bot isn't a moderator)`);
+          return send({ _type: "Error", rid: msg.rid, message: "Not allowed: the bot is not a moderator in this room" });
+        }
+        send({ _type: type.replace(/Request$/, "Response"), rid: msg.rid, ...extra });
+      }
     });
-    let delay = 3000;
-    if (opts.join) {
-      setTimeout(() => send({ _type: "UserJoinedEvent", user: { id: "u-tester", username: "tester" }, position: { x: 5, y: 0, z: 5, facing: "FrontRight" }, anchor: null }), delay);
-      delay += 2000;
+    let at = 3000;
+    for (const e of opts.events) {
+      if (e.type === "wait") { at += (e.seconds ?? 3) * 1000; continue; }
+      const message = eventMessage(e)!;
+      setTimeout(() => {
+        const name = e.user ?? "tester";
+        if (e.type === "leave") present.delete(name); else present.set(name, userOf(name));
+        result.actions.push(eventLine(e));
+        send(message);
+      }, at);
+      at += 2500;
     }
-    opts.chat.forEach((message, i) => setTimeout(() => {
-      result.actions.push(`(tester says: ${message})`);
-      send({ _type: "ChatEvent", user: { id: "u-tester", username: "tester" }, message, whisper: false });
-    }, delay + i * 2500));
   });
 
   let started: ReturnType<typeof spawnAs>;

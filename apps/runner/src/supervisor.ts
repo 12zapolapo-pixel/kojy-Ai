@@ -47,6 +47,13 @@ const RESTART_DELAYS_S = [5, 15, 30, 60];
 /** A start that failed before the bot ran (pip, network, database): try again, slower. */
 const START_RETRY_DELAYS_S = [30, 120, 600, 1800];
 const HEALTHY_RUN_MS = 120_000;
+/**
+ * Short runs in a row after which a bot stops being restarted: it's in a
+ * crash loop (about 8 minutes of restarts with the delays above), and
+ * restarting it forever only fills the log and keeps knocking on Highrise.
+ */
+export const CRASH_LOOP_LIMIT = Math.max(3, Number(process.env.CRASH_LOOP_LIMIT ?? 10));
+export const CRASH_LOOP_STATUS = `Paused after ${CRASH_LOOP_LIMIT} crashes in a row. Fix the error (or ask Kojy), then press Start.`;
 const STOP_GRACE_MS = 10_000;
 const NO_MODERATOR_STATUS = "Not a moderator in its room: commands that move, kick, mute or ban people won't work";
 /** How often bots waiting for a free server on their bot host try again. */
@@ -127,7 +134,7 @@ export class Supervisor {
       crashed: (uuid, project, ranFor, how, exitCode) => void this.hostCrashed(uuid, project, ranFor, how, exitCode),
       startFailed: (uuid, message) => this.startFailed(uuid, message),
       later: (uuid, seconds) => this.startLater(uuid, seconds),
-      activity: (project, kind, actorId, actorName) => this.record(project, kind, actorId, actorName),
+      activity: (project, kind, actorId, actorName, extra) => this.record(project, kind, actorId, actorName, extra),
       roomRights: (uuid, project, line) => this.onRoomRights(uuid, project, line),
     }, {
       launcherPath: LAUNCHER, starterPath: HOSTSTART, baseRequirements: BASE_REQUIREMENTS,
@@ -282,8 +289,12 @@ export class Supervisor {
     return out;
   }
 
-  private record(project: Pick<RunProject, "id" | "orgId">, kind: string, actorId?: string | null, actorName?: string | null): void {
-    this.activity.record({ orgId: project.orgId, source: "project", sourceId: project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null });
+  private record(project: Pick<RunProject, "id" | "orgId">, kind: string, actorId?: string | null, actorName?: string | null, extra?: { amount?: number | null; detail?: string | null }): void {
+    this.activity.record({
+      orgId: project.orgId, source: "project", sourceId: project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null,
+      amount: kind === "tip" && typeof extra?.amount === "number" ? extra.amount : null,
+      detail: (kind === "chat" || kind === "whisper") && typeof extra?.detail === "string" && /^[!/][a-z][a-z0-9_-]{0,30}$/.test(extra.detail) ? extra.detail : null,
+    });
   }
 
   private readActivity(run: Running): void {
@@ -296,8 +307,8 @@ export class Supervisor {
       partial = lines.pop() ?? "";
       for (const line of lines) {
         try {
-          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null };
-          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run.project, e.k, e.id, e.n);
+          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null; a?: number; d?: string };
+          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run.project, e.k, e.id, e.n, { amount: e.a ?? null, detail: e.d ?? null });
         } catch { /* not ours */ }
       }
     });
@@ -469,6 +480,7 @@ export class Supervisor {
       .from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (p?.desiredState !== "running") { await this.setStatus(uuid, "stopped", null); return null; }
 
+    if (streak >= CRASH_LOOP_LIMIT) { await this.pauseCrashLoop(uuid, project, streak); return null; }
     await this.db.update(botProjects).set({ restartCount: p.restartCount + 1 }).where(eq(botProjects.uuid, uuid));
     await this.setStatus(uuid, "crashed", `Exited with ${how}; restarting in ${delay}s`);
     this.onCrash?.(uuid, streak, this.tail(uuid));
@@ -476,10 +488,24 @@ export class Supervisor {
       this.alerted.set(uuid, streak);
       const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";
       const body = `${project.name} has crashed ${streak} times in a row and keeps restarting. Last output: ${last.slice(0, 200)}`;
-      void notifyUser(this.db, project.ownerId, "bot_error", `${project.name} keeps crashing`, body, `/projects/${uuid}`);
+      void notifyUser(this.db, project.ownerId, "bot_error", `${project.name} keeps crashing`, body, `/studio/p/${uuid}`);
       void sendAlert(`⚠️ ${body}`);
     }
     return delay;
+  }
+
+  /**
+   * A crash loop: stop restarting, keep the bot stopped until someone starts
+   * it again (Start, or Kojy's bot_control), and tell the owner once.
+   */
+  private async pauseCrashLoop(uuid: string, project: RunProject, streak: number): Promise<void> {
+    this.crashStreak.delete(uuid);
+    this.console(uuid, "system", `⏸ ${streak} crashes in a row — not restarting any more. ${CRASH_LOOP_STATUS}`);
+    await this.db.update(botProjects).set({ desiredState: "stopped", status: "error", statusMessage: CRASH_LOOP_STATUS }).where(eq(botProjects.uuid, uuid));
+    const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";
+    const body = `${project.name} crashed ${streak} times in a row, so it was paused instead of restarting forever. Last output: ${last.slice(0, 200)}. Open its chat and ask Kojy to fix it, then press Start.`;
+    void notifyUser(this.db, project.ownerId, "bot_error", `${project.name} was paused (crash loop)`, body, `/studio/p/${uuid}`);
+    void sendAlert(`⏸ ${body}`);
   }
 
   private clearRestart(uuid: string): void {
