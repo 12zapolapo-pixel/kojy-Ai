@@ -35,14 +35,14 @@
  * - Content takes full width
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { NavLink, useLocation } from "react-router-dom";
 import { useAuthStore } from "../state/authStore";
 import { useNotificationStore } from "../state/notificationStore";
 import { useBotStore } from "../state/botStore";
 import { useWsStore } from "../state/wsStore";
-import { NotificationDrawer } from "../components/NotificationDrawer";
+import { NotificationDrawer, NotificationPoller } from "../components/NotificationDrawer";
 import { CommandPalette } from "../components/CommandPalette";
 import clsx from "clsx";
 
@@ -200,13 +200,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               )}
             </button>
 
-            {/* Profile dropdown trigger */}
-            <button
-              onClick={logout}
-              className="flex items-center gap-2 hover:opacity-70 transition-opacity"
-            >
-              {user && <UserAvatar name={user.displayName ?? user.username} size="xs" />}
-            </button>
+            {/* Profile menu: settings and sign out (a click alone never signs you out) */}
+            <ProfileMenu name={user?.displayName ?? user?.username} email={user?.email} onLogout={() => void logout()} />
           </div>
         </header>
 
@@ -214,7 +209,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <main className="relative flex-1 overflow-hidden">
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
-              key={location.pathname}
+              // Per section, not per address: moving between bots in Studio doesn't replay the page fade.
+              key={location.pathname.split("/")[1] ?? ""}
               className="h-full"
               initial={{ opacity: 0, y: 14, filter: "blur(10px)" }}
               animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
@@ -230,6 +226,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <MobileBottomNav />
       </div>
 
+      <NotificationPoller />
       {/* Overlays */}
       {notifOpen   && <NotificationDrawer />}
       {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)} />}
@@ -381,6 +378,34 @@ function MobileBottomNav() {
   );
 }
 
+function ProfileMenu({ name, email, onLogout }: { name?: string | undefined; email?: string | undefined; onLogout: () => void }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+  return (
+    <div ref={box} className="relative">
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-label="Account menu" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+        <UserAvatar name={name} size="xs" />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-9 w-56 bg-[#0d1525] border border-white/10 rounded-lg shadow-xl py-1 text-sm">
+          <div className="px-3 py-2 border-b border-white/5">
+            <p className="text-white/80 truncate">{name ?? "Account"}</p>
+            {email && <p className="text-[11px] text-white/35 truncate">{email}</p>}
+          </div>
+          <NavLink to="/settings" onClick={() => setOpen(false)} className="block px-3 py-2 text-white/65 hover:bg-white/5">⚙ Settings</NavLink>
+          <button onClick={onLogout} className="w-full text-left px-3 py-2 text-red-300/90 hover:bg-white/5">Sign out</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Primitives ───────────────────────────────────────────────────────────────
 
 function KojyaiLogo() {
@@ -391,7 +416,7 @@ function KojyaiLogo() {
   );
 }
 
-function UserAvatar({ name, size }: { name?: string; size: "xs" | "sm" }) {
+function UserAvatar({ name, size }: { name?: string | undefined; size: "xs" | "sm" }) {
   const sz = size === "xs" ? "w-6 h-6 text-[10px]" : "w-7 h-7 text-xs";
   const initial = name ? name.charAt(0).toUpperCase() : "?";
   return (

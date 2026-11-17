@@ -263,7 +263,31 @@ export async function processModerationScan(job: Job): Promise<void> {
 //   BACKUP_KEEP_DAYS  default 14
 // Restore: pg_restore --clean --if-exists -d "$DATABASE_URL" <file>.dump
 
-const BACKUP_FILE = /^kojyai-(\d{4}-\d{2}-\d{2})T\d{2}-\d{2}-\d{2}-\d{3}Z\.dump$/;
+const BACKUP_FILE = /^kojyai-(?:projects-)?(\d{4}-\d{2}-\d{2})T\d{2}-\d{2}-\d{2}-\d{3}Z\.(?:dump|tgz)$/;
+
+/**
+ * Bot code and saved data (coins, points, banned words…) live in files, not
+ * in the database: pack PROJECTS_DIR next to the database backup. Version
+ * history (.snapshots) and console logs are left out. Never throws.
+ */
+async function backupProjects(backupDir: string, timestamp: string): Promise<{ projectsFile?: string; projectsSize?: number; projectsError?: string }> {
+  const { execFile } = await import("child_process");
+  const { promisify } = await import("util");
+  const { existsSync, statSync, unlinkSync } = await import("fs");
+  const path = await import("path");
+  const dir = process.env.PROJECTS_DIR;
+  if (!dir || !existsSync(dir)) return { projectsError: "Bot files aren't reachable from the worker (PROJECTS_DIR isn't set or mounted)." };
+  const name = `kojyai-projects-${timestamp}.tgz`;
+  const out = path.join(backupDir, name);
+  try {
+    await promisify(execFile)("tar", ["-czf", out, "--exclude=./.snapshots", "--exclude=./.logs", "--exclude=__pycache__", "-C", dir, "."], { maxBuffer: 8 * 1024 * 1024, timeout: 15 * 60_000 });
+    return { projectsFile: name, projectsSize: statSync(out).size };
+  } catch (err) {
+    try { unlinkSync(out); } catch { /* nothing written */ }
+    log.warn({ err }, "Bot files backup failed");
+    return { projectsError: (err as Error).message.slice(0, 300) };
+  }
+}
 
 export async function processBackupAutomation(job: Job): Promise<void> {
   // No shell anywhere: every external command is spawned array-form, and the
@@ -351,7 +375,8 @@ export async function processBackupAutomation(job: Job): Promise<void> {
         await execFileAsync("dropdb", [...conn, "--if-exists", scratch], { env: pgEnv }).catch((e) => log.warn({ err: e }, "Couldn't drop restore-check database"));
       }
     }
-    await getRedis()?.set("backup:last", JSON.stringify({ ok: true, file: fileName, size, at: Date.now(), entries, drill, drillAt: drill ? Date.now() : null }));
+    const projects = await backupProjects(backupDir, timestamp);
+    await getRedis()?.set("backup:last", JSON.stringify({ ok: true, file: fileName, size, at: Date.now(), entries, drill, drillAt: drill ? Date.now() : null, ...projects }));
   } catch (err) {
     try { unlinkSync(dumpFile); } catch { /* nothing written */ }
     log.error({ err }, "Backup automation failed");

@@ -42,7 +42,7 @@
  */
 
 import { z }           from "zod";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, isNull } from "drizzle-orm";
 import bcrypt          from "bcryptjs";
 import { nanoid }      from "nanoid";
 import { TRPCError }   from "@trpc/server";
@@ -50,6 +50,7 @@ import { router, publicProc, protectedProc } from "../../trpc.js";
 import { schema }      from "../../db/client.js"; // FIX-2: schema re-exported from client.ts
 import { createLogger } from "../../utils/logger.js";
 import { getRedis } from "../../utils/redis.js";
+import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { checkRateLimit, RATE_LIMITS, lookupIpIntelligence } from "@kojyai/security";
 import { emitSecurityEvent } from "../../events/security.js";
 import { issueCode, deliverCode } from "./codes.js";
@@ -753,6 +754,50 @@ export const authRouter = router({
         .where(eq(schema.sessions.userId, ctx.user.id));
 
       log.info({ userId: ctx.user.id }, "Password changed, sessions invalidated");
+      return { success: true };
+    }),
+
+  // ── Profile and organization (Settings) ────────────────────────────────────
+
+  updateProfile: protectedProc
+    .input(z.object({
+      displayName: z.string().trim().max(150),
+      locale: z.string().trim().min(2).max(10).regex(/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})?$/, "e.g. en or pt-BR"),
+      timezone: z.string().trim().min(1).max(50).refine((tz) => { try { new Intl.DateTimeFormat("en", { timeZone: tz }); return true; } catch { return false; } }, "Unknown time zone (e.g. Europe/London)"),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      await ctx.db.update(schema.users)
+        .set({ displayName: input.displayName || null, locale: input.locale, timezone: input.timezone })
+        .where(eq(schema.users.id, ctx.user.id));
+      return { success: true };
+    }),
+
+  /** Ends every session of this user, this one included (a lost phone, a shared computer). */
+  signOutEverywhere: protectedProc.mutation(async ({ ctx }) => {
+    await ctx.db.delete(schema.sessions).where(eq(schema.sessions.userId, ctx.user.id));
+    log.info({ userId: ctx.user.id }, "Signed out everywhere");
+    return { success: true };
+  }),
+
+  organization: protectedProc.query(async ({ ctx }) => {
+    const orgId = await resolveOrgId(ctx);
+    const [org] = await ctx.db.select({ name: schema.organizations.name, slug: schema.organizations.slug, ownerId: schema.organizations.ownerId })
+      .from(schema.organizations).where(eq(schema.organizations.id, orgId)).limit(1);
+    if (!org) throw new TRPCError({ code: "NOT_FOUND", message: "Organization not found." });
+    const [[py], [js]] = await Promise.all([
+      ctx.db.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(schema.botProjects).where(eq(schema.botProjects.orgId, orgId)),
+      ctx.db.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(schema.bots).where(and(eq(schema.bots.orgId, orgId), isNull(schema.bots.deletedAt))),
+    ]);
+    return { name: org.name, slug: org.slug, isOwner: org.ownerId === ctx.user.id, pythonBots: py?.n ?? 0, jsBots: js?.n ?? 0, maxPythonBots: 20 };
+  }),
+
+  renameOrganization: protectedProc
+    .input(z.object({ name: z.string().trim().min(1).max(100) }))
+    .mutation(async ({ input, ctx }) => {
+      const orgId = await resolveOrgId(ctx);
+      const [org] = await ctx.db.select({ ownerId: schema.organizations.ownerId }).from(schema.organizations).where(eq(schema.organizations.id, orgId)).limit(1);
+      if (!org || org.ownerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Only the organization's owner can rename it." });
+      await ctx.db.update(schema.organizations).set({ name: input.name }).where(eq(schema.organizations.id, orgId));
       return { success: true };
     }),
 });

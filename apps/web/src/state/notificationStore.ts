@@ -16,7 +16,8 @@ interface NotificationStore {
   unreadCount:   number;
   isOpen:        boolean;
 
-  setNotifications: (notifs: Notification[]) => void;
+  /** `unread` = the server's count (the list itself is capped). */
+  setNotifications: (notifs: Notification[], unread?: number) => void;
   addNotification:  (notif: Notification) => void;
   markRead:         (id: number) => void;
   markAllRead:      () => void;
@@ -29,10 +30,10 @@ export const useNotificationStore = create<NotificationStore>()(
     unreadCount:   0,
     isOpen:        false,
 
-    setNotifications: (notifs) =>
+    setNotifications: (notifs, unread) =>
       set((state) => {
         state.notifications = notifs;
-        state.unreadCount = notifs.filter((n) => !n.readAt).length;
+        state.unreadCount = unread ?? notifs.filter((n) => !n.readAt).length;
       }),
 
     addNotification: (notif) =>

@@ -78,9 +78,11 @@ services:
     environment:
       <<: *node-env
       BACKUP_DIR: /app/backups
+      PROJECTS_DIR: /app/projects
     volumes:
       - appdata:/app/data
       - backups:/app/backups
+      - projects:/app/projects:ro # bot files, packed into the daily backup
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

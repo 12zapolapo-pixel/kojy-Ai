@@ -4,10 +4,17 @@
  * OWNERSHIP: apps/web/src/features/studio
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import clsx from "clsx";
-import { trpc } from "../../lib/trpc";
+import { trpc, trpcClient } from "../../lib/trpc";
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
 
 export function NewBot() {
   const navigate = useNavigate();
@@ -19,7 +26,31 @@ export function NewBot() {
   const create = trpc.projects.create.useMutation({
     onSuccess: (p) => { void utils.studio.bots.invalidate(); navigate(`/studio/p/${p.id}`); },
   });
+  const zipInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const picked = templates.data?.find((t) => t.id === templateId);
+
+  /** A bot you already have (e.g. from Replit): new project, the zip, then Kojy looks at it. */
+  const uploadBot = async (file: File) => {
+    setUploadError(null);
+    if (file.size > 30 * 1024 * 1024) { setUploadError("That zip is over 30 MB."); return; }
+    const botName = name.trim() || file.name.replace(/\.zip$/i, "").replace(/[-_]+/g, " ").trim().slice(0, 150) || "My bot";
+    setUploading("Creating the bot…");
+    let id: string | null = null;
+    try {
+      id = (await trpcClient.projects.create.mutate({ name: botName })).id;
+      setUploading("Uploading the code…");
+      const r = await trpcClient.projects.uploadZip.mutate({ id, zipBase64: await fileToBase64(file) });
+      await trpcClient.projects.chatSend.mutate({ id, text: `I uploaded my bot's code (${file.name}: ${r.written} files${r.entrypoint ? `, entrypoint ${r.entrypoint}` : ""}). Look at it, tell me briefly what it does, find which secrets it needs, and get it running.` });
+      void utils.studio.bots.invalidate();
+      navigate(`/studio/p/${id}`);
+    } catch (e) {
+      setUploadError((e as Error).message);
+      // The bot was made but the zip didn't go in: open it so the owner can try again from its chat.
+      if (id) { void utils.studio.bots.invalidate(); navigate(`/studio/p/${id}`); }
+    } finally { setUploading(null); }
+  };
   const finalName = name.trim() || picked?.name || "";
   const canCreate = !!finalName && (!!templateId || description.trim().length > 0);
 
@@ -29,6 +60,22 @@ export function NewBot() {
         <div>
           <h1 className="text-xl font-semibold text-white">New bot</h1>
           <p className="text-sm text-white/45 mt-1">Describe the bot you want and Kojy builds it — or start from a ready-made bot and tell Kojy what to change.</p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-white/15 p-4"
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f && !uploading) void uploadBot(f); }}>
+          <div className="flex-1 min-w-[12rem]">
+            <p className="text-sm text-white/80">Already have a bot?</p>
+            <p className="text-xs text-white/45">Upload its .zip (from Replit or your computer). Kojy looks at it, asks for its secrets and gets it running.</p>
+          </div>
+          <input ref={zipInput} type="file" accept=".zip,application/zip" className="hidden"
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void uploadBot(f); }} />
+          <button disabled={!!uploading} onClick={() => zipInput.current?.click()}
+            className="px-4 py-2 border border-[#49dcb5]/40 text-[#49dcb5] text-sm rounded-lg hover:bg-[#49dcb5]/10 disabled:opacity-50">
+            {uploading ?? "📎 Upload my bot (.zip)"}
+          </button>
+          {uploadError && <p className="basis-full text-xs text-red-400">{uploadError}</p>}
         </div>
 
         <div className="space-y-3">

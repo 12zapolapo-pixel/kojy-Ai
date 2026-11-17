@@ -27,7 +27,7 @@ const ghostBtn = "px-3 py-1.5 border border-white/10 text-white/70 text-sm round
 export default function ProjectPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
-  const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 4000 });
+  const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 8000 });
   const [tab, setTab] = useState<Tab>("chat");
 
   if (project.isLoading) return <p className="p-6 text-sm text-white/40">Loading…</p>;
@@ -211,7 +211,8 @@ export function ConsoleTab({ project }: { project: Project }) {
         cursor.current = res.cursor;
         if (res.lines.length) setLines((prev) => [...prev, ...res.lines].slice(-3000));
       } catch { /* keep polling */ }
-      if (!stopped) timer = setTimeout(() => void poll(), 1500);
+      // A console in a background tab checks rarely (each check is a request against the account's limit).
+      if (!stopped) timer = setTimeout(() => void poll(), document.hidden ? 15_000 : 1500);
     };
     let timer = setTimeout(() => void poll(), 0);
     return () => { stopped = true; clearTimeout(timer); };

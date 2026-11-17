@@ -29,11 +29,14 @@ export default function LoginPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const navigate  = useNavigate();
   const { isAuthenticated, setSession } = useAuthStore();
+  // The page they opened before being asked to sign in (only paths on this site).
+  const from = (location.state as { from?: string } | null)?.from;
+  const target = from && from.startsWith("/") && !from.startsWith("//") && from !== "/login" ? from : "/studio";
 
   // Already logged in — redirect
   useEffect(() => {
-    if (isAuthenticated) navigate("/studio", { replace: true });
-  }, [isAuthenticated, navigate]);
+    if (isAuthenticated) navigate(target, { replace: true });
+  }, [isAuthenticated, navigate, target]);
 
   // Show verify screen after registration
   if (view === "verify") {
@@ -66,7 +69,7 @@ export default function LoginPage() {
             <span className="text-xl font-bold text-[#49dcb5]">K</span>
           </div>
           <h1 className="text-xl font-semibold text-white/90">KOJYAI</h1>
-          <p className="text-xs text-white/35 mt-1">AI Civilization Platform</p>
+          <p className="text-xs text-white/35 mt-1">Build and run Highrise bots with Kojy</p>
         </div>
 
         {/* Tab switcher */}
@@ -90,7 +93,7 @@ export default function LoginPage() {
         {notice && <div className="mb-4"><SuccessBox message={notice} /></div>}
         {view === "login"
           ? <LoginForm
-              onSuccess={(token, user) => { setSession(token, user); navigate("/studio"); }}
+              onSuccess={(token, user) => { setSession(token, user); navigate(target, { replace: true }); }}
               onForgot={(email) => { setPendingEmail(email); setNotice(null); setView("reset"); }} />
           : <RegisterForm onSuccess={(email, verified, message) => {
               setPendingEmail(email);

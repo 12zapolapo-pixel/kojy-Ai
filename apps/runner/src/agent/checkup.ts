@@ -7,10 +7,10 @@
  * OWNERSHIP: apps/runner/src/agent
  */
 
-import { and, eq, gte, isNull, lt, or, count } from "drizzle-orm";
-import type { Database } from "@kojyai/db";
+import { and, eq, gte, isNull, lt, or, count, like } from "drizzle-orm";
+import { notifyUser, type Database } from "@kojyai/db";
 import { botProjects, botActivity, projectMessages } from "@kojyai/db/schema";
-import { readLogs } from "@kojyai/shared/projects";
+import { readRecentLogs } from "@kojyai/shared/projects";
 import { createLogger } from "../logger.js";
 import { untrusted } from "./prompt.js";
 
@@ -32,6 +32,8 @@ export async function runCheckups(db: Database, startAgent: (uuid: string) => vo
 async function checkOne(db: Database, project: typeof botProjects.$inferSelect, startAgent: (uuid: string) => void): Promise<void> {
   const since = Date.now() - DAY;
   await db.update(botProjects).set({ lastCheckupAt: new Date() }).where(eq(botProjects.id, project.id));
+  // Stopped all day: nothing ran, so nothing to check.
+  if (project.desiredState !== "running" && (!project.lastStartedAt || project.lastStartedAt.getTime() < since)) return;
 
   const counts = await db.select({ kind: botActivity.kind, n: count() }).from(botActivity)
     .where(and(eq(botActivity.source, "project"), eq(botActivity.sourceId, project.id), gte(botActivity.createdAt, new Date(since))))
@@ -39,18 +41,22 @@ async function checkOne(db: Database, project: typeof botProjects.$inferSelect, 
   const n = (k: string) => Number(counts.find((c) => c.kind === k)?.n ?? 0);
 
   // Errors printed in the last day (the log keeps the latest ~2 MB).
-  const lines = readLogs(project.uuid, 0, 2 * 1024 * 1024).lines.filter((l) => l.ts >= since);
+  const lines = readRecentLogs(project.uuid, 2 * 1024 * 1024).filter((l) => l.ts >= since);
   const errorLines = lines.filter((l) => l.stream === "stderr" && /(Traceback|Error|Exception)/.test(l.line) && !/\bINFO\b/.test(l.line));
   const distinct = [...new Set(errorLines.map((l) => l.line.trim()))].slice(0, 12);
   const thread = `project:${project.id}`;
   const summary = `${n("chat") + n("whisper")} messages, ${n("reply")} replies, ${n("join")} joins, ${n("crash")} crashes`;
 
   if (!distinct.length && n("crash") === 0) {
+    // One "all clear" line in the chat, not a new one every day.
+    await db.delete(projectMessages).where(and(eq(projectMessages.thread, thread), eq(projectMessages.kind, "event"), like(projectMessages.content, "🩺 Daily check-up: no errors%")));
     await db.insert(projectMessages).values({ thread, projectId: project.id, role: "assistant", kind: "event",
-      content: `🩺 Daily check-up: no errors in the last 24 hours (${summary}).` });
+      content: `🩺 Daily check-up: no errors in the last 24 hours (${summary}). Checked ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC.` });
     return;
   }
   await db.insert(projectMessages).values({ thread, projectId: project.id, role: "user", kind: "checkup",
     content: `Daily check-up for the last 24 hours: ${summary}. Errors seen (from the bot, not from the owner):\n${distinct.length ? untrusted(distinct.join("\n")) : "(crashes without a printed error)"}\n\nFind what causes them. If a fix is needed, explain it in one or two sentences and use propose_plan — don't change anything until I approve. If it's harmless or outside the bot (e.g. Highrise was down), just say so.` });
   startAgent(project.uuid);
+  void notifyUser(db, project.ownerId, "bot_error", `Daily check-up found errors in ${project.name}`,
+    `${summary}. Kojy is looking into them and will ask before changing anything.`, `/studio/p/${project.uuid}`);
 }

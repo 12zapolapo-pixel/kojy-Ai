@@ -64,6 +64,18 @@ interface AuthStore {
 
 const SESSION_KEY = "kojyai_session_token";
 
+/**
+ * The token lives in localStorage so a new tab (a link from a notification, a
+ * bookmark) is already signed in. It's no more exposed to injected script than
+ * sessionStorage was (see above); it just outlives the tab — the server ends
+ * sessions on sign-out, password change and "Sign out all sessions".
+ */
+const store = {
+  get: (): string | null => { try { return localStorage.getItem(SESSION_KEY) ?? sessionStorage.getItem(SESSION_KEY); } catch { return null; } },
+  set: (t: string) => { try { localStorage.setItem(SESSION_KEY, t); } catch { /* private mode: this tab only */ } },
+  clear: () => { try { localStorage.removeItem(SESSION_KEY); sessionStorage.removeItem(SESSION_KEY); } catch { /* ignore */ } },
+};
+
 // ─── Typed tRPC-compatible fetcher ────────────────────────────────────────────
 // Uses the correct tRPC v11 GET query format and handles superjson-wrapped responses.
 
@@ -122,7 +134,7 @@ export const useAuthStore = create<AuthStore>()(
       set((s) => { s.isLoading = true; });
 
       try {
-        const storedToken = sessionStorage.getItem(SESSION_KEY);
+        const storedToken = store.get();
         const user = await trpcGet<AuthUser>("auth.me", storedToken);
 
         if (user) {
@@ -134,7 +146,7 @@ export const useAuthStore = create<AuthStore>()(
             s.error           = null;
           });
         } else {
-          sessionStorage.removeItem(SESSION_KEY);
+          store.clear();
           set((s) => { s.user = null; s.token = null; s.isAuthenticated = false; s.isLoading = false; });
         }
       } catch {
@@ -147,7 +159,7 @@ export const useAuthStore = create<AuthStore>()(
     },
 
     setSession: (token, user) => {
-      sessionStorage.setItem(SESSION_KEY, token);
+      store.set(token);
       set((s) => { s.token = token; s.user = user; s.isAuthenticated = true; s.error = null; });
     },
 
@@ -159,7 +171,7 @@ export const useAuthStore = create<AuthStore>()(
       } catch {
         // Clear local state regardless of network error
       } finally {
-        sessionStorage.removeItem(SESSION_KEY);
+        store.clear();
         set((s) => { s.user = null; s.token = null; s.isAuthenticated = false; });
         window.location.href = "/login";
       }
@@ -171,4 +183,8 @@ export const useAuthStore = create<AuthStore>()(
 
 export function initializeAuth(): void {
   void useAuthStore.getState().initialize();
+  // Signed out in another tab: follow it here.
+  window.addEventListener("storage", (e) => {
+    if (e.key === SESSION_KEY && !e.newValue && useAuthStore.getState().isAuthenticated) window.location.href = "/login";
+  });
 }

@@ -27,7 +27,7 @@
  */
 
 import { Suspense, lazy, useEffect } from "react";
-import { BrowserRouter, Routes, Route, Navigate, Outlet, useParams } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation, useParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
@@ -52,9 +52,7 @@ const MarketplacePage   = lazy(() => import("../features/marketplace/Marketplace
 const InfraPage         = lazy(() => import("../features/infrastructure/InfraPage"));
 const SecurityPage      = lazy(() => import("../features/security/SecurityPage"));
 const SettingsPage      = lazy(() => import("../features/settings/SettingsPage"));
-const OnboardingPage    = lazy(() => import("../features/onboarding/OnboardingPage"));
 const AdminPage         = lazy(() => import("../features/admin/AdminPage"));
-// The Bot Composer — the primary product surface. All other nav items orbit this.
 
 // ─── tRPC + React Query ───────────────────────────────────────────────────────
 
@@ -104,7 +102,7 @@ export default function App() {
             <Route path="/"           element={<HomeRoute />} />
             <Route path="/login"      element={<LoginPage />} />
             <Route path="/auth/reset-password" element={<LoginPage />} />
-            <Route path="/onboarding" element={<AuthGuard><OnboardingPage /></AuthGuard>} />
+            <Route path="/onboarding" element={<Navigate to="/studio/new" replace />} />
 
             {/* Protected app routes — all wrapped in AppShell */}
             <Route
@@ -229,9 +227,11 @@ export default function App() {
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuthStore();
+  const location = useLocation();
 
   if (isLoading) return <PageLoader message="Authenticating…" />;
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  // Remember where they were going, so signing in lands on the link they opened.
+  if (!isAuthenticated) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
   return <>{children}</>;
 }
 
@@ -286,7 +286,7 @@ function NotFound() {
         <p className="text-6xl font-mono text-white/10">404</p>
         <p className="text-white/40">Page not found</p>
         <a href="/studio" className="text-[#49dcb5] text-sm hover:underline">
-          Back to Mission Control
+          Back to Bot Studio
         </a>
       </div>
     </div>

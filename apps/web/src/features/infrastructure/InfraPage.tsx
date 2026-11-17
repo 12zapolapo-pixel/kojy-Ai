@@ -55,7 +55,7 @@ export default function InfraPage() {
 
   const runner = data.runner.heartbeat as null | { bots: number; rssMb: number; load: number[]; cpus: number; memTotalMb: number; memFreeMb: number; hostUptimeS: number; uptimeS: number; disk: { totalGb: number; freeGb: number } | null };
   const worker = data.worker.heartbeat as null | { rssMb: number; uptimeS: number };
-  const backup = data.backup as null | { ok: boolean; file?: string; size?: number; at: number; entries?: number; error?: string; drill?: Record<string, number> | null; drillAt?: number | null };
+  const backup = data.backup as null | { ok: boolean; file?: string; size?: number; at: number; entries?: number; error?: string; drill?: Record<string, number> | null; drillAt?: number | null; projectsFile?: string; projectsSize?: number; projectsError?: string };
   const py = data.bots.python as Record<string, number>;
   const js = data.bots.js as Record<string, number>;
   const sum = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
@@ -91,7 +91,7 @@ export default function InfraPage() {
             <h2 className="text-sm text-white/70">Bots</h2>
             <p className="text-xs text-white/55">🐍 Python: {sum(py)} total · {py.running ?? 0} running{py.crashed ? ` · ${py.crashed} crashed` : ""}{py.error ? ` · ${py.error} error` : ""}</p>
             <p className="text-xs text-white/55">JS: {sum(js)} total · {js.online ?? 0} online{js.error ? ` · ${js.error} error` : ""}{js.suspended ? ` · ${js.suspended} suspended` : ""}</p>
-            <p className="text-xs text-white/40 pt-2">Coder AI: {data.ai.groq ? "Groq key set" : "no Groq key — set GROQ_API_KEY in .env"} · Alerts: {data.ai.alertsWebhook ? "webhook on" : "set ALERT_WEBHOOK_URL in .env to get alerts in Discord"}</p>
+            <p className="text-xs text-white/40 pt-2">Coder AI: {data.ai.providers.length ? data.ai.providers.join(", ") : "no AI key — set GROQ_API_KEY or AGENT_API_KEY (Gemini) in .env"} · Alerts: {data.ai.alertsWebhook ? "webhook on" : "set ALERT_WEBHOOK_URL in .env to get alerts in Discord"}</p>
           </section>
 
           <section className={clsx("border rounded-xl p-4 space-y-2", backup && !backup.ok ? "border-red-500/30 bg-red-500/5" : backupStale ? "border-amber-500/30 bg-amber-500/5" : "border-white/8 bg-white/[0.02]")}>
@@ -103,6 +103,9 @@ export default function InfraPage() {
                 <p className="text-xs text-white/45">{backup.drill
                   ? `Restore drill passed ${ago(backup.drillAt!)}: ${backup.drill.users} users, ${backup.drill.bots} JS bots, ${backup.drill.projects} Python bots restored into a test database.`
                   : "A full restore drill runs every Sunday."}</p>
+                <p className={clsx("text-xs", backup.projectsFile ? "text-white/60" : "text-amber-300")}>{backup.projectsFile
+                  ? `Bot files and saved data: ${((backup.projectsSize ?? 0) / 1048576).toFixed(1)} MB, packed with the same backup.`
+                  : `Bot files and saved data were NOT backed up: ${backup.projectsError ?? "update the worker"}`}</p>
                 {backupStale && <p className="text-xs text-amber-300">The last backup is over a day and a half old — check the worker.</p>}
               </>
             )}

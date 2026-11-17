@@ -24,6 +24,7 @@ import { signBotControlMessage } from "@kojyai/shared/crypto";
 import { ensureProjectDir } from "@kojyai/shared/projects";
 import type { ToolSpec } from "./groq.js";
 import type { ToolResult } from "./tools.js";
+import { describeEvent, parseEvents, testUser, wireEvent } from "./mockRoom.js";
 
 export type JsBot = typeof bots.$inferSelect;
 
@@ -45,8 +46,12 @@ export const JS_TOOL_SPECS: ToolSpec[] = [
   fn("write_script", "Create or replace a script (a new version; the old one is kept inactive). Contract: `export default function handler(event, ctx) { return [actions] }`; event._type is ChatEvent/UserJoinedEvent/UserLeftEvent/TipReactionEvent/EmoteEvent; actions like { kind: \"chat\", reason: \"…\", request: { _type: \"ChatRequest\", message: \"…\", whisper_target_id: null } }, { kind: \"emote\", request: { _type: \"EmoteRequest\", emote_id, target_user_id } }, { kind: \"reaction\", request: { _type: \"ReactionRequest\", reaction: \"clap\"|\"heart\"|\"thumbs\"|\"wave\"|\"wink\", target_user_id } }. No timers, network or saved files; ctx.userState (Map) and ctx.scriptState (object) persist while the bot runs. Test it, then reload_scripts.",
     { name: str("script name"), code: str("full script code"), description: str("what it does") }, ["name", "code"]),
   fn("delete_script", "Turn a script off.", { name: str("script name") }, ["name"]),
-  fn("test_script", "Run a script against fake room events (tester chats the lines; optional join) and show the actions it returns.",
-    { name: str("script name"), chat: { type: "array", items: { type: "string" } }, join: { type: "boolean" } }, ["name", "chat"]),
+  fn("test_script", "Run a script against fake room events and show the actions it returns. Order: join (tester joins), events, then chat lines from tester. Use events for tips, whispers, emotes, people leaving, or chat from the room owner (user \"owner\").",
+    { name: str("script name"), chat: { type: "array", items: { type: "string" } }, join: { type: "boolean" },
+      events: { type: "array", items: { type: "object", properties: {
+        type: { type: "string", enum: ["chat", "whisper", "join", "leave", "tip", "emote"] }, user: str("tester (default), owner or any name"),
+        text: str("chat or whisper text"), amount: { type: "integer", description: "gold, for tip" }, emote: str("emote id"),
+      }, required: ["type"] } } }, ["name"]),
   fn("reload_scripts", "Load the current scripts into the running bot (after writing or deleting)."),
   fn("bot_control", "Start, stop or restart this JS bot.", { action: { type: "string", enum: ["start", "stop", "restart"] } }, ["action"]),
   fn("convert_to_python", "Make a new Python bot that does what this JS bot does (and can grow far beyond it). Kojy rebuilds it there; this JS bot keeps running until the owner stops it."),
@@ -110,14 +115,15 @@ function __invoke__(eventJson) {
   }
   const invoke = context.global.getSync("__invoke__", { reference: true });
   const results = [];
-  for (const ev of events) {
-    const label = ev._type === "ChatEvent" ? "tester says: " + ev.message : ev._type;
+  for (const raw of events) {
+    const { __label, ...ev } = raw;
+    const label = __label || (ev._type === "ChatEvent" ? "tester says: " + ev.message : ev._type);
     try {
       const actions = JSON.parse(invoke.applySync(undefined, [JSON.stringify(ev)], { timeout: timeoutMs }));
       results.push({ event: label, actions: Array.isArray(actions) ? actions : [] });
     } catch (e) {
       if (timedOut(e)) { out({ error: "Timed out (does the script loop forever?)" }); return; }
-      results.push({ event: ev._type, error: String((e && e.stack) || e).slice(0, 500) });
+      results.push({ event: label, error: String((e && e.stack) || e).slice(0, 500) });
     }
   }
   out({ results });
@@ -195,10 +201,12 @@ export async function runJsTool(name: string, args: Record<string, unknown>, ctx
       case "test_script": {
         const [row] = (await activeScripts(ctx)).filter((x) => x.name.toLowerCase() === s(args.name).toLowerCase());
         if (!row) return { ok: false, output: `No active script called "${s(args.name)}".`, summary: `No script "${s(args.name)}"` };
-        const tester = { id: "u-tester", username: "tester" };
-        const events: unknown[] = [];
+        const tester = testUser("tester");
+        const events: Record<string, unknown>[] = [];
         if (args.join === true) events.push({ _type: "UserJoinedEvent", user: tester, position: { x: 1, y: 0, z: 1, facing: "FrontRight" } });
+        for (const e of parseEvents(args.events)) { const w = wireEvent(e); if (w) events.push({ ...w, __label: describeEvent(e) }); }
         for (const line of (Array.isArray(args.chat) ? args.chat : []).slice(0, 8)) events.push({ _type: "ChatEvent", user: tester, message: String(line), whisper: false });
+        if (!events.length) return { ok: false, output: "Give chat lines, events, or join: true to test something.", summary: "Nothing to test" };
         const r = await runHarness(row.code, events);
         if (r.error) {
           await ctx.db.update(botScripts).set({ lastTestStatus: "failed", lastTestOutput: r.error.slice(0, 2000), lastTestedAt: new Date() }).where(eq(botScripts.id, row.id));

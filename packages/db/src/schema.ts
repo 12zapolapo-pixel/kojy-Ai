@@ -954,6 +954,8 @@ export const botActivity = pgTable("bot_activity", {
   kind:      varchar("kind", { length: 20 }).notNull(),
   actorId:   varchar("actor_id", { length: 64 }),
   actorName: varchar("actor_name", { length: 100 }),
+  // Gold the bot received, for kind "tip" (null when unknown or not gold).
+  amount:    integer("amount"),
   createdAt: createdAt(),
 }, (t) => ({
   orgTimeIdx:    index("bot_activity_org_time_idx").on(t.orgId, t.createdAt),

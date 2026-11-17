@@ -16,7 +16,7 @@ import { schema } from "../../db/client.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { getRedis, getRedisPublisher } from "../../utils/redis.js";
 import { signBotControlMessage } from "@kojyai/shared/crypto";
-import { listThread, addToThread, agentProgress } from "../projects/chat.js";
+import { listThread, addToThread, agentProgress, runnerOnline } from "../projects/chat.js";
 
 const { botProjects, bots, projectMessages, agentMemories } = schema;
 const studioKey = (orgId: number) => `studio-${orgId}`;
@@ -56,19 +56,23 @@ export const studioRouter = router({
         .where(and(eq(bots.orgId, orgId), isNull(bots.deletedAt))),
     ]);
     const live = (s: string) => s === "running" || s === "online";
+    // JS bots' chats keep Kojy's state in Redis ("working" / "waiting" for the owner).
+    let jsStates: (string | null)[] = [];
+    try { jsStates = js.length ? (await getRedis()?.mget(...js.map((b) => `agent_state:jsbot-${b.uuid}`))) ?? [] : []; } catch { /* cosmetic */ }
     return [
-      ...py.map((p) => ({ kind: "python" as const, id: p.uuid, name: p.name, status: p.status, live: live(p.status), working: p.agentState === "working", updatedAt: p.updatedAt })),
-      ...js.map((b) => ({ kind: "javascript" as const, id: b.uuid, name: b.name, status: b.status, live: live(b.status), working: false, updatedAt: b.updatedAt })),
+      ...py.map((p) => ({ kind: "python" as const, id: p.uuid, name: p.name, status: p.status, live: live(p.status), working: p.agentState === "working", waiting: p.agentState === "waiting", updatedAt: p.updatedAt })),
+      ...js.map((b, i) => ({ kind: "javascript" as const, id: b.uuid, name: b.name, status: b.status, live: live(b.status), working: jsStates[i] === "working", waiting: jsStates[i] === "waiting", updatedAt: b.updatedAt })),
     ].sort((a, b) => a.name.localeCompare(b.name));
   }),
 
-  chatList: permittedProc("bots:read").input(z.object({ afterId: z.number().int().min(0).optional() })).query(async ({ ctx, input }) => {
+  chatList: permittedProc("bots:read").input(z.object({ afterId: z.number().int().min(0).optional(), beforeId: z.number().int().min(1).optional() })).query(async ({ ctx, input }) => {
     const orgId = await resolveOrgId(ctx);
     const agentState = await studioState(orgId);
     return {
       agentState,
       progress: agentState === "working" ? await agentProgress(studioKey(orgId)) : null,
-      ...(await listThread(ctx.db, `studio:${orgId}`, input.afterId)),
+      runnerOnline: await runnerOnline(),
+      ...(await listThread(ctx.db, `studio:${orgId}`, input.afterId, input.beforeId)),
     };
   }),
 
@@ -108,11 +112,11 @@ export const studioRouter = router({
 
   // ── a JavaScript bot's own chat (thread "bot:<id>", key "jsbot-<uuid>") ──
 
-  jsChatList: permittedProc("bots:read").input(jsId.extend({ afterId: z.number().int().min(0).optional() })).query(async ({ ctx, input }) => {
+  jsChatList: permittedProc("bots:read").input(jsId.extend({ afterId: z.number().int().min(0).optional(), beforeId: z.number().int().min(1).optional() })).query(async ({ ctx, input }) => {
     const bot = await loadJsBot(ctx, input.id);
     const key = `jsbot-${bot.uuid}`;
     const agentState = await stateOf(key);
-    return { agentState, progress: agentState === "working" ? await agentProgress(key) : null, ...(await listThread(ctx.db, `bot:${bot.id}`, input.afterId)) };
+    return { agentState, progress: agentState === "working" ? await agentProgress(key) : null, runnerOnline: await runnerOnline(), ...(await listThread(ctx.db, `bot:${bot.id}`, input.afterId, input.beforeId)) };
   }),
 
   jsChatSend: permittedProc("bots:update").input(jsId.extend({ text: z.string().trim().min(1).max(8000) })).mutation(async ({ ctx, input }) => {

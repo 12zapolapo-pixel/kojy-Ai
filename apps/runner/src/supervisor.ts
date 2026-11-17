@@ -8,9 +8,10 @@
  *   VENVS_DIR/<uuid>/               its own Python virtualenv
  *   PROJECTS_DIR/.logs/<uuid>.log   console output (read by the API)
  *
- * Restarts a crashed bot with backoff (5s, 15s, 30s, 60s, then every 60s); a
- * run that lasted 2+ minutes resets the backoff — the same policy Japalo's
- * own main.py used on Replit.
+ * Restarts a crashed bot with backoff (5s, 15s, 30s, 60s, then every 60s,
+ * slowing to 5 and 15 min on long streaks — see restartDelayS); a run that
+ * lasted 2+ minutes resets the backoff. A bot Highrise refused (bad token or
+ * room) is stopped instead of restarted.
  */
 
 import type { ChildProcess } from "node:child_process";
@@ -37,6 +38,8 @@ export const BOTCHECK = path.join(path.dirname(new URL(import.meta.url).pathname
 const LOG_DIR     = path.join(PROJECTS_DIR, ".logs");
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
 const RESTART_DELAYS_S = [5, 15, 30, 60];
+/** launcher.py: the SDK stopped reconnecting (Highrise refused the bot, or a websocket error). */
+export const SDK_ENDED_EXIT = 5;
 /** A start that failed before the bot ran (pip, network, database): try again, slower. */
 const START_RETRY_DELAYS_S = [30, 120, 600, 1800];
 const HEALTHY_RUN_MS = 120_000;
@@ -47,6 +50,34 @@ const NO_MODERATOR_STATUS = "Not a moderator in its room: commands that move, ki
 const BASE_REQUIREMENTS = ["highrise-bot-sdk==25.1.0", "setuptools<82"];
 
 type Status = typeof botProjects.$inferSelect["status"];
+
+/**
+ * Seconds before restarting a bot that crashed `streak` times in a row:
+ * 5s, 15s, 30s, then every minute — and slower once it's clearly not going
+ * to fix itself (5 min from the 10th crash, 15 min from the 20th), so a bot
+ * broken for days doesn't restart 1,400 times a day.
+ */
+export function restartDelayS(streak: number): number {
+  if (streak <= RESTART_DELAYS_S.length) return RESTART_DELAYS_S[Math.max(0, streak - 1)]!;
+  if (streak < 10) return 60;
+  if (streak < 20) return 300;
+  return 900;
+}
+
+/**
+ * Why Highrise refused the bot for good, or null. The SDK prints
+ * "ERROR: Error(message='…', do_not_reconnect=…)" and stops reconnecting
+ * when the token or room is wrong; launcher.py then exits with
+ * SDK_ENDED_EXIT. Restarting can't fix that — it would knock every minute.
+ */
+export function highriseRefusal(code: number | null, tail: string[]): string | null {
+  if (code !== SDK_ENDED_EXIT) return null;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const m = /^ERROR: Error\(message=(['"])(.*?)\1/.exec(tail[i]!.trim());
+    if (m) return m[2]!.slice(0, 200) || "no reason given";
+  }
+  return null;
+}
 
 /**
  * Host settings passed through to bots and pip (proxies, CA bundles). Nothing
@@ -213,8 +244,8 @@ export class Supervisor {
     return env;
   }
 
-  private record(run: Running, kind: string, actorId?: string | null, actorName?: string | null): void {
-    this.activity.record({ orgId: run.project.orgId, source: "project", sourceId: run.project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null });
+  private record(run: Running, kind: string, actorId?: string | null, actorName?: string | null, amount?: number | null): void {
+    this.activity.record({ orgId: run.project.orgId, source: "project", sourceId: run.project.id, kind, actorId: actorId ?? null, actorName: actorName ?? null, amount: amount ?? null });
   }
 
   private readActivity(run: Running): void {
@@ -227,8 +258,9 @@ export class Supervisor {
       partial = lines.pop() ?? "";
       for (const line of lines) {
         try {
-          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null };
-          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n);
+          const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null; a?: unknown };
+          const amount = typeof e.a === "number" && Number.isInteger(e.a) && e.a > 0 && e.a < 1e9 ? e.a : null;
+          if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run, e.k, e.id, e.n, amount);
         } catch { /* not ours */ }
       }
     });
@@ -304,13 +336,16 @@ export class Supervisor {
     if (this.procs.get(uuid) === run) this.procs.delete(uuid);
     await this.db.update(botProjects).set({ lastExitCode: code }).where(eq(botProjects.uuid, uuid));
     if (run.stopping) { this.record(run, "stop"); return; }
+    const ranFor = Date.now() - run.startedAt;
+
+    const refusal = highriseRefusal(code, this.tail(uuid));
+    if (refusal) return this.onRefused(uuid, run, refusal, ranFor);
     this.record(run, "crash");
 
-    const ranFor = Date.now() - run.startedAt;
     const streak = ranFor >= HEALTHY_RUN_MS ? 1 : (this.crashStreak.get(uuid) ?? 0) + 1;
     if (streak === 1) this.alerted.delete(uuid);
     this.crashStreak.set(uuid, streak);
-    const delay = RESTART_DELAYS_S[Math.min(streak - 1, RESTART_DELAYS_S.length - 1)]!;
+    const delay = restartDelayS(streak);
     this.console(uuid, "system", `✖ Bot exited (${signal ?? `code ${code}`}) after ${Math.round(ranFor / 1000)}s — restarting in ${delay}s`);
 
     const [project] = await this.db.select({ desiredState: botProjects.desiredState, restartCount: botProjects.restartCount })
@@ -324,10 +359,26 @@ export class Supervisor {
       this.alerted.set(uuid, streak);
       const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";
       const body = `${run.project.name} has crashed ${streak} times in a row and keeps restarting. Last output: ${last.slice(0, 200)}`;
-      void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} keeps crashing`, body, `/projects/${uuid}`);
+      void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} keeps crashing`, body, `/studio/p/${uuid}`);
       void sendAlert(`⚠️ ${body}`);
     }
     this.restartTimers.set(uuid, setTimeout(() => { this.restartTimers.delete(uuid); void this.start(uuid); }, delay * 1000));
+  }
+
+  /**
+   * Highrise refused the bot (wrong token or room): stop, say why on the bot's
+   * page and in its console, and tell the owner — instead of restarting it
+   * every minute for ever. The owner fixes the secret and presses Run.
+   */
+  private async onRefused(uuid: string, run: Running, reason: string, ranFor: number): Promise<void> {
+    this.record(run, "stop");
+    this.crashStreak.delete(uuid);
+    this.clearRestart(uuid);
+    const message = `Highrise refused the bot (${reason}). Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in Secrets, then press Run.`;
+    this.console(uuid, "system", `✖ Bot exited (code ${SDK_ENDED_EXIT}) after ${Math.round(ranFor / 1000)}s — Highrise refused it, so it won't be restarted. ${message}`);
+    await this.db.update(botProjects).set({ desiredState: "stopped", status: "error", statusMessage: message.slice(0, 500) }).where(eq(botProjects.uuid, uuid));
+    void notifyUser(this.db, run.project.ownerId, "bot_error", `Highrise refused ${run.project.name}`, message, `/studio/p/${uuid}`);
+    void sendAlert(`⚠️ ${run.project.name}: ${message}`);
   }
 
   private clearRestart(uuid: string): void {

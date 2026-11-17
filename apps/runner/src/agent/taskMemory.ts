@@ -23,8 +23,17 @@ export interface TaskMemory {
   failed: string[];
 }
 
-/** Messages that only say "keep going" and so don't start a new task. */
-const CONTINUE = /^\s*(continue|go on|keep going|carry on|go ahead|yes|ok|okay|sure|please continue|pls continue|next)[\s.!?]*$/i;
+/**
+ * Messages that only say "keep going" (or yes, or thanks) and so don't start
+ * a new task: "yes please", "ok go ahead", "sounds good 👍", "do it". Anything
+ * with more in it ("yes, and add a !dance command") is a new request.
+ */
+const CONTINUE_WORDS = /^(?:(?:yes|yeah|yea|yep|yup|ok|okay|k|sure|alright|fine|go|go ahead|go on|continue|keep going|carry on|proceed|next|do it|do that|please do|sounds good|looks good|lgtm|perfect|great|nice|cool|awesome|approved|approve|agreed|thanks|thank you|thx|ty|please|pls|now|then|kojy|it|on|that|all|good|of course|for sure)\s*)+$/;
+export function isContinuation(text: string): boolean {
+  const t = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+  if (!t) return true; // only emoji or punctuation ("👍", "!!")
+  return t.split(" ").length <= 6 && CONTINUE_WORDS.test(t);
+}
 
 export const TASK_MAX_CHARS = 1200;
 export const DONE_MAX_ITEMS = 25;
@@ -34,7 +43,7 @@ export const ITEM_MAX_CHARS = 120;
 export function requestIndex(rows: { role: string; kind: string; content: string }[]): number {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
-    if (r.role === "user" && r.kind !== "event" && !CONTINUE.test(r.content)) return i;
+    if (r.role === "user" && r.kind !== "event" && !isContinuation(r.content)) return i;
   }
   return -1;
 }

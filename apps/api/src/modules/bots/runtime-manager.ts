@@ -125,9 +125,9 @@ const activeLoops = new Map<string, BotLoopState>();
 
 // Room activity for the analytics pages (batched writes to bot_activity).
 let activity: ActivityRecorder | null = null;
-function recordActivity(state: BotLoopState, kind: string, user?: { id: string; username: string } | null): void {
+function recordActivity(state: BotLoopState, kind: string, user?: { id: string; username: string } | null, amount?: number | null): void {
   activity ??= new ActivityRecorder(db, 5000, (err) => log.warn({ err }, "Could not save bot activity"));
-  activity.record({ orgId: state.orgId, source: "bot", sourceId: state.botDbId, kind, actorId: user?.id ?? null, actorName: user?.username ?? null });
+  activity.record({ orgId: state.orgId, source: "bot", sourceId: state.botDbId, kind, actorId: user?.id ?? null, actorName: user?.username ?? null, amount: amount ?? null });
 }
 
 async function notifyBotOwner(state: BotLoopState, type: "bot_error" | "bot_offline", title: string, body: string): Promise<void> {
@@ -468,7 +468,11 @@ async function runBotLoop(
     if (event._type === "ChatEvent" && event.user.id !== client.sessionMetadata?.user_id) recordActivity(state, event.whisper ? "whisper" : "chat", event.user);
     else if (event._type === "UserJoinedEvent") recordActivity(state, "join", event.user);
     else if (event._type === "UserLeftEvent") recordActivity(state, "leave", event.user);
-    else if (event._type === "TipReactionEvent") recordActivity(state, "tip", event.sender);
+    else if (event._type === "TipReactionEvent") {
+      const item = event.item as { type?: string; amount?: number } | undefined;
+      const toBot = (event.receiver as { id?: string } | undefined)?.id === client.sessionMetadata?.user_id;
+      recordActivity(state, "tip", event.sender, toBot && item?.type === "gold" && typeof item.amount === "number" ? item.amount : null);
+    }
     else if (event._type === "EmoteEvent") recordActivity(state, "emote", event.user);
 
     broadcastBotEvent(state.botId, {

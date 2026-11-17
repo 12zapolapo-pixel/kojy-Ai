@@ -251,7 +251,7 @@ function EmptyBotsState({ onCreate }: { onCreate: () => void }) {
     <div className="flex flex-col items-center justify-center py-20 text-center">
       <span className="text-6xl mb-4">🤖</span>
       <h2 className="text-xl font-semibold text-white/70">No bots yet</h2>
-      <p className="text-sm text-white/35 mt-2 max-w-sm">Deploy your first AI bot to start your civilization. Each bot lives in a Highrise room and interacts with real users.</p>
+      <p className="text-sm text-white/35 mt-2 max-w-sm">Add a JavaScript bot here, or build a Python bot with Kojy in Bot Studio. Each bot lives in a Highrise room and interacts with real users.</p>
       <button onClick={onCreate} className="mt-6 px-6 py-3 bg-[#49dcb5] text-black font-semibold rounded-lg hover:bg-[#49dcb5]/90 transition-colors">
         Create First Bot
       </button>

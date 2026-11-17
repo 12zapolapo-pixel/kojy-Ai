@@ -30,7 +30,7 @@ const PANELS: { id: Panel; label: string }[] = [
 
 export default function StudioPage() {
   const { kind, id } = useParams();
-  const bots = trpc.studio.bots.useQuery(undefined, { refetchInterval: 5000 });
+  const bots = trpc.studio.bots.useQuery(undefined, { refetchInterval: 10_000 });
 
   return (
     <div className="h-full flex min-h-0">
@@ -70,6 +70,7 @@ function BotList({ bots, loading, selected }: { bots: BotItem[]; loading: boolea
               <span className={clsx("w-2 h-2 rounded-full shrink-0", b.live ? "bg-[#49dcb5]" : b.status === "crashed" || b.status === "error" ? "bg-red-400" : "bg-white/20")} />
               <span className="truncate flex-1">{b.name}</span>
               {b.working && <span title="Kojy is working" className="text-[10px] animate-pulse">✦</span>}
+              {b.waiting && !b.working && <span title="Kojy is waiting for you: a plan to approve or secrets to add" className="text-[9px] px-1.5 rounded-full bg-amber-400/15 text-amber-300">needs you</span>}
               <span className="text-[9px] text-white/30">{b.kind === "python" ? "PY" : "JS"}</span>
             </button>
           );
@@ -106,7 +107,7 @@ function Split({ chat, panel, panelTabs, active }: {
 
 function PythonBot({ id }: { id: string }) {
   const navigate = useNavigate();
-  const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 4000 });
+  const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 8000 });
   const [panel, setPanel] = useState<Panel>("console");
   const [kojyPanel, setKojyPanel] = useState<string | undefined>();
 
@@ -218,7 +219,7 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
   const [tab, setTab] = useState<"overview" | "memory">("overview");
   const status = trpc.system.status.useQuery(undefined, { refetchInterval: 30_000, retry: false });
   const live = bots.filter((b) => b.live).length;
-  const broken = bots.filter((b) => b.status === "crashed" || b.status === "error");
+  const broken = bots.filter((b) => b.status === "crashed" || b.status === "error" || b.waiting);
 
   return (
     <Split
@@ -247,6 +248,7 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm text-white truncate">{b.name}</span><StatusBadge status={b.status} />
                 </div>
+                {b.waiting && <p className="text-[11px] text-amber-300/90 mt-1">Kojy is waiting for you in this bot's chat</p>}
                 <p className="text-[11px] text-white/35 mt-1">{b.kind === "python" ? "Python bot" : "JavaScript bot"}</p>
               </button>
             ))}

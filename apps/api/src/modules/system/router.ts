@@ -30,6 +30,19 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ ok: boolean; ms: number
   }
 }
 
+/** Which AI providers Kojy has a key for (names only, never keys). */
+export function aiProviders(env: NodeJS.ProcessEnv = process.env): string[] {
+  const has = (k: string | undefined) => !!k && k.trim() !== "" && !k.includes("placeholder");
+  const out: string[] = [];
+  if (has(env.MISTRAL_API_KEY)) out.push("Mistral");
+  if (has(env.AGENT_API_KEY) || (env.AGENT_API_KEYS ?? "").split(",").some(has)) out.push("Gemini");
+  for (const [name, label] of [["LITELLM", "LiteLLM"], ["CEREBRAS", "Cerebras"], ["SAMBANOVA", "SambaNova"], ["GITHUB_MODELS", "GitHub Models"], ["OPENROUTER", "OpenRouter"]] as const) {
+    if (has(env[`${name}_API_KEY`]) && (env[`${name}_MODELS`] ?? "").trim()) out.push(label);
+  }
+  if (has(env.GROQ_API_KEY)) out.push("Groq");
+  return out;
+}
+
 export interface Heartbeat { ts: number; [k: string]: unknown }
 
 export const systemRouter = router({
@@ -65,7 +78,7 @@ export const systemRouter = router({
       backup,
       queues,
       bots: { js: tally(jsBots), python: tally(pyBots) },
-      ai: { groq: !!process.env.GROQ_API_KEY && !process.env.GROQ_API_KEY.includes("placeholder"), alertsWebhook: !!process.env.ALERT_WEBHOOK_URL },
+      ai: { providers: aiProviders(), alertsWebhook: !!process.env.ALERT_WEBHOOK_URL },
     };
   }),
 

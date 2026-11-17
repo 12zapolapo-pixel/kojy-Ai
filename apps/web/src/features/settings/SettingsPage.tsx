@@ -9,7 +9,7 @@ import { trpc, trpcClient }      from "../../lib/trpc";
 import { useAuthStore } from "../../state/authStore";
 import clsx          from "clsx";
 
-type Tab = "profile" | "org" | "billing" | "security" | "notifications" | "theme";
+type Tab = "profile" | "org" | "billing" | "security" | "notifications";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "profile",       label: "Profile",        icon: "👤" },
@@ -17,24 +17,23 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "billing",       label: "Billing",        icon: "💳" },
   { id: "security",      label: "Security",       icon: "⛨" },
   { id: "notifications", label: "Notifications",  icon: "🔔" },
-  { id: "theme",         label: "Theme",          icon: "🎨" },
 ];
 
 export default function SettingsPage() {
-  const [tab, setTab] = useState<Tab>("profile");
+  const [tab, setTab] = useState<Tab>(() => (TABS.find((t) => `#${t.id}` === window.location.hash)?.id ?? "profile"));
   const user          = useAuthStore((s) => s.user);
   // Billing is optional (Stripe off by default): hide the tab unless it's on.
   const features      = trpc.system.features.useQuery(undefined, { staleTime: 5 * 60_000 });
   const tabs          = TABS.filter((t) => t.id !== "billing" || features.data?.billing);
 
   return (
-    <div className="h-full flex overflow-hidden">
+    <div className="h-full flex overflow-hidden max-md:flex-col">
       {/* Sidebar */}
-      <div className="w-52 flex-shrink-0 border-r border-white/5 bg-[#07111f] py-4 px-2">
-        <p className="text-[9px] font-mono tracking-widest text-white/20 px-3 mb-2">SETTINGS</p>
+      <div className="w-52 flex-shrink-0 border-r border-white/5 bg-[#07111f] py-4 px-2 max-md:w-full max-md:flex max-md:overflow-x-auto max-md:py-2">
+        <p className="text-[9px] font-mono tracking-widest text-white/20 px-3 mb-2 max-md:hidden">SETTINGS</p>
         {tabs.map((t) => (
-          <button key={t.id} onClick={() => setTab(t.id)}
-            className={clsx("w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors",
+          <button key={t.id} onClick={() => { setTab(t.id); history.replaceState(null, "", `#${t.id}`); }}
+            className={clsx("w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors max-md:w-auto whitespace-nowrap",
               tab === t.id ? "bg-[#49dcb5]/10 text-[#49dcb5] border border-[#49dcb5]/20" : "text-white/40 hover:text-white/60 hover:bg-white/[0.03]")}>
             <span>{t.icon}</span><span>{t.label}</span>
           </button>
@@ -42,13 +41,12 @@ export default function SettingsPage() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin p-8">
+      <div className="flex-1 overflow-y-auto scrollbar-thin p-8 max-md:p-4">
         {tab === "profile"       && <ProfileSettings user={user} />}
         {tab === "org"           && <OrgSettings />}
         {tab === "billing"       && features.data?.billing && <BillingSettings user={user} />}
         {tab === "security"      && <SecuritySettings />}
         {tab === "notifications" && <NotificationSettings />}
-        {tab === "theme"         && <ThemeSettings />}
       </div>
     </div>
   );
@@ -57,7 +55,26 @@ export default function SettingsPage() {
 function ProfileSettings({ user }: { user: any }) {
   const [displayName, setDisplayName] = useState(user?.displayName ?? "");
   const [locale,      setLocale]      = useState(user?.locale ?? "en");
-  const [timezone,    setTimezone]    = useState(user?.timezone ?? "UTC");
+  const [timezone,    setTimezone]    = useState(user?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC");
+  const save = useMutation({
+    mutationFn: () => trpcClient.auth.updateProfile.mutate({ displayName, locale, timezone }),
+    onSuccess: () => { if (user) useAuthStore.getState().setUser({ ...user, displayName: displayName || null, locale, timezone }); },
+  });
+  const [confirm, setConfirm] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const erase = useMutation({
+    mutationFn: () => trpcClient.gdpr.eraseMyData.mutate({ confirm: "DELETE MY ACCOUNT" }),
+    onSuccess: () => void useAuthStore.getState().logout(),
+  });
+  const exportData = async () => {
+    setExporting(true);
+    try {
+      const data = await trpcClient.gdpr.exportMyData.query();
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+      Object.assign(document.createElement("a"), { href: url, download: `kojyai-my-data-${new Date().toISOString().slice(0, 10)}.json` }).click();
+      URL.revokeObjectURL(url);
+    } finally { setExporting(false); }
+  };
   return (
     <div className="max-w-lg space-y-6">
       <SectionHeader title="Profile" sub="Your personal account settings" />
@@ -65,28 +82,47 @@ function ProfileSettings({ user }: { user: any }) {
         <Row label="Email"    value={user?.email ?? "—"} readonly />
         <Row label="Username" value={user?.username ?? "—"} readonly />
         <EditField label="Display Name" value={displayName} onChange={setDisplayName} />
-        <EditField label="Locale" value={locale} onChange={setLocale} />
-        <EditField label="Timezone" value={timezone} onChange={setTimezone} />
-        <SaveButton label="Save Profile" />
+        <EditField label="Language (e.g. en, pt-BR)" value={locale} onChange={setLocale} />
+        <EditField label="Time zone (e.g. Europe/London)" value={timezone} onChange={setTimezone} />
+        {save.isError && <p className="text-xs text-red-400">{(save.error).message}</p>}
+        {save.isSuccess && <p className="text-xs text-[#34d399]">✓ Saved</p>}
+        <SaveButton label={save.isPending ? "Saving…" : "Save Profile"} onClick={() => save.mutate()} disabled={save.isPending} />
       </Card>
       <Card>
-        <SectionHeader title="Danger Zone" sub="Irreversible account actions" small />
-        <button className="px-4 py-2 border border-red-500/20 text-red-400 text-xs rounded-lg hover:bg-red-500/10 transition-colors">Request Account Deletion (GDPR)</button>
+        <SectionHeader title="Your data" sub="Download everything KojyAI stores about you" small />
+        <button onClick={() => void exportData()} disabled={exporting} className="px-4 py-2 border border-white/10 text-white/60 text-xs rounded-lg hover:bg-white/5 disabled:opacity-40">{exporting ? "Preparing…" : "Download my data (.json)"}</button>
+      </Card>
+      <Card>
+        <SectionHeader title="Danger Zone" sub="Deletes your account and personal data. This can't be undone." small />
+        <EditField label='Type DELETE MY ACCOUNT to confirm' value={confirm} onChange={setConfirm} />
+        {erase.isError && <p className="text-xs text-red-400">{(erase.error).message}</p>}
+        <button onClick={() => erase.mutate()} disabled={confirm !== "DELETE MY ACCOUNT" || erase.isPending}
+          className="px-4 py-2 border border-red-500/20 text-red-400 text-xs rounded-lg hover:bg-red-500/10 transition-colors disabled:opacity-40">{erase.isPending ? "Deleting…" : "Delete my account"}</button>
       </Card>
     </div>
   );
 }
 
 function OrgSettings() {
+  const org = trpc.auth.organization.useQuery();
+  const [name, setName] = useState<string | null>(null);
+  const rename = trpc.auth.renameOrganization.useMutation({ onSuccess: () => void org.refetch() });
+  if (org.isLoading) return <p className="text-sm text-white/40">Loading…</p>;
+  if (!org.data) return <p className="text-sm text-red-400">{org.error?.message}</p>;
+  const o = org.data;
   return (
     <div className="max-w-lg space-y-6">
       <SectionHeader title="Organization" sub="Your workspace settings" />
       <Card>
-        <EditField label="Organization Name" value="" onChange={() => {}} />
-        <EditField label="Slug" value="" onChange={() => {}} readonly />
-        <Row label="Plan" value="Free" readonly />
-        <Row label="Bot Quota" value="1 / 1 used" readonly />
-        <SaveButton label="Save Organization" />
+        <EditField label="Organization Name" value={name ?? o.name} onChange={setName} readonly={!o.isOwner} />
+        <Row label="Slug" value={o.slug} readonly />
+        <Row label="Python bots" value={`${o.pythonBots} / ${o.maxPythonBots}`} readonly />
+        <Row label="JavaScript bots" value={String(o.jsBots)} readonly />
+        {rename.isError && <p className="text-xs text-red-400">{rename.error.message}</p>}
+        {rename.isSuccess && <p className="text-xs text-[#34d399]">✓ Saved</p>}
+        {o.isOwner
+          ? <SaveButton label={rename.isPending ? "Saving…" : "Save Organization"} disabled={rename.isPending || !(name ?? o.name).trim()} onClick={() => rename.mutate({ name: (name ?? o.name).trim() })} />
+          : <p className="text-xs text-white/35">Only the organization's owner can rename it.</p>}
       </Card>
     </div>
   );
@@ -168,11 +204,10 @@ function SecuritySettings() {
   const [newPw,     setNewPw]     = useState("");
   const mutation = useMutation({ mutationFn: () => trpcClient.auth.changePassword.mutate({ currentPassword: currentPw, newPassword: newPw }), onSuccess: () => {
     setCurrentPw(""); setNewPw("");
-    // L-10: the server just invalidated EVERY session, including this one — the
-    // token we hold is dead. Sign out locally and go to /login instead of
-    // leaving the user on a page whose next request fails with UNAUTHORIZED.
+    // L-10: the server just invalidated EVERY session, including this one.
     void useAuthStore.getState().logout();
   } });
+  const everywhere = useMutation({ mutationFn: () => trpcClient.auth.signOutEverywhere.mutate(), onSuccess: () => void useAuthStore.getState().logout() });
   return (
     <div className="max-w-lg space-y-6">
       <SectionHeader title="Security" sub="Password and access settings" />
@@ -189,54 +224,38 @@ function SecuritySettings() {
       </Card>
       <Card>
         <p className="text-xs font-mono tracking-widest text-white/25 mb-3">ACTIVE SESSIONS</p>
-        <p className="text-xs text-white/35">Session management — sign out from all devices</p>
-        <button className="mt-2 px-4 py-2 border border-red-500/20 text-red-400 text-xs rounded-lg hover:bg-red-500/10 transition-colors">Sign Out All Sessions</button>
+        <p className="text-xs text-white/35">Signs you out on every device and browser, this one included.</p>
+        {everywhere.isError && <p className="text-xs text-red-400">{(everywhere.error).message}</p>}
+        <button onClick={() => { if (window.confirm("Sign out on every device, including this one?")) everywhere.mutate(); }} disabled={everywhere.isPending}
+          className="mt-2 px-4 py-2 border border-red-500/20 text-red-400 text-xs rounded-lg hover:bg-red-500/10 transition-colors disabled:opacity-40">Sign Out All Sessions</button>
       </Card>
     </div>
   );
 }
 
+/** What you're told about, and where — there are no per-type switches yet, so none are shown. */
 function NotificationSettings() {
-  const prefs = [
-    { key: "bot_offline",         label: "Bot goes offline",           enabled: true  },
-    { key: "bot_error",           label: "Bot error",                  enabled: true  },
-    { key: "simulation_complete", label: "Simulation completes",       enabled: true  },
-    { key: "billing_due",         label: "Billing due",                enabled: true  },
-    { key: "new_member",          label: "New team member joins",      enabled: false },
-    { key: "security_alert",      label: "Security alerts",            enabled: true  },
+  const status = trpc.system.status.useQuery(undefined, { retry: false });
+  const alerts = [
+    "A bot keeps crashing, or Highrise refused its token or room",
+    "Kojy fixed a crash by itself, or needs your OK to fix one",
+    "The daily check-up found errors",
+    "A bot isn't a moderator in its room",
+    "A database backup failed",
   ];
-  const [prefs_, setPrefs_] = useState(prefs);
-  const toggle = (key: string) => setPrefs_((p) => p.map((pr) => pr.key === key ? { ...pr, enabled: !pr.enabled } : pr));
   return (
     <div className="max-w-lg space-y-6">
-      <SectionHeader title="Notifications" sub="Control which events notify you" />
+      <SectionHeader title="Notifications" sub="What KojyAI tells you about" />
       <Card>
-        {prefs_.map((p) => (
-          <label key={p.key} className="flex items-center justify-between py-2.5 border-b border-white/5 last:border-0 cursor-pointer">
-            <span className="text-sm text-white/60">{p.label}</span>
-            <div onClick={() => toggle(p.key)} className={clsx("w-9 h-5 rounded-full transition-colors relative", p.enabled ? "bg-[#49dcb5]" : "bg-white/10")}>
-              <span className={clsx("absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all", p.enabled ? "right-0.5" : "left-0.5")} />
-            </div>
-          </label>
-        ))}
-        <SaveButton label="Save Preferences" />
+        <p className="text-xs text-white/50">These appear in the bell menu (it checks every minute):</p>
+        <ul className="list-disc pl-5 space-y-1 text-sm text-white/65">{alerts.map((a) => <li key={a}>{a}</li>)}</ul>
       </Card>
-    </div>
-  );
-}
-
-function ThemeSettings() {
-  return (
-    <div className="max-w-lg space-y-6">
-      <SectionHeader title="Theme" sub="Customize your platform appearance" />
       <Card>
-        <p className="text-xs font-mono tracking-widest text-white/25 mb-3">ACCENT COLOR</p>
-        <div className="flex gap-3">
-          {["#49dcb5","#8b5cf6","#34d399","#f59e0b","#ef4444","#ec4899"].map((c) => (
-            <button key={c} className="w-8 h-8 rounded-full border-2 border-transparent hover:border-white/30 transition-all" style={{ background: c }} />
-          ))}
-        </div>
-        <p className="text-[10px] text-white/25 mt-3">Theme customization coming in the next release.</p>
+        <p className="text-xs font-mono tracking-widest text-white/25">ON YOUR PHONE</p>
+        <p className="text-xs text-white/50">
+          {status.data ? (status.data.ai.alertsWebhook ? "✓ The same alerts also go to your Discord webhook." : "Set ALERT_WEBHOOK_URL in the server's .env to a Discord webhook to get these as Discord messages too.")
+            : "Set ALERT_WEBHOOK_URL in the server's .env to a Discord webhook to get these as Discord messages too."}
+        </p>
       </Card>
     </div>
   );
@@ -261,6 +280,6 @@ function EditField({ label, value, onChange, type = "text", readonly }: { label:
     </div>
   );
 }
-function SaveButton({ label }: { label: string }) {
-  return <button className="px-4 py-2 bg-[#49dcb5]/10 border border-[#49dcb5]/30 text-[#49dcb5] text-xs font-medium rounded-lg hover:bg-[#49dcb5]/20 transition-colors mt-1">{label}</button>;
+function SaveButton({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
+  return <button onClick={onClick} disabled={disabled} className="px-4 py-2 bg-[#49dcb5]/10 border border-[#49dcb5]/30 text-[#49dcb5] text-xs font-medium rounded-lg hover:bg-[#49dcb5]/20 transition-colors mt-1 disabled:opacity-40">{label}</button>;
 }

@@ -48,11 +48,25 @@ def install_activity_reporter(bot) -> None:
         return  # not started by the KojyAI runner
     out = os.fdopen(3, "w", buffering=1)
 
-    def emit(kind, user=None):
+    def emit(kind, user=None, amount=None):
         try:
-            out.write(json.dumps({"k": kind, "id": getattr(user, "id", None), "n": getattr(user, "username", None)}) + "\n")
+            row = {"k": kind, "id": getattr(user, "id", None), "n": getattr(user, "username", None)}
+            if amount is not None:
+                row["a"] = amount
+            out.write(json.dumps(row) + "\n")
         except Exception:
             pass
+
+    def gold_to_bot(args):
+        """on_tip(sender, receiver, tip): the gold amount when the bot itself was tipped."""
+        try:
+            receiver, tip = args[1], args[2]
+            mine = getattr(getattr(bot, "highrise", None), "my_id", None)
+            if getattr(tip, "type", None) == "gold" and mine and getattr(receiver, "id", None) == mine:
+                return int(tip.amount)
+        except Exception:
+            pass
+        return None
 
     from highrise import BaseBot, Highrise
 
@@ -62,7 +76,7 @@ def install_activity_reporter(bot) -> None:
 
         def make(original, kind=kind):
             async def wrapper(*args, **kwargs):
-                emit(kind, args[0] if args else None)
+                emit(kind, args[0] if args else None, gold_to_bot(args) if kind == "tip" else None)
                 return await original(*args, **kwargs)
             return wrapper
 
@@ -138,6 +152,12 @@ def announce_connections(bot, check_rights: bool = True) -> None:
 
 FROZEN_EXIT = 3
 NOT_IN_ROOM_EXIT = 4
+# The SDK's main() only returns (instead of reconnecting for ever) when
+# Highrise refused the connection for good — a wrong token or room, which it
+# prints as "ERROR: Error(message=…)" — or on a websocket error. The runner
+# reads this code with the last ERROR line and doesn't restart a refused bot
+# in a loop.
+SDK_ENDED_EXIT = 5
 
 
 def env_seconds(name: str, default: float) -> float:
@@ -305,6 +325,8 @@ def main() -> None:
         await sdk_main([BotDefinition(bot, room_id, token)])
 
     asyncio.run(run())
+    print("[kojy] The Highrise connection ended and the SDK stopped reconnecting.", flush=True)
+    raise SystemExit(SDK_ENDED_EXIT)
 
 
 if __name__ == "__main__":

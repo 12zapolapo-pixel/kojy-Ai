@@ -56,11 +56,18 @@ export function ChatTab({ project, jsBot, onPanel }: {
   const navigate = useNavigate();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [state, setState] = useState<{ agentState: string; progress: string | null }>({ agentState: project?.agentState ?? "idle", progress: null });
+  const [runnerOnline, setRunnerOnline] = useState(true);
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [hasEarlier, setHasEarlier] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   const lastId = useRef(0);
   const box = useRef<HTMLDivElement>(null);
+  /** Follow new messages only while the owner is at the bottom (not while reading back). */
+  const stick = useRef(true);
+  /** Checks for new messages right away (after sending one). */
+  const pollNow = useRef<() => void>(() => undefined);
   const fileInput = useRef<HTMLInputElement>(null);
   const onPanelRef = useRef(onPanel);
   onPanelRef.current = onPanel;
@@ -72,34 +79,65 @@ export function ChatTab({ project, jsBot, onPanel }: {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     lastId.current = 0;
+    stick.current = true;
     setMessages([]);
+    setHasEarlier(false);
     const poll = async () => {
+      clearTimeout(timer);
       try {
         const afterId = lastId.current || undefined;
-        const res: { agentState: string; progress: string | null; lastId: number; messages: Msg[] } = pid
+        const res: { agentState: string; progress: string | null; runnerOnline: boolean; lastId: number; hasEarlier?: boolean | undefined; messages: Msg[] } = pid
           ? await trpcClient.projects.chatList.query({ id: pid, afterId })
           : jid ? await trpcClient.studio.jsChatList.query({ id: jid, afterId })
           : await trpcClient.studio.chatList.query({ afterId });
         if (stopped) return;
         const fresh = res.messages.filter((m) => m.id > lastId.current);
-        if (fresh.length) setMessages((prev) => [...prev, ...fresh]);
+        if (fresh.length) setMessages((prev) => [...prev.filter((m) => m.id > 0), ...fresh]); // drops the "sending…" stand-in
+        if (!afterId) setHasEarlier(!!res.hasEarlier);
         // A new "show the console" card from Kojy switches the panel (old ones don't).
         if (afterId) for (const m of fresh) if (m.kind === "ui" && m.card?.panel) onPanelRef.current?.(m.card.panel);
         lastId.current = Math.max(lastId.current, res.lastId);
+        setRunnerOnline(res.runnerOnline);
         setState((prev) => {
           if (prev.agentState === "working" && res.agentState !== "working") { void utils.projects.invalidate(); void utils.studio.invalidate(); }
           return { agentState: res.agentState, progress: res.progress };
         });
-        timer = setTimeout(() => void poll(), res.agentState === "working" ? 1200 : 4000);
+        // A tab in the background checks rarely; it catches up when it's back in view.
+        timer = setTimeout(() => void poll(), document.hidden ? 20_000 : res.agentState === "working" ? 1200 : 4000);
       } catch {
         if (!stopped) timer = setTimeout(() => void poll(), 5000);
       }
     };
+    pollNow.current = () => { if (!stopped) void poll(); };
+    const onVisible = () => { if (!document.hidden) pollNow.current(); };
+    document.addEventListener("visibilitychange", onVisible);
     void poll();
-    return () => { stopped = true; clearTimeout(timer); };
+    return () => { stopped = true; clearTimeout(timer); document.removeEventListener("visibilitychange", onVisible); };
   }, [pid, jid, utils]);
 
-  useEffect(() => { box.current?.scrollTo({ top: box.current.scrollHeight }); }, [messages.length, state.progress]);
+  useEffect(() => {
+    if (stick.current) box.current?.scrollTo({ top: box.current.scrollHeight });
+  }, [messages.length, state.progress]);
+
+  /** The page of messages before the oldest one shown. */
+  const loadEarlier = async () => {
+    const first = messages.find((m) => m.id > 0);
+    if (!first || loadingEarlier) return;
+    setLoadingEarlier(true);
+    try {
+      const res: { hasEarlier?: boolean | undefined; messages: Msg[] } = pid
+        ? await trpcClient.projects.chatList.query({ id: pid, beforeId: first.id })
+        : jid ? await trpcClient.studio.jsChatList.query({ id: jid, beforeId: first.id })
+        : await trpcClient.studio.chatList.query({ beforeId: first.id });
+      const el = box.current;
+      const fromBottom = el ? el.scrollHeight - el.scrollTop : 0;
+      setMessages((prev) => [...res.messages.filter((m) => m.id < first.id), ...prev]);
+      setHasEarlier(!!res.hasEarlier);
+      // Keep what the owner was looking at in place.
+      requestAnimationFrame(() => { if (el) el.scrollTop = el.scrollHeight - fromBottom; });
+    } catch (e) { setError((e as Error).message); }
+    finally { setLoadingEarlier(false); }
+  };
 
   const send = async (msg: string) => {
     if (!msg.trim()) return;
@@ -109,7 +147,11 @@ export function ChatTab({ project, jsBot, onPanel }: {
       else if (jid) await trpcClient.studio.jsChatSend.mutate({ id: jid, text: msg.trim() });
       else await trpcClient.studio.chatSend.mutate({ text: msg.trim() });
       setText("");
+      // Show it right away; the real row replaces this stand-in on the next poll.
+      stick.current = true;
+      setMessages((prev) => [...prev, { id: -Date.now(), role: "user", kind: "text", content: msg.trim(), createdAt: new Date(), summary: null, ok: null, tool: null, card: null }]);
       setState((s) => ({ ...s, agentState: "working", progress: "Thinking…" }));
+      pollNow.current();
     } catch (e) { setError((e as Error).message); }
   };
 
@@ -141,7 +183,15 @@ export function ChatTab({ project, jsBot, onPanel }: {
         onIdeas={() => void send("Give me 5 ideas for new features that would make this bot more fun for my room. Keep each to one line, then ask which one to build.")} /> : <StudioToolbar working={working} onCleared={cleared} jsBot={jsBot} />}
 
       {project && <BuildProgress messages={messages} working={working} />}
-      <div ref={box} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3">
+      <div ref={box} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3"
+        onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60; }}>
+        {hasEarlier && (
+          <div className="text-center">
+            <button onClick={() => void loadEarlier()} disabled={loadingEarlier} className="text-xs text-white/45 hover:text-white/75 border border-white/10 rounded-full px-3 py-1 disabled:opacity-50">
+              {loadingEarlier ? "Loading…" : "Show earlier messages"}
+            </button>
+          </div>
+        )}
         {messages.length === 0 && !working && (
           <div className="max-w-xl mx-auto text-center space-y-4 pt-8">
             {project ? (
@@ -161,7 +211,8 @@ export function ChatTab({ project, jsBot, onPanel }: {
             </div>
           </div>
         )}
-        {messages.map((m) => <Fragment key={m.id}><MessageView m={m} projectId={pid} onPanel={onPanel} onOpenBot={openBot} onResolved={(id, saved) =>
+        {messages.map((m, i) => <Fragment key={m.id}><MessageView m={m} projectId={pid} onPanel={onPanel} onOpenBot={openBot}
+          superseded={m.kind === "plan" && messages.slice(i + 1).some((x) => (x.role === "user" && x.kind === "text") || x.kind === "plan")} onResolved={(id, saved) =>
           setMessages((prev) => prev.map((x) => (x.id === id && x.card ? { ...x, card: { ...x.card, resolved: true, saved } } : x)))} /></Fragment>)}
         {working && (
           <div className="flex items-center gap-2 text-xs text-white/50">
@@ -172,6 +223,9 @@ export function ChatTab({ project, jsBot, onPanel }: {
       </div>
 
       <div className="border-t border-white/5 p-3 space-y-2">
+        {!runnerOnline && (
+          <p className="text-xs text-amber-300/90">Kojy is offline right now (the server is restarting, or the bot runner is down). Messages you send are kept, and Kojy answers them as soon as it's back.</p>
+        )}
         {error && <p className="text-xs text-red-400">{error}</p>}
         <form className="flex gap-2 items-end" onSubmit={(e) => { e.preventDefault(); void send(text); }}>
           {project && (
@@ -281,8 +335,8 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
           onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot and the work history.")) clear.mutate({ id: project.id }); }}>New chat</button>
       </div>
       {showUndo && (
-        <div className="absolute right-4 top-9 z-10 w-80 bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">
-          <p className="text-white/40 px-1 pb-1">Put the code back to how it was before a change (your bot's data is never touched):</p>
+        <div className="absolute right-4 top-9 z-10 w-96 max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">
+          <p className="text-white/40 px-1 pb-1">Put the code back to how it was before a change. Your bot's data is never touched, and the code as it is now is saved first, so you can come back.</p>
           {snapshots.isLoading && <p className="px-1 text-white/40">Loading…</p>}
           {snapshots.data?.length === 0 && <p className="px-1 text-white/40">No saved versions yet.</p>}
           {snapshots.data?.map((s) => (
@@ -290,6 +344,7 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
               onClick={() => { if (window.confirm(`Restore the code from ${new Date(s.createdAt).toLocaleString()}?`)) restore.mutate({ id: project.id, snapshotId: s.id }); }}
               className="w-full text-left px-2 py-1.5 rounded hover:bg-white/5 text-white/70">
               {new Date(s.createdAt).toLocaleString()} <span className="text-white/30">· {s.files} files</span>
+              {s.reason && <span className="block text-[11px] text-white/45 truncate" title={s.reason}>{s.reason}</span>}
             </button>
           ))}
           {restore.isError && <p className="px-1 text-red-400">{restore.error.message}</p>}
@@ -301,16 +356,57 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
 
 // ── messages ─────────────────────────────────────────────────────────────────
 
-/** Renders text with ``` code blocks; everything else as plain text. */
+/** **bold**, *italic* and `code` inside one line (as React elements, never HTML). */
+function Inline({ text }: { text: string }) {
+  const out: React.ReactNode[] = [];
+  const re = /(`[^`\n]+`|\*\*[^*\n]+\*\*|(?<![\w*])\*[^*\s][^*\n]*\*(?![\w*]))/g;
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    const t = m[0];
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (t.startsWith("`")) out.push(<code key={m.index} className="px-1 rounded bg-black/40 font-mono text-[0.85em]">{t.slice(1, -1)}</code>);
+    else if (t.startsWith("**")) out.push(<strong key={m.index} className="font-semibold text-white">{t.slice(2, -2)}</strong>);
+    else out.push(<em key={m.index}>{t.slice(1, -1)}</em>);
+    last = m.index + t.length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return <>{out}</>;
+}
+
+/** A small Markdown subset: ``` code blocks, headings, - and 1. lists, and the inline marks above. */
 function RichText({ text }: { text: string }) {
-  const parts = text.split(/```(?:\w+)?\n?/);
+  const parts = text.split(/```(?:[\w-]+)?\n?/);
   return (
     <>
       {parts.map((p, i) => i % 2
         ? <pre key={i} className="my-2 p-2 bg-black/40 rounded text-xs overflow-x-auto font-mono">{p.replace(/\n$/, "")}</pre>
-        : <span key={i} className="whitespace-pre-wrap">{p}</span>)}
+        : <Blocks key={i} text={p} />)}
     </>
   );
+}
+
+function Blocks({ text }: { text: string }) {
+  const lines = text.split("\n");
+  const out: React.ReactNode[] = [];
+  for (let i = 0; i < lines.length; ) {
+    const line = lines[i]!;
+    const bullet = /^\s*[-*•]\s+/;
+    const numbered = /^\s*\d+[.)]\s+/;
+    if (bullet.test(line) || numbered.test(line)) {
+      const isNum = numbered.test(line);
+      const items: string[] = [];
+      while (i < lines.length && (isNum ? numbered : bullet).test(lines[i]!)) items.push(lines[i++]!.replace(isNum ? numbered : bullet, ""));
+      const Tag = isNum ? "ol" : "ul";
+      out.push(<Tag key={i} className={clsx("my-1 pl-5 space-y-0.5", isNum ? "list-decimal" : "list-disc")}>{items.map((it, j) => <li key={j}><Inline text={it} /></li>)}</Tag>);
+      continue;
+    }
+    const heading = /^#{1,4}\s+(.*)$/.exec(line);
+    if (heading) out.push(<p key={i} className="font-semibold text-white mt-1"><Inline text={heading[1]!} /></p>);
+    else if (line.trim()) out.push(<p key={i} className="whitespace-pre-wrap"><Inline text={line} /></p>);
+    else if (out.length && i < lines.length - 1) out.push(<div key={i} className="h-2" />);
+    i++;
+  }
+  return <>{out}</>;
 }
 
 const PANEL_LABEL: Record<string, string> = {
@@ -319,8 +415,8 @@ const PANEL_LABEL: Record<string, string> = {
 // Studio cards that point at a whole page rather than a bot panel.
 const PANEL_PAGE: Record<string, string> = { analytics: "/analytics", status: "/infrastructure" };
 
-function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
-  m: Msg; projectId: string | null; onResolved: (id: number, saved: string[]) => void;
+function MessageView({ m, projectId, onResolved, onPanel, onOpenBot, superseded }: {
+  m: Msg; projectId: string | null; onResolved: (id: number, saved: string[]) => void; superseded?: boolean;
   onPanel?: ((panel: string) => void) | undefined; onOpenBot: (kind: string, id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -369,7 +465,7 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
     // App events ("secrets saved", "code restored"): shown small, without the AI-facing instructions.
     return <p className="text-center text-[11px] text-white/35">{m.content.replace(/ (Test them|Restart the bot).*$/, "")}</p>;
   }
-  if (m.kind === "plan" && m.card && projectId) return <PlanCardView m={m} projectId={projectId} onResolved={onResolved} />;
+  if (m.kind === "plan" && m.card && projectId) return <PlanCardView m={m} projectId={projectId} onResolved={onResolved} superseded={!!superseded} />;
   if (m.kind === "secret_request" && m.card && projectId) return <SecretCard m={m} projectId={projectId} onResolved={onResolved} />;
   if (m.role === "tool") {
     return (
@@ -386,7 +482,7 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot }: {
   return <div className="max-w-[85%] text-sm text-white/85 leading-relaxed"><RichText text={m.content} /></div>;
 }
 
-function PlanCardView({ m, projectId, onResolved }: { m: Msg; projectId: string; onResolved: (id: number, saved: string[]) => void }) {
+function PlanCardView({ m, projectId, onResolved, superseded }: { m: Msg; projectId: string; onResolved: (id: number, saved: string[]) => void; superseded: boolean }) {
   const card = m.card!;
   const approve = trpc.projects.chatApprovePlan.useMutation({ onSuccess: () => onResolved(m.id, []) });
   return (
@@ -397,6 +493,8 @@ function PlanCardView({ m, projectId, onResolved }: { m: Msg; projectId: string;
       </ol>
       {card.resolved ? (
         <p className="text-xs text-[#49dcb5]">✓ Approved</p>
+      ) : superseded ? (
+        <p className="text-xs text-white/40">Replaced — you asked for changes after this plan.</p>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <button disabled={approve.isPending} onClick={() => approve.mutate({ id: projectId, messageId: m.id })}

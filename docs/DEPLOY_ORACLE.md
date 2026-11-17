@@ -194,9 +194,9 @@ The worker saves a full database backup every day into the `backups`
 volume and keeps the last 14 days (`BACKUP_KEEP_DAYS` in `.env`). Every
 backup is read back to check it isn't damaged, and every Sunday it is fully
 restored into a scratch database and counted (a *restore drill*) — the
-Server status page shows the result. Bot code and data (`projects` volume)
-aren't in the database: download a project's zip from its Settings tab, or
-back up that volume (see below).
+Server status page shows the result. Every bot's files and saved data (the
+`projects` volume) are packed into a `kojyai-projects-<date>.tgz` next to
+each database backup, kept just as long.
 
 ```bash
 # list backups
@@ -205,11 +205,11 @@ docker compose exec worker ls -lh /app/backups
 docker compose cp worker:/app/backups/$(docker compose exec -T worker ls -t /app/backups | head -1) ~/
 ```
 
-Copy them off the server now and then (e.g. `scp` to your computer). To also
-save every Python bot's files and data:
+Copy them off the server now and then (e.g. `scp` to your computer). To put
+bot files back from a `kojyai-projects-<date>.tgz` (stop the bots first):
 
 ```bash
-docker run --rm -v kojyai_projects:/p -v ~/:/out alpine tar czf /out/kojy-projects-$(date +%F).tgz -C /p .
+docker run --rm -v kojyai_projects:/p -v ~/:/in alpine tar xzf /in/kojyai-projects-<date>.tgz -C /p
 ```
 
 To restore a backup into a running stack:

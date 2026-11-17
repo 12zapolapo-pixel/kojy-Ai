@@ -27,11 +27,11 @@ export function NotificationDrawer() {
   const { data } = useQuery({
     queryKey: notificationsQueryKey,
     queryFn:  () => trpcClient.notifications.list.query({ limit: 50 }),
-    staleTime: 30_000,
+    staleTime: 10_000,
   });
 
   useEffect(() => {
-    if (data?.notifications) setNotifications(data.notifications);
+    if (data?.notifications) setNotifications(data.notifications, data.unreadCount);
   }, [data, setNotifications]);
 
   const readMutation = useMutation({
@@ -143,6 +143,27 @@ export function NotificationDrawer() {
       </div>
     </>
   );
+}
+
+/**
+ * Keeps the bell's badge current on every page: alerts are written by the
+ * runner and worker (a bot keeps crashing, Kojy fixed one, a backup failed),
+ * and nothing pushes most of them to the browser — so check every minute,
+ * and right away when the tab comes back into view.
+ */
+export function NotificationPoller() {
+  const setNotifications = useNotificationStore((s) => s.setNotifications);
+  const { data } = useQuery({
+    queryKey: getQueryKey(trpc.notifications.list, { limit: 50 }, "query"),
+    queryFn:  () => trpcClient.notifications.list.query({ limit: 50 }),
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
+  useEffect(() => {
+    if (data?.notifications) setNotifications(data.notifications, data.unreadCount);
+  }, [data, setNotifications]);
+  return null;
 }
 
 function getNotifIcon(type: NotificationType): string {

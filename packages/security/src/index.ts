@@ -156,7 +156,9 @@ export const RATE_LIMITS = {
   AUTH_LOGIN:     { windowMs: 60_000,      maxHits: 10,    keyPrefix: "rl:auth:login" },
   AUTH_REGISTER:  { windowMs: 3_600_000,   maxHits: 5,     keyPrefix: "rl:auth:register" },
   API_ANONYMOUS:  { windowMs: 60_000,      maxHits: 30,    keyPrefix: "rl:api:anon" },
-  API_AUTHED:     { windowMs: 60_000,      maxHits: 300,   keyPrefix: "rl:api:authed" },
+  // A Studio view polls chat, console, status and the bot list (~70/min while
+  // Kojy works); 600 leaves room for several open tabs.
+  API_AUTHED:     { windowMs: 60_000,      maxHits: 600,   keyPrefix: "rl:api:authed" },
   API_SIMULATION: { windowMs: 3_600_000,   maxHits: 20,    keyPrefix: "rl:api:sim" },
   BOT_MESSAGE:    { windowMs: 1_000,       maxHits: 5,     keyPrefix: "rl:bot:msg" },
   WS_CONNECT:     { windowMs: 60_000,      maxHits: 10,    keyPrefix: "rl:ws:connect" },

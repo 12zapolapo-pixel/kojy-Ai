@@ -67,6 +67,15 @@ const GROQ_KEY = usable(process.env.GROQ_API_KEY) ? process.env.GROQ_API_KEY.tri
 const GROQ_SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "openai/gpt-oss-120b";
 const GROQ_FAST = process.env.AGENT_FALLBACK_MODEL ?? process.env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
 const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);
+/**
+ * Output room on models with no per-minute token budget (Gemini, a gateway
+ * without <NAME>_TOKENS_PER_MINUTE): enough for a whole file in one
+ * write_file. Budgeted models keep AGENT_MAX_OUTPUT_TOKENS, which a request
+ * has to reserve out of their minute.
+ */
+const LONG_OUTPUT_TOKENS = Number(process.env.AGENT_LONG_OUTPUT_TOKENS ?? 8192);
+/** History sent when the AI that will answer takes long chats (no per-request limit). */
+const LONG_HISTORY_TOKENS = Number(process.env.AGENT_LONG_HISTORY_TOKENS ?? 24_000);
 
 /**
  * More models through OpenAI-compatible endpoints, each switched on by its
@@ -166,7 +175,15 @@ function budgetFreeAt(lane: Lane, size: number): number {
 /** When the lane can take a request of `size`: after its cooldown and once its minute budget allows. */
 const readyAt = (lane: Lane, size: number) => Math.max(coolUntil.get(lane.id) ?? 0, budgetFreeAt(lane, size));
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Waits `ms`, or less if `signal` aborts (the owner pressed Stop). */
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  if (signal?.aborted) return resolve();
+  const done = () => { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); };
+  const timer = setTimeout(done, ms);
+  signal?.addEventListener("abort", done, { once: true });
+});
+/** How long one AI request may take before the next AI is tried. */
+const REQUEST_TIMEOUT_MS = Number(process.env.AGENT_REQUEST_TIMEOUT_MS ?? 120_000);
 let lastMistralAt = 0;
 
 /**
@@ -249,6 +266,18 @@ const cool = (lane: Lane, ms: number, why: string, kind: CoolKind = "error") => 
 const isCooling = (lane: Lane) => (coolUntil.get(lane.id) ?? 0) > Date.now();
 const DAILY = /per day|TPD|RPD|quota|RESOURCE_EXHAUSTED|daily/i;
 
+/**
+ * How much history to send with the next step: more when the first AI that
+ * can answer right now takes long chats (Gemini), `base` otherwise (sized for
+ * Mistral's and Groq's free plans). A request that turns out too big is
+ * retried smaller, so guessing high costs one retry at most.
+ */
+export function historyBudget(base: number): number {
+  const now = Date.now();
+  const next = LANES.find((l) => (coolUntil.get(l.id) ?? 0) <= now);
+  return next && !Number.isFinite(next.maxRequestTokens) ? Math.max(base, LONG_HISTORY_TOKENS) : base;
+}
+
 export interface ChatOptions {
   messages: ChatMessage[];
   tools: ToolSpec[];
@@ -276,7 +305,8 @@ export function contentText(content: unknown): string | null {
 
 const TOO_LARGE = /context_length|context length|maximum context|too large|too long|exceeds the maximum number of tokens/i;
 
-export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
+/** `truncated`: the answer hit the output limit, so a tool call's arguments may be cut off. */
+export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string; truncated?: boolean }> {
   if (LANES.length === 0) {
     throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter key and model list in the server's .env.");
   }
@@ -314,7 +344,7 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
         attempt--; // a wait isn't a try
         const wait = Math.max(1, Math.ceil(soonest / 1000));
         opts.onWait?.(wait, "AI rate limit");
-        await sleep(wait * 1000);
+        await sleep(wait * 1000, opts.signal);
         continue;
       }
       if (smallerNow) {
@@ -331,7 +361,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
 
     if (lane.provider === "mistral") {
       const wait = lastMistralAt + MISTRAL_MIN_INTERVAL_MS - Date.now();
-      if (wait > 0) await sleep(wait);
+      if (wait > 0) await sleep(wait, opts.signal);
+      if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
       lastMistralAt = Date.now();
     }
 
@@ -341,18 +372,21 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       tools: opts.tools,
       tool_choice: "auto",
       temperature: 0.2,
-      max_tokens: maxTokens + 800, // headroom for reasoning tokens
+      // Headroom for reasoning tokens; much more where no minute budget is spent by it.
+      max_tokens: Number.isFinite(lane.tokensPerMinute) ? maxTokens + 800 : Math.max(maxTokens + 800, LONG_OUTPUT_TOKENS),
     };
     if (lane.provider === "groq") body.reasoning_effort = "medium";
 
+    // Both: the owner's Stop, and a time limit so one hung AI doesn't hold the chat.
+    const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const res = await fetch(`${lane.base}/chat/completions`, {
       method: "POST",
-      signal: opts.signal ?? AbortSignal.timeout(120_000),
+      signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
       headers: { "content-type": "application/json", authorization: `Bearer ${lane.key}` },
       body: JSON.stringify(body),
     }).catch((err: Error) => {
       if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
-      cool(lane, 30_000, `${lane.label} couldn't be reached (${err.message})`, "unavailable");
+      cool(lane, 30_000, timeout.aborted ? `${lane.label} took over ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s to answer` : `${lane.label} couldn't be reached (${err.message})`, "unavailable");
       return null;
     });
     if (!res) continue;
@@ -363,7 +397,15 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     }
 
     if (res.ok) {
-      const data = await res.json() as { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      type Reply = { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] }; finish_reason?: string }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      let data: Reply;
+      try {
+        data = await res.json() as Reply;
+      } catch (err) {
+        if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
+        cool(lane, 30_000, `${lane.label} sent a broken or unfinished answer (${(err as Error).message})`, "unavailable");
+        continue;
+      }
       const message = data.choices?.[0]?.message;
       if (!message) { cool(lane, 30_000, `${lane.label} returned an empty answer`); continue; }
       recordUsage(lane, { req: 1, tokensIn: data.usage?.prompt_tokens ?? 0, tokensOut: data.usage?.completion_tokens ?? 0 });
@@ -376,7 +418,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
         log.warn({ lane: lane.label }, `${lane.label} answered with nothing — trying the next AI`);
         continue;
       }
-      return { message: { role: "assistant", content, ...(toolCalls ? { tool_calls: toolCalls } : {}) }, model: lane.model };
+      const truncated = data.choices?.[0]?.finish_reason === "length";
+      return { message: { role: "assistant", content, ...(toolCalls ? { tool_calls: toolCalls } : {}) }, model: lane.model, truncated };
     }
 
     const text = await res.text().catch(() => "");
