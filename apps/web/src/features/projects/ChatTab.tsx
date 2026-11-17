@@ -257,6 +257,8 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
   const utils = trpc.useUtils();
   const [showUndo, setShowUndo] = useState(false);
   const snapshots = trpc.projects.snapshots.useQuery({ id: project.id }, { enabled: showUndo });
+  const [preview, setPreview] = useState<string | null>(null);
+  const diff = trpc.projects.snapshotDiff.useQuery({ id: project.id, snapshotId: preview ?? "0" }, { enabled: showUndo && !!preview, retry: false });
   const restore = trpc.projects.restoreSnapshot.useMutation({ onSuccess: () => { setShowUndo(false); void utils.projects.invalidate(); } });
   const autoFix = trpc.projects.setAutoFix.useMutation({ onSuccess: () => void utils.projects.get.invalidate({ id: project.id }) });
   const checkup = trpc.projects.setDailyCheckup.useMutation({ onSuccess: () => void utils.projects.get.invalidate({ id: project.id }) });
@@ -284,16 +286,37 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
           onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot and the work history.")) clear.mutate({ id: project.id }); }}>New chat</button>
       </div>
       {showUndo && (
-        <div className="absolute right-4 top-9 z-10 w-80 bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">
-          <p className="text-white/40 px-1 pb-1">Put the code back to how it was before a change (your bot's data is never touched):</p>
+        <div className="absolute right-4 top-9 z-10 w-[26rem] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1">
+          <p className="text-white/40 px-1 pb-1">Put the code back to how it was before a change (your bot's data is never touched). Preview first to see what would change.</p>
           {snapshots.isLoading && <p className="px-1 text-white/40">Loading…</p>}
           {snapshots.data?.length === 0 && <p className="px-1 text-white/40">No saved versions yet.</p>}
           {snapshots.data?.map((s) => (
-            <button key={s.id} disabled={restore.isPending}
-              onClick={() => { if (window.confirm(`Restore the code from ${new Date(s.createdAt).toLocaleString()}?`)) restore.mutate({ id: project.id, snapshotId: s.id }); }}
-              className="w-full text-left px-2 py-1.5 rounded hover:bg-white/5 text-white/70">
-              {new Date(s.createdAt).toLocaleString()} <span className="text-white/30">· {s.files} files</span>
-            </button>
+            <div key={s.id} className="rounded hover:bg-white/[0.03]">
+              <button onClick={() => setPreview(preview === s.id ? null : s.id)} className="w-full text-left px-2 py-1.5 text-white/70">
+                <span className="block truncate">{s.reason || "Saved version"}</span>
+                <span className="text-white/30">{new Date(s.createdAt).toLocaleString()} · {s.files} files · {preview === s.id ? "hide" : "preview"}</span>
+              </button>
+              {preview === s.id && (
+                <div className="px-2 pb-2 space-y-2">
+                  {diff.isLoading && <p className="text-white/40">Comparing…</p>}
+                  {diff.isError && <p className="text-red-400">{diff.error.message}</p>}
+                  {diff.data && diff.data.files.length === 0 && <p className="text-white/40">The code is the same as this version — nothing would change.</p>}
+                  {diff.data?.files.map((f) => (
+                    <details key={f.path} className="text-white/60">
+                      <summary className="cursor-pointer font-mono">
+                        {f.change === "added" ? "＋ brings back " : f.change === "removed" ? "✕ removes " : "✎ "}{f.path}
+                        {f.change === "modified" && <span className="text-white/30"> (restoring: +{f.added} −{f.removed} lines)</span>}
+                      </summary>
+                      {f.diff && <div className="mt-1"><DiffView diff={f.diff} /></div>}
+                    </details>
+                  ))}
+                  {!!diff.data?.more && <p className="text-white/30">…and {diff.data.more} more files</p>}
+                  <button disabled={restore.isPending || (diff.data?.files.length === 0)}
+                    onClick={() => { if (window.confirm(`Restore the code from ${new Date(s.createdAt).toLocaleString()}?`)) restore.mutate({ id: project.id, snapshotId: s.id }); }}
+                    className="px-3 py-1 rounded bg-[#49dcb5] text-black font-semibold disabled:opacity-40">{restore.isPending ? "Restoring…" : "Restore this version"}</button>
+                </div>
+              )}
+            </div>
           ))}
           {restore.isError && <p className="px-1 text-red-400">{restore.error.message}</p>}
         </div>
@@ -313,6 +336,20 @@ function RichText({ text }: { text: string }) {
         ? <pre key={i} className="my-2 p-2 bg-black/40 rounded text-xs overflow-x-auto font-mono">{p.replace(/\n$/, "")}</pre>
         : <span key={i} className="whitespace-pre-wrap">{p}</span>)}
     </>
+  );
+}
+
+/** A line diff ("@@ line N @@", " kept", "-removed", "+added") with colours. */
+export function DiffView({ diff }: { diff: string }) {
+  return (
+    <pre className="max-h-80 overflow-auto bg-black/30 rounded p-2 font-mono text-[11px] leading-snug">
+      {diff.split("\n").map((l, i) => (
+        <div key={i} className={clsx("whitespace-pre-wrap break-all",
+          l.startsWith("@@") ? "text-sky-300/60 pt-1" : l.startsWith("+") ? "text-emerald-300 bg-emerald-500/10" : l.startsWith("-") ? "text-red-300 bg-red-500/10" : "text-white/45")}>
+          {l || " "}
+        </div>
+      ))}
+    </pre>
   );
 }
 
@@ -378,9 +415,11 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot, onDraft }: 
     return (
       <div className="text-xs">
         <button onClick={() => setOpen((v) => !v)} className={`text-left ${m.ok === false ? "text-amber-300/80" : "text-white/45"} hover:text-white/70`}>
-          {m.ok === false ? "✗" : "✓"} {m.summary ?? m.tool} {open ? "▾" : "▸"}
+          {m.ok === false ? "✗" : "✓"} {m.summary ?? m.tool} {m.diff ? <span className="text-white/30">· {open ? "hide" : "see"} the change</span> : null} {open ? "▾" : "▸"}
         </button>
-        {open && <pre className="mt-1 ml-4 max-h-80 overflow-auto whitespace-pre-wrap bg-black/30 rounded p-2 font-mono text-[11px] text-white/60">{m.content}</pre>}
+        {open && (m.diff
+          ? <div className="mt-1 ml-4"><DiffView diff={m.diff} /></div>
+          : <pre className="mt-1 ml-4 max-h-80 overflow-auto whitespace-pre-wrap bg-black/30 rounded p-2 font-mono text-[11px] text-white/60">{m.content}</pre>)}
       </div>
     );
   }

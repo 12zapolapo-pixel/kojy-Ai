@@ -16,7 +16,7 @@ import { botProjects, projectSecrets, agentMemories } from "@kojyai/db/schema";
 import { decryptApiKey } from "@kojyai/shared/crypto";
 import {
   listFiles, resolveInside, cleanRelPath, projectDir, snapshotProject, readLogs, ProjectFileError, MAX_EDIT_BYTES, EMOTE_CATALOG,
-  pickMemories, normalizeNote,
+  pickMemories, normalizeNote, lineDiff,
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { BOTCHECK, LAUNCHER } from "../supervisor.js";
@@ -35,6 +35,8 @@ export interface ToolContext {
   /** Set once the AI has snapshotted the code in this run (for "undo"). */
   snapshotted: boolean;
   changedFiles: Set<string>;
+  /** What this run is for, as the undo label ("Before Kojy: add a !dance command"). */
+  label?: string;
 }
 
 export interface ToolResult {
@@ -49,6 +51,8 @@ export interface ToolResult {
   cardKind?: string;
   /** Stop the run after this tool (waiting on the owner). */
   pause?: boolean;
+  /** For file changes: the diff shown in the chat (never sent to the model). */
+  diff?: string;
 }
 
 const fn = (name: string, description: string, properties: Record<string, unknown> = {}, required: string[] = []): ToolSpec => ({
@@ -169,8 +173,14 @@ export function searchInWorker(pattern: string, files: { rel: string; abs: strin
 
 function ensureSnapshot(ctx: ToolContext): void {
   if (ctx.snapshotted) return;
-  snapshotProject(ctx.project.uuid, "Before the coder AI's changes");
+  const label = ctx.label?.replace(/\s+/g, " ").trim();
+  snapshotProject(ctx.project.uuid, label ? `Before Kojy: ${label.length > 100 ? `${label.slice(0, 100)}…` : label}` : "Before the coder AI's changes");
   ctx.snapshotted = true;
+}
+
+/** The chat's diff for a file change ("" when nothing to show). */
+function changeDiff(before: string, after: string): string {
+  return lineDiff(before, after, 2, 4000)?.text ?? "";
 }
 
 async function secretsMap(ctx: ToolContext): Promise<Map<string, string>> {
@@ -260,10 +270,11 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           return { ok: false, output: count === 0 ? "old_text was not found. Read the file again and copy the exact text (indentation matters)." : `old_text matches ${count} places; include more surrounding lines so it is unique.`, summary: `Edit to ${rel} didn't apply` };
         }
         ensureSnapshot(ctx);
-        writeFileSync(file, text.replace(oldText, () => s(args.new_text)));
+        const edited = text.replace(oldText, () => s(args.new_text));
+        writeFileSync(file, edited);
         ctx.changedFiles.add(rel);
         const delta = s(args.new_text).split("\n").length - oldText.split("\n").length;
-        return { ok: true, output: "Edited.", summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}` };
+        return { ok: true, output: "Edited.", summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}`, diff: changeDiff(text, edited) };
       }
 
       case "write_file": {
@@ -272,11 +283,12 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         const content = s(args.content);
         if (content.length > MAX_EDIT_BYTES) return { ok: false, output: "Content is over 1 MB.", summary: `${rel} too big` };
         const existed = existsSync(file);
+        const before = existed && statSync(file).size <= MAX_EDIT_BYTES ? readFileSync(file, "utf8") : "";
         ensureSnapshot(ctx);
         mkdirSync(path.dirname(file), { recursive: true });
         writeFileSync(file, content);
         ctx.changedFiles.add(rel);
-        return { ok: true, output: existed ? "File replaced." : "File created.", summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)` };
+        return { ok: true, output: existed ? "File replaced." : "File created.", summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)`, diff: changeDiff(before, content) };
       }
 
       case "delete_file": {

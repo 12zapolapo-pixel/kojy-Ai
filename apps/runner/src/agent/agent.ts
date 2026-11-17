@@ -112,6 +112,8 @@ interface Scope {
   runTool(name: string, args: Record<string, unknown>): Promise<ToolResult>;
   system(): Promise<string>;
   setState(state: "idle" | "working" | "waiting"): Promise<void>;
+  /** What the current request is, for undo labels (bot chats only). */
+  setLabel?(label: string): void;
 }
 
 export const STUDIO_PREFIX = "studio-";
@@ -240,6 +242,7 @@ export class Agent {
         });
       },
       setState: async (state) => { await this.db.update(botProjects).set({ agentState: state }).where(eq(botProjects.id, project.id)); },
+      setLabel: (label) => { ctx.label = label; },
     };
   }
 
@@ -311,6 +314,7 @@ export class Agent {
             : await runTool(call.function.name, args);
           await this.add(scope, "tool", result.output, result.cardKind ?? (result.card ? "secret_request" : "tool"), {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
+            ...(result.diff ? { diff: result.diff } : {}),
           });
           if (result.pause) pause = true;
         }
@@ -375,6 +379,8 @@ export class Agent {
       const d = (r.data ?? {}) as { summary?: string; ok?: boolean };
       return { role: r.role, kind: r.kind, content: r.content, summary: d.summary, ok: d.ok };
     }));
+    const request = stored[requestIndex(stored)];
+    scope.setLabel?.(request?.kind === "crash" ? "automatic crash fix" : request?.kind === "checkup" ? "fix from the daily check-up" : request?.content ?? "");
     const rows = stored.slice(-80);
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
     const superseded = supersededResults(rows);

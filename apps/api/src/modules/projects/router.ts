@@ -25,7 +25,7 @@ import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
 import {
   ProjectFileError, MAX_UPLOAD_BYTES, ensureProjectDir, removeProjectDir, listFiles, readProjectFile,
   writeProjectFile, deleteProjectPath, extractZip, zipProject, detectEntrypoint, readLogs, cleanRelPath, removeSnapshots, listSnapshots, restoreSnapshot, BOT_TEMPLATES,
-  snapshotUnlessRecent,
+  snapshotUnlessRecent, compareSnapshot,
 } from "@kojyai/shared/projects";
 import { listDatabases, describeDatabase, readTable } from "./data.js";
 import { listThread, addToThread, agentProgress, noteOwnerEdit } from "./chat.js";
@@ -404,6 +404,13 @@ export const projectsRouter = router({
     const project = await loadProject(ctx, input.id);
     return files(() => listSnapshots(project.uuid));
   }),
+
+  /** What restoring a snapshot would change (shown before the owner confirms). */
+  snapshotDiff: permittedProc("bots:read").input(projectId.extend({ snapshotId: z.string().regex(/^\d+$/) }))
+    .query(async ({ ctx, input }) => {
+      const project = await loadProject(ctx, input.id);
+      return files(() => compareSnapshot(project.uuid, input.snapshotId));
+    }),
 
   restoreSnapshot: permittedProc("bots:update").input(projectId.extend({ snapshotId: z.string().regex(/^\d+$/) }))
     .mutation(async ({ ctx, input }) => {

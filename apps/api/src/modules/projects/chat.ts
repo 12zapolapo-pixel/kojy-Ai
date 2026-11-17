@@ -27,11 +27,12 @@ export async function listThread(db: any, thread: string, afterId: number | unde
       // Assistant rows that only carry tool calls have nothing to show.
       .filter((r) => !(r.role === "assistant" && !r.content.trim()))
       .map((r) => {
-        const d = (r.data ?? {}) as { summary?: string; ok?: boolean; card?: unknown; name?: string };
+        const d = (r.data ?? {}) as { summary?: string; ok?: boolean; card?: unknown; name?: string; diff?: string };
         return {
           id: r.id, role: r.role, kind: r.kind, createdAt: r.createdAt,
           content: r.role === "tool" ? r.content.slice(0, 3000) : r.content,
           summary: d.summary ?? null, ok: d.ok ?? null, tool: d.name ?? null,
+          diff: typeof d.diff === "string" ? d.diff.slice(0, 6000) : null,
           card: (d.card ?? null) as null | (SecretCard & UiCard & PlanCard),
         };
       }),
