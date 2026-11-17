@@ -40,6 +40,13 @@ const RESTART_DELAYS_S = [5, 15, 30, 60];
 /** A start that failed before the bot ran (pip, network, database): try again, slower. */
 const START_RETRY_DELAYS_S = [30, 120, 600, 1800];
 const HEALTHY_RUN_MS = 120_000;
+/**
+ * Short runs in a row after which a bot stops being restarted: it's in a
+ * crash loop (about 8 minutes of restarts with the delays above), and
+ * restarting it forever only fills the log and keeps knocking on Highrise.
+ */
+export const CRASH_LOOP_LIMIT = Math.max(3, Number(process.env.CRASH_LOOP_LIMIT ?? 10));
+export const CRASH_LOOP_STATUS = `Paused after ${CRASH_LOOP_LIMIT} crashes in a row. Fix the error (or ask Kojy), then press Start.`;
 const STOP_GRACE_MS = 10_000;
 const NO_MODERATOR_STATUS = "Not a moderator in its room: commands that move, kick, mute or ban people won't work";
 
@@ -317,6 +324,7 @@ export class Supervisor {
       .from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (project?.desiredState !== "running") return this.setStatus(uuid, "stopped", null);
 
+    if (streak >= CRASH_LOOP_LIMIT) return this.pauseCrashLoop(uuid, run, streak);
     await this.db.update(botProjects).set({ restartCount: project.restartCount + 1 }).where(eq(botProjects.uuid, uuid));
     await this.setStatus(uuid, "crashed", `Exited with ${signal ?? `code ${code}`}; restarting in ${delay}s`);
     this.onCrash?.(uuid, streak, this.tail(uuid));
@@ -324,10 +332,24 @@ export class Supervisor {
       this.alerted.set(uuid, streak);
       const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";
       const body = `${run.project.name} has crashed ${streak} times in a row and keeps restarting. Last output: ${last.slice(0, 200)}`;
-      void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} keeps crashing`, body, `/projects/${uuid}`);
+      void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} keeps crashing`, body, `/studio/p/${uuid}`);
       void sendAlert(`⚠️ ${body}`);
     }
     this.restartTimers.set(uuid, setTimeout(() => { this.restartTimers.delete(uuid); void this.start(uuid); }, delay * 1000));
+  }
+
+  /**
+   * A crash loop: stop restarting, keep the bot stopped until someone starts
+   * it again (Start, or Kojy's bot_control), and tell the owner once.
+   */
+  private async pauseCrashLoop(uuid: string, run: Running, streak: number): Promise<void> {
+    this.crashStreak.delete(uuid);
+    this.console(uuid, "system", `⏸ ${streak} crashes in a row — not restarting any more. ${CRASH_LOOP_STATUS}`);
+    await this.db.update(botProjects).set({ desiredState: "stopped", status: "error", statusMessage: CRASH_LOOP_STATUS }).where(eq(botProjects.uuid, uuid));
+    const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";
+    const body = `${run.project.name} crashed ${streak} times in a row, so it was paused instead of restarting forever. Last output: ${last.slice(0, 200)}. Open its chat and ask Kojy to fix it, then press Start.`;
+    void notifyUser(this.db, run.project.ownerId, "bot_error", `${run.project.name} was paused (crash loop)`, body, `/studio/p/${uuid}`);
+    void sendAlert(`⏸ ${body}`);
   }
 
   private clearRestart(uuid: string): void {

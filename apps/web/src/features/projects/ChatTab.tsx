@@ -269,7 +269,7 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
 
   return (
     <div className="px-4 py-2 border-b border-white/5 flex flex-wrap items-center gap-3 text-xs relative">
-      <label className="flex items-center gap-1.5 text-white/60 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — no approval needed (up to 3 times a day). A fix that would delete files, touch the bot's data, packages or secrets, or add internet or secret access asks you first.">
+      <label className="flex items-center gap-1.5 text-white/60 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — no approval needed (up to 3 times a day). A fix that would delete files, touch the bot's data, packages or secrets, or add internet or secret access asks you first. If the bot crashes again within 15 minutes of a fix, Kojy puts the code back as it was and tells you.">
         <input type="checkbox" checked={autoFixOn} onChange={(e) => autoFix.mutate({ id: project.id, autoFix: e.target.checked })} />
         Auto-fix crashes
       </label>

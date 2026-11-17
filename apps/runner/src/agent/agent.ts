@@ -26,7 +26,7 @@ import { and, desc, eq, gt, ne } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
 import { botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
-import { listFiles, resolveInside } from "@kojyai/shared/projects";
+import { listFiles, listSnapshots, resolveInside, restoreSnapshot, snapshotProject } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
 import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
@@ -37,7 +37,7 @@ import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, rec
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
-import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, isNetworkFailure, type AutomatedKind } from "./autoFix.js";
+import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, crashSignature, isNetworkFailure, type AutomatedKind } from "./autoFix.js";
 
 const log = createLogger("agent");
 
@@ -122,6 +122,8 @@ export const JSBOT_PREFIX = "jsbot-";
 
 export class Agent {
   private active = new Map<string, AbortController>();
+  /** Automatic fixes being watched: the snapshot from before the fix and the crash it was for. */
+  private watching = new Map<string, { snapshotId: string; signature: string; timer: NodeJS.Timeout }>();
   private again = new Set<string>();
 
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
@@ -248,6 +250,8 @@ export class Agent {
 
   async run(uuid: string): Promise<void> {
     if (this.active.has(uuid)) { this.again.add(uuid); return; }
+    // New work on the bot: a crash after this is no longer the automatic fix's doing.
+    this.clearWatch(uuid);
     const abort = new AbortController();
     this.active.set(uuid, abort);
     try {
@@ -380,7 +384,7 @@ export class Agent {
       return { role: r.role, kind: r.kind, content: r.content, summary: d.summary, ok: d.ok };
     }));
     const request = stored[requestIndex(stored)];
-    scope.setLabel?.(request?.kind === "crash" ? "automatic crash fix" : request?.kind === "checkup" ? "fix from the daily check-up" : request?.content ?? "");
+    scope.setLabel?.(request?.kind === "crash" ? AUTO_FIX_LABEL : request?.kind === "checkup" ? "fix from the daily check-up" : request?.content ?? "");
     const rows = stored.slice(-80);
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
     const superseded = supersededResults(rows);
@@ -435,7 +439,10 @@ export class Agent {
     const excerpt = crashExcerpt(tail);
     if (!excerpt || isNetworkFailure(tail)) return;
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
-    if (!project?.autoFix || project.desiredState !== "running") return;
+    if (!project) return;
+    // A crash soon after an automatic fix: the fix didn't hold. Put the code back.
+    if (await this.fixDidNotHold(uuid, project, tail)) return;
+    if (!project.autoFix || project.desiredState !== "running") return;
     if (!configuredLanes().length) return; // no AI key of any kind
 
     // The limits are counted from the chat itself (one "crash" message per
@@ -458,8 +465,10 @@ export class Agent {
       " Finish with one or two sentences for the owner: what was wrong and what you changed.",
       "crash");
     log.info({ uuid, streak, frozen }, "Auto-fix started");
+    const startedAt = Date.now();
     void this.run(uuid).then(async () => {
       const [entry] = await recentWork(this.db, thread, 1);
+      if (entry?.files.length && entry.status === "done") this.watchFix(uuid, project, crashSignature(tail), startedAt);
       const what = frozen ? "a freeze" : "a crash";
       const title = entry?.status === "waiting_for_owner" ? `Kojy needs your OK to fix ${project.name}`
         : entry?.files.length ? `Kojy fixed ${what} in ${project.name}`
@@ -469,7 +478,67 @@ export class Agent {
       void sendAlert(`🛠️ ${title}: ${summary}`);
     }).catch((err) => log.warn({ err, uuid }, "Auto-fix follow-up failed"));
   }
+
+  /**
+   * After an automatic fix that changed code: watch the bot for FIX_WATCH_MS.
+   * No crash in that time → say the fix held. A crash → fixDidNotHold.
+   */
+  private watchFix(uuid: string, project: typeof botProjects.$inferSelect, signature: string, startedAt: number): void {
+    const snap = listSnapshots(uuid).find((x) => x.reason === `Before Kojy: ${AUTO_FIX_LABEL}` && x.createdAt >= startedAt - 1000);
+    if (!snap) return;
+    this.clearWatch(uuid);
+    const timer = setTimeout(() => {
+      this.watching.delete(uuid);
+      if (!this.supervisor.isRunning(uuid)) return; // stopped meanwhile: nothing was proven
+      void this.add({ thread: `project:${project.id}`, projectId: project.id }, "assistant",
+        `✓ The automatic fix held: no crash in the ${Math.round(FIX_WATCH_MS / 60_000)} minutes after it.`, "event").catch(() => undefined);
+    }, FIX_WATCH_MS);
+    timer.unref();
+    this.watching.set(uuid, { snapshotId: snap.id, signature, timer });
+  }
+
+  private clearWatch(uuid: string): void {
+    const w = this.watching.get(uuid);
+    if (w) { clearTimeout(w.timer); this.watching.delete(uuid); }
+  }
+
+  /**
+   * The bot crashed while an automatic fix was being watched. The fix didn't
+   * stop the crash (same error) or brought a new one: put the code back as it
+   * was before the fix (the current code is kept as an undo point too), tell
+   * the owner, and don't start another automatic fix for it — the supervisor's
+   * restart then runs the old code. True when it handled the crash.
+   */
+  private async fixDidNotHold(uuid: string, project: typeof botProjects.$inferSelect, tail: string[]): Promise<boolean> {
+    const w = this.watching.get(uuid);
+    if (!w) return false;
+    this.clearWatch(uuid);
+    const same = crashSignature(tail) === w.signature;
+    try {
+      snapshotProject(uuid, "Before undoing an automatic fix that didn't hold");
+      restoreSnapshot(uuid, w.snapshotId);
+    } catch (err) {
+      log.warn({ err, uuid }, "Could not undo the automatic fix");
+      return false;
+    }
+    const why = same ? "the same error came back" : "the bot crashed with a different error right after it";
+    const thread = `project:${project.id}`;
+    await this.add({ thread, projectId: project.id }, "assistant",
+      `↶ The automatic fix didn't hold (${why}), so I put the code back as it was before it. Nothing else will be changed automatically for this crash. ` +
+      "Ask me to look into it again when you're ready — the code with the fix is saved in Undo if you want it back.", "event");
+    await recordWork(this.db, thread, project.id, "error").catch(() => undefined);
+    const title = `Kojy undid its fix for ${project.name}`;
+    await notifyUser(this.db, project.ownerId, "bot_error", title, `The automatic fix didn't hold (${why}). The code is back to how it was; open the chat to look at it together.`, `/studio/p/${uuid}`);
+    void sendAlert(`↶ ${title}: ${why}.`);
+    log.info({ uuid, same }, "Automatic fix didn't hold — code restored");
+    return true;
+  }
 }
+
+/** The undo label of an automatic crash fix ("Before Kojy: automatic crash fix"). */
+export const AUTO_FIX_LABEL = "automatic crash fix";
+/** How long after an automatic fix a crash counts as "the fix didn't hold". */
+export const FIX_WATCH_MS = Number(process.env.AGENT_FIX_WATCH_MS ?? 15 * 60_000);
 
 /**
  * Whether another automatic fix may start: at most AUTOFIX_PER_DAY in 24
