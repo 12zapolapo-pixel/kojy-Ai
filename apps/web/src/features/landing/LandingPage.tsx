@@ -2,406 +2,317 @@
  * Landing page — what signed-out visitors see at "/".
  * OWNERSHIP: apps/web/src/features/landing
  *
+ * Look: "Open Room". A light, calm page with one cobalt accent; the focal
+ * object is a Highrise-style room where Kojy's greeter bot welcomes visitors.
+ *
  * Copy only states what the product does today (see README / ROADMAP):
  * Bot Studio, Kojy writing/testing/fixing/running Python bots on the official
- * highrise-bot-sdk, upload / describe / nine ready-made bots. The studio
- * window in the hero is an illustrative sample session and is labelled so.
+ * highrise-bot-sdk, upload / import / describe / nine ready-made bots. The
+ * room and the tab mocks are illustrative samples and are labelled so.
  *
- * MOTION: the idea is "the bot comes alive". The hero session is the one
- * authored moment (plays once, with Replay); the rest of the page reveals on
- * scroll with a few different gestures. Visitors who ask for reduced motion
- * get the finished, static page (no `kj--motion` class, nothing is hidden).
+ * MOTION: one authored moment (the room), a typing prompt box, a dot that
+ * orbits Write → Test → Fix → Run. Visitors who ask for reduced motion get
+ * the finished, static page (no `or-motion` class, nothing hidden).
  */
 
-import { Fragment, useEffect, useRef, useState } from "react";
-import type { CSSProperties, ReactNode, RefObject } from "react";
+import { useState } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { KojyFace, RoomScene } from "../../components/RoomScene";
+import { useMotionAllowed } from "../../lib/motion";
 import "./landing.css";
-
-// ─── Content ──────────────────────────────────────────────────────────────────
 
 const START = "/login?mode=register";
 const SIGN_IN = "/login";
 
 // Keep in sync with scripts/gen-templates.mjs (the nine ready-made bots).
-const READY_MADE: ReadonlyArray<readonly [string, string]> = [
-  ["Starter",         "The smallest working bot. Tell Kojy what to add."],
-  ["Greeter",         "Welcomes everyone who joins, waves, says goodbye."],
-  ["Moderation",      "Mutes banned words, kicks after 3 warnings. Needs moderator rights."],
-  ["Tip Rewards",     "Thanks tippers and keeps a leaderboard."],
-  ["Emote Commands",  "Make your avatar emote on command, or dance at random."],
-  ["Room Host",       "Welcomes people, posts timed announcements, answers !rules."],
-  ["Economy",         "Coins for chatting, a daily bonus, give and leaderboard commands."],
-  ["Trivia",          "Trivia questions, points and a leaderboard."],
-  ["Voice Manager",   "Check voice chat and invite or remove speakers."],
+const READY_MADE: ReadonlyArray<readonly [string, string, string]> = [
+  ["Starter",        "The smallest working bot. Tell Kojy what to add.", "M12 5v14M5 12h14"],
+  ["Greeter",        "Welcomes everyone who joins, waves, says goodbye.", "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM8.5 14a4 4 0 0 0 7 0M9 9.5h.01M15 9.5h.01"],
+  ["Moderation",     "Mutes banned words, kicks after 3 warnings. Needs moderator rights.", "M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"],
+  ["Tip Rewards",    "Thanks tippers and keeps a leaderboard.", "M4.5 8h15a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1zM5 12v8h14v-8M12 8v12M12 8c-2-4-6-3-5 0M12 8c2-4 6-3 5 0"],
+  ["Emote Commands", "Make your avatar emote on command, or dance at random.", "M9 18V5l11-2v13M9 18a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0zM20 16a2.5 2.5 0 1 1-5 0 2.5 2.5 0 0 1 5 0z"],
+  ["Room Host",      "Welcomes people, posts timed announcements, answers !rules.", "M3 10v4h4l6 4V6L7 10H3zM17 9a4 4 0 0 1 0 6"],
+  ["Economy",        "Coins for chatting, a daily bonus, give and leaderboard commands.", "M19 6c0 1.7-3.1 3-7 3S5 7.7 5 6s3.1-3 7-3 7 1.3 7 3zM5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"],
+  ["Trivia",         "Trivia questions, points and a leaderboard.", "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5h.01"],
+  ["Voice Manager",  "Check voice chat and invite or remove speakers.", "M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3"],
 ];
 
 const LOOP: ReadonlyArray<readonly [string, string]> = [
-  ["Write",  "Describe the bot in plain words. Kojy writes the Python."],
-  ["Test",   "Kojy runs the bot against a test room before you ever see an error."],
-  ["Fix",    "If something breaks, Kojy reads the logs and patches the code."],
-  ["Run",    "One click starts it in your room. It stays up while you're away."],
+  ["Write", "Describe the bot in plain words. Kojy writes the Python."],
+  ["Test",  "Kojy runs it against a test room before you ever see an error."],
+  ["Fix",   "If something breaks, Kojy reads the logs and patches the code."],
+  ["Run",   "One click starts it in your room. It stays up while you’re away."],
 ];
 
-const PANES: ReadonlyArray<readonly [string, string]> = [
-  ["Chat",    "Talk to Kojy. Ask for a change and watch the code update."],
-  ["Code",    "The real Python, always yours to read and edit."],
-  ["Logs",    "Live output as the bot runs, so you can see what it just did."],
-  ["Data",    "What your bot has saved, like scores and balances."],
-  ["Secrets", "Keys and tokens, kept out of your code."],
+const PROMPTS = [
+  "Greet everyone who joins and answer !rules",
+  "Run trivia every hour and keep a leaderboard",
+  "Thank people who tip and give them coins",
 ];
 
-const USER_PROMPT = "Make a bot that welcomes everyone who joins and answers !rules.";
-
-// One line of the sample bot: [style, text] segments. k=keyword s=string c=comment
-type Seg = readonly ["k" | "s" | "c" | "", string];
-const CODE: ReadonlyArray<ReadonlyArray<Seg>> = [
-  [["k", "from"], ["", " highrise "], ["k", "import"], ["", " BaseBot, User"]],
-  [["", ""]],
-  [["k", "class"], ["", " WelcomeBot(BaseBot):"]],
-  [["", "  "], ["k", "async def"], ["", " on_user_join(self, user, pos):"]],
-  [["", "    "], ["k", "await"], ["", " self.highrise.chat("]],
-  [["", "      "], ["s", 'f"Welcome in, {user.username}!"'], ["", ")"]],
-  [["", ""]],
-  [["", "  "], ["k", "async def"], ["", " on_chat(self, user, message):"]],
-  [["", "    "], ["k", "if"], ["", " message.strip() == "], ["s", '"!rules"'], ["", ":"]],
-  [["", "      "], ["k", "await"], ["", " self.highrise.chat("], ["s", '"Be kind."'], ["", ")"]],
+type Tab = "describe" | "upload" | "template";
+const TABS: ReadonlyArray<readonly [Tab, string]> = [
+  ["describe", "Describe it"], ["upload", "Upload it"], ["template", "Pick a template"],
 ];
 
-// Sample-session timeline (ms from mount). One place, so picture stays in sync.
-const T = {
-  userBubble: 150,
-  typeStart: 350,
-  typeMsPerChar: 18,
-  reply: 1700,
-  wrote: 2200,
-  codeStart: 2200,
-  codeStep: 80,
-  test: 3000,
-  started: 3600,
-  live: 3700,
-  log1: 3900,
-  log2: 4500,
-} as const;
+// ─── Small pieces ─────────────────────────────────────────────────────────────
 
-// ─── Motion helpers ───────────────────────────────────────────────────────────
-
-const REDUCED_QUERY = "(prefers-reduced-motion: reduce)";
-
-/** True when the visitor has NOT asked for reduced motion. Live-updates. */
-function useMotionAllowed(): boolean {
-  const [allowed, setAllowed] = useState<boolean>(() =>
-    typeof window === "undefined" || !window.matchMedia
-      ? false
-      : !window.matchMedia(REDUCED_QUERY).matches,
-  );
-  useEffect(() => {
-    if (!window.matchMedia) return;
-    const mq = window.matchMedia(REDUCED_QUERY);
-    const onChange = () => setAllowed(!mq.matches);
-    mq.addEventListener("change", onChange);
-    return () => mq.removeEventListener("change", onChange);
-  }, []);
-  return allowed;
-}
-
-/** Adds `is-in` once to every [data-reveal] element as it scrolls into view. */
-function useReveal(root: RefObject<HTMLElement>, enabled: boolean) {
-  useEffect(() => {
-    const el = root.current;
-    if (!el || !enabled || typeof IntersectionObserver === "undefined") return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          if (e.isIntersecting) {
-            e.target.classList.add("is-in");
-            io.unobserve(e.target);
-          }
-        }
-      },
-      { threshold: 0.15, rootMargin: "0px 0px -6% 0px" },
-    );
-    el.querySelectorAll("[data-reveal]").forEach((n) => io.observe(n));
-    return () => io.disconnect();
-  }, [root, enabled]);
-}
-
-const idx = (i: number): CSSProperties => ({ ["--i" as string]: i });
-const delay = (ms: number): CSSProperties => ({ ["--d" as string]: `${ms}ms` });
-
-/** Splits a headline into masked words that rise one after another. */
-function Words({ text, emphasize }: { text: string; emphasize?: string }) {
-  const words = text.split(" ");
+function Icon({ d, className = "or-ic" }: { d: string; className?: string }) {
   return (
-    <>
-      <span className="kj-sr">{text}</span>
-      {words.map((w, i) => (
-        <Fragment key={i}>
-          <span className="kj-w" aria-hidden="true">
-            <span style={idx(i)}>{w === emphasize ? <em>{w}</em> : w}</span>
-          </span>
-          {i < words.length - 1 ? " " : null}
-        </Fragment>
-      ))}
-    </>
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true"><path d={d} /></svg>
   );
 }
 
-/** Types `text` after `startMs`. The ghost copy reserves the final size. */
-function Typed({ text, startMs, enabled }: { text: string; startMs: number; enabled: boolean }) {
-  const [n, setN] = useState<number>(enabled ? 0 : text.length);
-
-  useEffect(() => {
-    if (!enabled) { setN(text.length); return; }
-    setN(0);
-    const t0 = performance.now() + startMs;
-    let raf = 0;
-    const tick = (now: number) => {
-      const k = Math.min(text.length, Math.max(0, Math.floor((now - t0) / T.typeMsPerChar)));
-      setN(k);
-      if (k < text.length) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [text, startMs, enabled]);
-
-  return (
-    <span className="kj-typed">
-      <span className="kj-typed-ghost">{text}</span>
-      <span className="kj-typed-live">
-        {text.slice(0, n)}
-        {enabled && n < text.length ? <span className="kj-caret" /> : null}
-      </span>
-    </span>
-  );
-}
-
-// ─── Pieces ───────────────────────────────────────────────────────────────────
-
-function Check() {
-  return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M3 8.5 6.5 12 13 4.5" pathLength={1} />
-    </svg>
-  );
-}
+const ARROW = "M5 12h14M13 6l6 6-6 6";
+const CHECK = "M5 12.5 10 17 19 7";
 
 function Arrow() {
+  return <Icon d={ARROW} className="or-ic or-ic--btn" />;
+}
+
+function Ok({ children }: { children: ReactNode }) {
+  return <li className="or-ok"><Icon d={CHECK} />{children}</li>;
+}
+
+// ─── Sections ─────────────────────────────────────────────────────────────────
+
+function Hero() {
   return (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M3 8h10M9 4l4 4-4 4" />
-    </svg>
+    <section className="or-hero" id="top">
+      <div className="or-wrap or-hero-grid">
+        <div className="or-hero-text">
+          <h1 className="or-display or-load or-d1">Ask for a Highrise bot. Kojy builds it.</h1>
+          <p className="or-lede or-load or-d2">
+            Kojy writes the Python, tests it in a test room, fixes what breaks and keeps it
+            running while you’re away. Real bots on the official highrise-bot-sdk.
+          </p>
+
+          <div className="or-composer or-load or-d3">
+            <p className="or-composer-label">Describe your bot</p>
+            <div className="or-composer-row">
+              <div className="or-typed" aria-hidden="true">
+                {PROMPTS.map((p, i) => <span key={p} className={`or-tp or-tp${i + 1}`}>{p}</span>)}
+              </div>
+              <Link to={START} className="or-btn or-btn--co">Build it <Arrow /></Link>
+            </div>
+          </div>
+
+          <div className="or-chips or-load or-d4">
+            <span>Or start from</span>
+            {["Greeter", "Trivia", "Tip Rewards", "Moderation"].map((n) => (
+              <a key={n} className="or-chip" href="#bots">{n}</a>
+            ))}
+          </div>
+          <p className="or-hero-note or-load or-d4">
+            Already have a bot? <Link to={START}>Upload it or import it from GitHub</Link>.
+          </p>
+        </div>
+
+        <figure className="or-scene or-scene-in">
+          <RoomScene label="Illustration: a Highrise room seen from above. Kojy’s greeter bot stands in the middle. Visitors walk in; the bot says “Welcome in, mika_x!” and “Hey ren, glad you’re here!”. When mika types !rules, it answers “Be kind. No spam. Have fun.”" />
+          <figcaption>A sample room. Your bot greets people while you’re away.</figcaption>
+        </figure>
+      </div>
+    </section>
   );
 }
 
-function StudioWindow({ motion }: { motion: boolean }) {
-  const [run, setRun] = useState(0);
-  const lastCodeMs = T.codeStart + CODE.length * T.codeStep;
-
+function StartTabs() {
+  const [tab, setTab] = useState<Tab>("describe");
   return (
-    <figure style={{ margin: 0 }}>
-      <p className="kj-sr">
-        A sample Bot Studio session. On the left, a person asks Kojy for a bot that welcomes
-        everyone who joins and answers !rules; Kojy writes it, passes a test join and starts it.
-        On the right, the Python code Kojy wrote and the live log of the bot running.
-      </p>
-      <div key={run} className="kj-win" aria-hidden="true" style={{ ["--live" as string]: `${T.live}ms` }}>
-        <div className="kj-win-bar">
-          <b>welcome-bot</b>
-          <span className="kj-live"><i /> Running</span>
+    <section className="or-band" id="how">
+      <div className="or-wrap">
+        <div className="or-head">
+          <h2 className="or-h2">Start with what you already have.</h2>
+          <div className="or-tabs" role="group" aria-label="Ways to start">
+            {TABS.map(([id, label]) => (
+              <button key={id} type="button" className={`or-tab${tab === id ? " is-on" : ""}`}
+                aria-pressed={tab === id} onClick={() => setTab(id)}>{label}</button>
+            ))}
+          </div>
         </div>
-        <div className="kj-win-body">
-          <div className="kj-pane">
-            <div className="kj-pane-label">Chat</div>
-            <p className="kj-msg kj-msg--user kj-play" style={delay(T.userBubble)}>
-              <Typed text={USER_PROMPT} startMs={T.typeStart} enabled={motion} />
-            </p>
-            <p className="kj-msg kj-msg--kojy kj-play" style={delay(T.reply)}>
-              <strong>Kojy</strong> &nbsp;On it. I'll write it, test a join, then start it.
-            </p>
-            <ul className="kj-steps">
-              <li className="kj-play" style={delay(T.wrote)}><Check /> Wrote bot.py</li>
-              <li className="kj-play" style={delay(T.test)}><Check /> Test join passed</li>
-              <li className="kj-play" style={delay(T.started)}><Check /> Started in your room</li>
-            </ul>
-          </div>
-          <div className="kj-pane">
-            <div className="kj-pane-label">Code</div>
-            <div className="kj-code">
-              {CODE.map((line, i) => (
-                <span key={i} className="l kj-play" style={delay(T.codeStart + i * T.codeStep)}>
-                  {line.map(([cls, text], j) =>
-                    cls ? <span key={j} className={cls}>{text}</span> : text,
-                  )}
-                  {"​"}
-                </span>
-              ))}
+
+        <div className="or-panel">
+          {tab === "describe" && (
+            <div className="or-panel-in" key="describe">
+              <div className="or-panel-text">
+                <h3>Say it in plain words.</h3>
+                <p className="or-lede">Tell Kojy what the bot should do. It writes the code, tests it in a test room and starts it in yours.</p>
+              </div>
+              <div className="or-mock">
+                <p className="or-me">Make a trivia bot that asks a question every 10 minutes and keeps score.</p>
+                <p className="or-kj"><b>Kojy</b> · Done. I wrote trivia.py, played a test round and started it in your room.</p>
+                <ul className="or-oks">
+                  <Ok>Wrote trivia.py</Ok><Ok>Test round passed</Ok><Ok>Running in your room</Ok>
+                </ul>
+              </div>
             </div>
-            <div className="kj-log">
-              <span className="kj-play" style={{ ...delay(Math.max(T.log1, lastCodeMs)), display: "block" }}>
-                09:41:07  bot connected to room
-              </span>
-              <span className="kj-play" style={{ ...delay(T.log2), display: "block" }}>
-                09:41:22  mika_x joined → <b>"Welcome in, mika_x!"</b>
-              </span>
+          )}
+          {tab === "upload" && (
+            <div className="or-panel-in" key="upload">
+              <div className="or-panel-text">
+                <h3>Bring the bot you already built.</h3>
+                <p className="or-lede">Upload a Python bot from Replit or anywhere else, or import it from GitHub. Kojy can read it, test it and fix it.</p>
+              </div>
+              <div className="or-mock">
+                <div className="or-drop">
+                  <Icon d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" />
+                  <p><b>Drop your bot’s files here</b></p>
+                  <p>or <Link to={START}>import from GitHub</Link></p>
+                </div>
+                <ul className="or-oks">
+                  <Ok>main.py</Ok><Ok>requirements.txt</Ok><Ok>Kojy read both files · test join passed</Ok>
+                </ul>
+              </div>
             </div>
+          )}
+          {tab === "template" && (
+            <div className="or-panel-in" key="template">
+              <div className="or-panel-text">
+                <h3>Start from one of nine.</h3>
+                <p className="or-lede">Each one runs as it is. Ask Kojy to change anything, in plain words.</p>
+              </div>
+              <div className="or-tpl-grid">
+                {READY_MADE.map(([name]) => <a key={name} className="or-chip or-chip--tile" href="#bots">{name}</a>)}
+              </div>
+            </div>
+          )}
+        </div>
+        <p className="or-caption">Sample sessions. Your own chats and files will look like this.</p>
+      </div>
+    </section>
+  );
+}
+
+function LoopRing() {
+  return (
+    <section className="or-section">
+      <div className="or-wrap or-loop">
+        <div className="or-ring-col">
+          <div className="or-ring" aria-hidden="true">
+            <svg viewBox="0 0 320 320">
+              <circle cx="160" cy="160" r="130" className="or-ring-line" />
+              <circle cx="160" cy="30" r="8" className="or-node or-n1" />
+              <circle cx="290" cy="160" r="8" className="or-node or-n2" />
+              <circle cx="160" cy="290" r="8" className="or-node or-n3" />
+              <circle cx="30" cy="160" r="8" className="or-node or-n4" />
+              <text x="160" y="68" className="or-ring-label">Write</text>
+              <text x="248" y="165" className="or-ring-label">Test</text>
+              <text x="160" y="262" className="or-ring-label">Fix</text>
+              <text x="74" y="165" className="or-ring-label">Run</text>
+              <circle cx="160" cy="160" r="30" fill="#3B5BFD" />
+              <g className="rs-eyes">
+                <rect x="150" y="150" width="5" height="12" rx="2.5" fill="#FFFFFF" />
+                <rect x="165" y="150" width="5" height="12" rx="2.5" fill="#FFFFFF" />
+              </g>
+            </svg>
+            <div className="or-orbit"><span className="or-odot" /></div>
           </div>
+          <p className="or-caption or-caption--center">Ask for a change and it goes round again.</p>
+        </div>
+        <div className="or-loop-text">
+          <h2 className="or-h2">Kojy does the part where bots usually break.</h2>
+          <ol className="or-steps">
+            {LOOP.map(([verb, text], i) => (
+              <li key={verb} className={`or-step or-step${i + 1}`}>
+                <h3>{verb}</h3>
+                <p>{text}</p>
+              </li>
+            ))}
+          </ol>
         </div>
       </div>
-      <figcaption className="kj-caption">
-        A sample session. Your bots and logs will look like this.
-        {motion ? (
-          <button type="button" className="kj-replay" onClick={() => setRun((r) => r + 1)}>
-            Replay
-          </button>
-        ) : null}
-      </figcaption>
-    </figure>
+    </section>
   );
 }
 
-function Row({ title, i, children }: { title: string; i: number; children: ReactNode }) {
+function Bots() {
   return (
-    <div className="kj-row" data-reveal="rise" style={idx(i)}>
-      <h3>{title}</h3>
-      <p className="kj-body">{children}</p>
-    </div>
+    <section className="or-band" id="bots">
+      <div className="or-wrap">
+        <div className="or-head">
+          <h2 className="or-h2">Nine bots, ready on day one.</h2>
+          <p className="or-lede or-head-lede">Start from one, then ask Kojy to make it yours.</p>
+        </div>
+        <ul className="or-bots">
+          {READY_MADE.map(([name, text, icon]) => (
+            <li key={name}>
+              <Link to={START} className="or-bot">
+                <span className="or-bot-ic"><Icon d={icon} /></span>
+                <span>
+                  <span className="or-bot-name">{name}</span>
+                  <span className="or-bot-text">{text}</span>
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
+function Cta() {
+  return (
+    <section className="or-cta">
+      <div className="or-wrap or-cta-grid">
+        <div>
+          <h2 className="or-display or-cta-title">Describe your first bot.</h2>
+          <div className="or-cta-actions">
+            <Link to={START} className="or-btn or-btn--white">Start building <Arrow /></Link>
+            <Link to={SIGN_IN} className="or-cta-link">I already have an account</Link>
+          </div>
+        </div>
+        <svg viewBox="0 0 200 200" className="or-cta-face" aria-hidden="true">
+          <path d="M100 18 V34" stroke="#FFFFFF" strokeWidth="6" strokeLinecap="round" />
+          <circle cx="100" cy="14" r="9" fill="#FFFFFF" />
+          <circle cx="100" cy="112" r="76" fill="#FFFFFF" />
+          <g className="rs-eyes">
+            <rect x="74" y="88" width="14" height="34" rx="7" fill="#3B5BFD" />
+            <rect x="112" y="88" width="14" height="34" rx="7" fill="#3B5BFD" />
+          </g>
+        </svg>
+      </div>
+    </section>
   );
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function LandingPage() {
-  const rootRef = useRef<HTMLDivElement>(null);
   const motion = useMotionAllowed();
-  useReveal(rootRef, motion);
-
   return (
-    <div ref={rootRef} className={motion ? "kj kj--motion" : "kj"}>
-      <header className="kj-nav">
-        <div className="kj-wrap">
-          <Link to="/" className="kj-mark" aria-label="KojyAI home">Kojy<span>AI</span></Link>
-          <nav className="kj-nav-links" aria-label="Main">
-            <a className="kj-nav-hide-sm" href="#how">How it works</a>
-            <a className="kj-nav-hide-sm" href="#bots">Ready-made bots</a>
-            <Link to={SIGN_IN}>Sign in</Link>
-            <Link to={START} className="kj-btn kj-btn--primary kj-btn--small">Start building</Link>
+    <div className={motion ? "or or-motion" : "or"}>
+      <header className="or-nav">
+        <div className="or-wrap or-nav-row">
+          <Link to="/" className="or-mark" aria-label="KojyAI home">
+            <KojyFace />
+            <span>Kojy</span>
+          </Link>
+          <nav className="or-nav-links" aria-label="Main">
+            <a className="or-nav-link or-hide-sm" href="#how">How it works</a>
+            <a className="or-nav-link or-hide-sm" href="#bots">Ready-made bots</a>
+            <Link className="or-nav-link" to={SIGN_IN}>Sign in</Link>
+            <Link className="or-btn or-btn--co or-btn--sm" to={START}>Start building</Link>
           </nav>
         </div>
       </header>
 
       <main>
-        <section className="kj-hero">
-          <div className="kj-wrap kj-hero-grid">
-            <div>
-              <h1 className="kj-display" data-reveal="words">
-                <Words text="Tell Kojy what your Highrise bot should do." emphasize="Kojy" />
-              </h1>
-              <p className="kj-lede" data-reveal="rise" style={idx(5)}>
-                Kojy writes the Python, tests it, fixes it and runs it for you, all in one
-                workspace called Bot Studio. Real bots on the official highrise-bot-sdk.
-              </p>
-              <div className="kj-hero-actions" data-reveal="rise" style={idx(6)}>
-                <Link to={START} className="kj-btn kj-btn--primary">Start building <Arrow /></Link>
-                <Link to={SIGN_IN} className="kj-textlink">Sign in</Link>
-              </div>
-              <p className="kj-hero-note" data-reveal="rise" style={idx(7)}>
-                Already have a bot? You can upload it instead.
-              </p>
-            </div>
-            <div className="kj-hero-window" data-reveal="rise">
-              <StudioWindow motion={motion} />
-            </div>
-          </div>
-        </section>
-
-        <section className="kj-section" id="how">
-          <div className="kj-wrap kj-split">
-            <div className="kj-split-sticky">
-              <h2 className="kj-h2" data-reveal="rise">Start with what you already have.</h2>
-              <p className="kj-lede" data-reveal="rise" style={{ ...idx(1), marginTop: "1.25rem" }}>
-                A blank page, a bot from Replit, or a template. All three end up in the same studio.
-              </p>
-            </div>
-            <div className="kj-rows" data-reveal="topline">
-              <Row i={0} title="Describe it.">
-                Say what the bot should do, in plain words. Kojy writes the code, tests it
-                and starts it.
-              </Row>
-              <Row i={1} title="Upload it.">
-                Bring a Python bot you already built, from Replit or anywhere else. Kojy can
-                read it, test it and fix it.
-              </Row>
-              <Row i={2} title="Pick one of nine.">
-                Greeters, moderators, trivia and more, ready to run as they are or change by
-                asking.
-              </Row>
-            </div>
-          </div>
-        </section>
-
-        <section className="kj-band">
-          <div className="kj-wrap">
-            <h2 className="kj-h2" data-reveal="rise" style={{ maxWidth: "20ch" }}>
-              Kojy does the part where bots usually break.
-            </h2>
-            <ul className="kj-loop">
-              {LOOP.map(([verb, text], i) => (
-                <li key={verb} data-reveal="loop" style={idx(i)}>
-                  <h3>{verb}.</h3>
-                  <p>{text}</p>
-                </li>
-              ))}
-            </ul>
-            <dl className="kj-panes">
-              {PANES.map(([term, text], i) => (
-                <div key={term} data-reveal="rise" style={idx(Math.min(i, 3))}>
-                  <dt>{term}</dt>
-                  <dd>{text}</dd>
-                </div>
-              ))}
-            </dl>
-          </div>
-        </section>
-
-        <section className="kj-section" id="bots">
-          <div className="kj-wrap kj-split">
-            <div className="kj-split-sticky">
-              <h2 className="kj-h2" data-reveal="rise">Nine bots, ready on day one.</h2>
-              <p className="kj-lede" data-reveal="rise" style={{ ...idx(1), marginTop: "1.25rem" }}>
-                Start from one, then ask Kojy to make it yours.
-              </p>
-            </div>
-            <ul className="kj-bots" data-reveal="topline">
-              {READY_MADE.map(([name, text], i) => (
-                <li key={name} data-reveal="rise" style={idx(Math.min(i, 5))}>
-                  <b>{name}</b>
-                  <span>{text}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </section>
-
-        <section className="kj-cta-band">
-          <div className="kj-wrap">
-            <h2 className="kj-display" data-reveal="words">
-              <Words text="Describe your first bot." />
-            </h2>
-            <div className="kj-hero-actions" data-reveal="rise" style={{ ...idx(4), marginTop: 0 }}>
-              <Link to={START} className="kj-btn kj-btn--dark">Start building <Arrow /></Link>
-              <Link to={SIGN_IN} className="kj-textlink">I already have an account</Link>
-            </div>
-          </div>
-        </section>
+        <Hero />
+        <StartTabs />
+        <LoopRing />
+        <Bots />
+        <Cta />
       </main>
 
-      <footer className="kj-foot">
-        <div className="kj-wrap">
-          <span>KojyAI</span>
+      <footer className="or-foot">
+        <div className="or-wrap or-foot-row">
+          <span className="or-foot-mark"><KojyFace size={20} />KojyAI</span>
           <nav aria-label="Footer">
-            <Link to={SIGN_IN}>Sign in</Link>
-            <Link to={START}>Create account</Link>
+            <Link className="or-nav-link" to={SIGN_IN}>Sign in</Link>
+            <Link className="or-nav-link" to={START}>Create account</Link>
           </nav>
         </div>
       </footer>

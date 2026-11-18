@@ -1,0 +1,74 @@
+/* Open Room illustration + Kojy's face. Motion only under .or-motion. */
+
+.rs { position: relative; width: 100%; max-width: 600px; margin: 0 auto; --rs-bubble: #3B5BFD; }
+.rs--onBlue { --rs-bubble: #0F1222; }
+.rs-svg { display: block; width: 100%; height: auto; }
+.rs-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.rs-tile { stroke: #E6E8EF; stroke-width: 1; }
+.rs-edge { stroke: #D3D7E0; stroke-width: 1; }
+.rs-ant { stroke: #3B5BFD; stroke-width: 2; stroke-linecap: round; }
+.rs-bt, .rs-ut {
+  font-family: "Hanken Grotesk", system-ui, sans-serif;
+  font-size: 12.5px; font-weight: 600; text-anchor: middle;
+}
+.rs-bt { fill: #FFFFFF; }
+.rs-ut { fill: #0F1222; }
+.rs-bubble { transform-box: fill-box; transform-origin: 50% 100%; }
+.rs-eyes { transform-box: fill-box; transform-origin: 50% 50%; }
+.rs-hid { opacity: 0; }
+
+.rs-chip {
+  position: absolute; top: 4px; left: 4px;
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: #FFFFFF; border: 1px solid #E2E4EA; border-radius: 10px;
+  font-family: "Hanken Grotesk", system-ui, sans-serif; font-size: 13.5px; color: #0F1222;
+  box-shadow: 0 6px 16px -10px rgba(15, 18, 34, 0.3);
+}
+.rs-chip b { font-weight: 600; }
+.rs-chip span { display: inline-flex; align-items: center; gap: 6px; color: #2A44D6; font-weight: 600; }
+.rs-live { position: relative; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3B5BFD; }
+.rs-live::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid #3B5BFD; opacity: 0;
+}
+
+.kj-face {
+  position: relative; display: inline-block; flex: none;
+  border-radius: 50%; background: #3B5BFD;
+}
+.kj-face::before, .kj-face::after {
+  content: ""; position: absolute; top: 32%; width: 14%; height: 29%;
+  border-radius: 2px; background: #FFFFFF;
+}
+.kj-face::before { left: 28%; }
+.kj-face::after { right: 28%; }
+
+@keyframes rs-v1 { 0%,8% { opacity: 0; transform: translate(120px,-42px); } 10% { opacity: 1; transform: translate(120px,-42px); } 22%,92% { opacity: 1; transform: translate(0,0); } 96%,100% { opacity: 0; transform: translate(0,0); } }
+@keyframes rs-v2 { 0%,34% { opacity: 0; transform: translate(159px,-87px); } 36% { opacity: 1; transform: translate(159px,-87px); } 50%,92% { opacity: 1; transform: translate(0,0); } 96%,100% { opacity: 0; transform: translate(0,0); } }
+@keyframes rs-b1 { 0%,23% { opacity: 0; transform: scale(.6); } 26%,40% { opacity: 1; transform: scale(1); } 43%,100% { opacity: 0; transform: scale(1); } }
+@keyframes rs-b2 { 0%,51% { opacity: 0; transform: scale(.6); } 54%,66% { opacity: 1; transform: scale(1); } 69%,100% { opacity: 0; transform: scale(1); } }
+@keyframes rs-u1 { 0%,62% { opacity: 0; transform: scale(.6); } 65%,80% { opacity: 1; transform: scale(1); } 83%,100% { opacity: 0; transform: scale(1); } }
+@keyframes rs-b3 { 0%,70% { opacity: 0; transform: scale(.6); } 73%,90% { opacity: 1; transform: scale(1); } 93%,100% { opacity: 0; transform: scale(1); } }
+@keyframes rs-bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+@keyframes rs-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes rs-ring { 0% { transform: scale(1); opacity: .8; } 100% { transform: scale(3.2); opacity: 0; } }
+@keyframes kj-blink { 0%,93%,100% { transform: scaleY(1); } 96% { transform: scaleY(.12); } }
+
+.or-motion .rs-v1 { animation: rs-v1 12s cubic-bezier(.45,0,.25,1) infinite; }
+.or-motion .rs-v2 { animation: rs-v2 12s cubic-bezier(.45,0,.25,1) infinite; }
+.or-motion .rs-b1 { animation: rs-b1 12s cubic-bezier(.16,1,.3,1) infinite; }
+.or-motion .rs-b2 { animation: rs-b2 12s cubic-bezier(.16,1,.3,1) infinite; }
+.or-motion .rs-u1 { animation: rs-u1 12s cubic-bezier(.16,1,.3,1) infinite; }
+.or-motion .rs-b3 { animation: rs-b3 12s cubic-bezier(.16,1,.3,1) infinite; }
+.or-motion .rs-bob { animation: rs-bob .6s ease-in-out infinite; }
+.or-motion .rs-bob2 { animation: rs-bob .7s ease-in-out infinite; }
+.or-motion .rs-float { animation: rs-float 3s ease-in-out infinite; }
+.or-motion .rs-live::after { animation: rs-ring 1.8s ease-out infinite; }
+.or-motion .kj-face::before, .or-motion .kj-face::after, .or-motion .rs-eyes { animation: kj-blink 4.5s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .or-motion .rs *, .or-motion .kj-face::before, .or-motion .kj-face::after { animation: none !important; }
+}
