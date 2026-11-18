@@ -351,7 +351,7 @@ export const projectsRouter = router({
       await ctx.db.update(projectMessages).set({ data: { ...data, card: { ...data.card, resolved: true, saved } } }).where(eq(projectMessages.id, row.id));
       await ctx.db.insert(projectMessages).values({
         thread: `project:${project.id}`, projectId: project.id, role: "user", kind: "event",
-        content: `The owner saved these secrets: ${saved.join(", ")}. Test them (test_secrets) and continue.`,
+        content: `The owner saved these secrets: ${saved.join(", ")}. Test them (test_secrets), then carry on with the task you were doing (for example start the bot with bot_control and check get_logs). Secrets that can't be tested automatically are fine: continue anyway.`,
       });
       await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { keys: saved } });
       await control(project.uuid, "agent");
