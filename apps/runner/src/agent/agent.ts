@@ -31,6 +31,7 @@ import { listFiles, listSnapshots, resolveInside, restoreSnapshot, snapshotProje
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
 import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
+import type { GitService } from "../git.js";
 import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
 import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
 import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, announcesNextStep, MAX_NUDGES, NUDGE, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
@@ -128,6 +129,9 @@ export class Agent {
   /** Automatic fixes being watched: the snapshot from before the fix and the crash it was for. */
   private watching = new Map<string, { snapshotId: string; signature: string; timer: NodeJS.Timeout }>();
   private again = new Set<string>();
+
+  /** The Git panel's operations, for Kojy's git tool (set by boot.ts). */
+  git?: GitService;
 
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
     supervisor.onCrash = (uuid, streak, tail) => void this.onCrash(uuid, streak, tail);
@@ -244,7 +248,7 @@ export class Agent {
     }
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, key)).limit(1);
     if (!project) return null;
-    const ctx: ToolContext = { db: this.db, supervisor: this.supervisor, project, snapshotted: false, changedFiles: new Set() };
+    const ctx: ToolContext = { db: this.db, supervisor: this.supervisor, project, snapshotted: false, changedFiles: new Set(), git: this.git };
     return {
       key, thread: `project:${project.id}`, projectId: project.id, orgId: project.orgId, tools: TOOL_SPECS,
       runTool: (name, args) => runTool(name, args, ctx),
@@ -637,6 +641,8 @@ function describeCall(name: string, args: Record<string, unknown>): string {
     case "read_file": return `Reading${p}…`;
     case "edit_file": case "write_file": return `Editing${p}…`;
     case "search_code": return "Searching the code…";
+    case "run_command": return `Running ${typeof args.command === "string" ? `\`${args.command.slice(0, 50)}\`` : "a command"}…`;
+    case "git": return typeof args.action === "string" && args.action.includes("push") ? "Pushing to GitHub…" : "Working with git…";
     case "check_code": return "Checking the code (may install packages)…";
     case "test_in_room": return "Testing in a fake room…";
     case "run_saved_tests": return "Running the saved tests…";

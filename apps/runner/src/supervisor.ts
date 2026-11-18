@@ -30,6 +30,7 @@ import { createLogger } from "./logger.js";
 import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./sandbox.js";
 import { NOT_MODERATOR_MARK, PLATFORM_RESTART_LINE, ROOM_RIGHTS_PREFIX } from "./agent/botHealth.js";
 import { HostRunner, type HostRef, type HostRunnerOptions, type RunProject } from "./hostRunner.js";
+import { isStartCommand, startCommand } from "@kojyai/shared/projects";
 
 const log = createLogger("supervisor");
 
@@ -192,12 +193,13 @@ export class Supervisor {
       const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
       if (!project) return;
       if (project.hostId && project.hostServer) {
+        if (isStartCommand(project.entrypoint)) return this.setStatus(uuid, "error", "Start commands (run: …) only run on KojyAI's own server. Move the bot back in Settings → Where it runs.");
         this.busy.delete(uuid);
         return await this.hosts.start(project, reason);
       }
       const dir = path.join(PROJECTS_DIR, uuid);
       if (!existsSync(dir)) return this.setStatus(uuid, "error", "Project files are missing.");
-      if (!project.entrypoint) return this.setStatus(uuid, "error", "No bot entrypoint set (module.path:BotClass).");
+      if (!project.entrypoint) return this.setStatus(uuid, "error", "Nothing to start yet: set the entrypoint (module.path:BotClass) or a start command (run: python main.py).");
 
       await this.setStatus(uuid, "installing", "Installing Python packages…");
       const python = await this.ensureVenv(uuid, dir, project.id);
@@ -208,7 +210,11 @@ export class Supervisor {
       await this.setStatus(uuid, "starting", "Starting…");
       this.console(uuid, "system", `▶ Starting ${project.entrypoint}${reason ? ` (${reason})` : ""}`);
       // fd 3: the launcher's activity reports (chat, join, tip… as JSON lines).
-      const { child, kill: signal } = spawnAs(uid, python, [LAUNCHER], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] });
+      // A start command (not a Highrise bot) runs with bash -c; for a single
+      // command bash replaces itself with it, so stop/restart signal the program.
+      const { child, kill: signal } = isStartCommand(project.entrypoint)
+        ? spawnAs(uid, "/bin/bash", ["-c", startCommand(project.entrypoint)], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] })
+        : spawnAs(uid, python, [LAUNCHER], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] });
       const run: Running = { child, signal, startedAt: Date.now(), stopping: false, project: { id: project.id, orgId: project.orgId, ownerId: project.ownerId, name: project.name } };
       this.readActivity(run);
       this.tails.set(uuid, []);

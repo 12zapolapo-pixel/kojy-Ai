@@ -72,19 +72,23 @@ export class GitService {
     const req = payload as Partial<GitRequest> | undefined;
     const requestId = typeof req?.requestId === "string" && /^[0-9a-f-]{36}$/.test(req.requestId) ? req.requestId : null;
     if (!requestId || !req?.op) return;
+    const reply = await this.execute(uuid, req as GitRequest);
+    await this.redis.publish(`${RUNNER_REPLY_PREFIX}${requestId}`, JSON.stringify(reply)).catch((err: unknown) => log.warn({ err }, "Could not send a git reply"));
+  }
+
+  /** Runs one git operation (one at a time per project). Also used by Kojy's git tool. */
+  async execute(uuid: string, req: Omit<GitRequest, "requestId">): Promise<GitReply> {
     const prev = this.locks.get(uuid) ?? Promise.resolve();
     const run = prev.catch(() => undefined).then(() => this.run(uuid, req as GitRequest));
     this.locks.set(uuid, run);
-    let reply: GitReply;
     try {
-      reply = await run;
+      return await run;
     } catch (err) {
       if (!(err instanceof GitUserError)) log.warn({ err, uuid, op: req.op }, "Git command failed");
-      reply = { ok: false, message: err instanceof Error ? err.message : String(err) };
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
     } finally {
       if (this.locks.get(uuid) === run) this.locks.delete(uuid);
     }
-    await this.redis.publish(`${RUNNER_REPLY_PREFIX}${requestId}`, JSON.stringify(reply)).catch((err: unknown) => log.warn({ err }, "Could not send a git reply"));
   }
 
   private async run(uuid: string, req: GitRequest): Promise<GitReply> {

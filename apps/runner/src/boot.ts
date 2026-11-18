@@ -62,6 +62,7 @@ async function main(): Promise<void> {
   // The owner's shells and the Git panel (both run as the project's sandbox user).
   const terminals = new Terminals(db, supervisor, redis);
   const git = new GitService(db, redis);
+  agent.git = git; // Kojy's git tool
   await agent.resetStates();
   // Subscribe only once both connections are fully ready: a subscribe issued
   // while ioredis is still connecting could leave the runner deaf to start/

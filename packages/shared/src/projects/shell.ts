@@ -91,3 +91,36 @@ export function isSafeBranch(name: string): boolean {
     && !name.startsWith("-") && !name.startsWith("/") && !name.endsWith("/") && !name.endsWith(".")
     && !name.includes("..") && !name.includes("//") && !name.endsWith(".lock") && name !== "HEAD";
 }
+
+// ── start commands (any program, not only Highrise bots) ─────────────────────
+//
+// A project's entrypoint is either a Highrise bot class ("module.path:Class",
+// started by the launcher) or a start command ("run: python main.py"),
+// started with bash in the bot's folder — a Discord or Telegram bot, a
+// scheduler, any long-running program. Both get the same Run/Stop, console,
+// crash restarts, secrets and sandbox.
+
+export const START_COMMAND_PREFIX = "run:";
+const BOT_CLASS = /^[A-Za-z_][\w.]*:[A-Za-z_]\w*$/;
+
+export function isStartCommand(entrypoint: string | null | undefined): boolean {
+  return !!entrypoint && entrypoint.startsWith(START_COMMAND_PREFIX);
+}
+
+/** "run: python main.py" → "python main.py". */
+export function startCommand(entrypoint: string): string {
+  return entrypoint.slice(START_COMMAND_PREFIX.length).trim();
+}
+
+/** null when fine, otherwise what's wrong (for the owner or Kojy). */
+export function entrypointProblem(entrypoint: string): string | null {
+  const e = entrypoint.trim();
+  if (isStartCommand(e)) {
+    const cmd = startCommand(e);
+    if (!cmd) return "Write the command after run:, e.g. run: python main.py";
+    if (cmd.length > 300) return "The start command is too long (300 characters at most).";
+    if (/[\r\n\0]/.test(cmd)) return "The start command must be one line.";
+    return null;
+  }
+  return BOT_CLASS.test(e) ? null : "Use module.path:ClassName for a Highrise bot (e.g. bot:MyBot), or run: <command> for any other program (e.g. run: python main.py).";
+}

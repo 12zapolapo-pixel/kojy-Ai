@@ -31,7 +31,7 @@ import { listDatabases, describeDatabase, readTable } from "./data.js";
 import { listThread, addToThread, agentProgress, noteOwnerEdit } from "./chat.js";
 import { hostError, loadHost } from "./hosts.js";
 import { importRepo } from "./git.js";
-import { normalizeGitHubUrl, isSafeBranch } from "@kojyai/shared/projects";
+import { normalizeGitHubUrl, isSafeBranch, entrypointProblem } from "@kojyai/shared/projects";
 import { HostApiError, botHostProvider } from "@kojyai/shared/bothost";
 
 /** Undo label for the owner's own edits; one snapshot per editing session of this length. */
@@ -46,8 +46,10 @@ const RESERVED_KEYS = /^(PATH|HOME|LANG|VIRTUAL_ENV|PYTHON\w*|LD_\w+|KOJY_\w+)$/
 
 const projectId = z.object({ id: z.string().uuid() });
 const relPath = z.string().min(1).max(500);
-const entrypoint = z.string().trim().max(300)
-  .regex(/^[A-Za-z_][\w.]*:[A-Za-z_]\w*$/, "Use module.path:ClassName, e.g. highrise_bot.bot:MyBot");
+// A Highrise bot class (module.path:ClassName) or a start command for any
+// other program ("run: python main.py") — see @kojyai/shared/projects.
+const entrypoint = z.string().trim().max(310)
+  .superRefine((v, c) => { const problem = v === "" ? null : entrypointProblem(v); if (problem) c.addIssue({ code: "custom", message: problem }); });
 
 type Ctx = Parameters<typeof resolveOrgId>[0] & { db: any; user?: { id: number } | null };
 

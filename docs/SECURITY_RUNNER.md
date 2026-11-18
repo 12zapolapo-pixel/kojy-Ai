@@ -61,6 +61,16 @@ Both run on the runner **as the project's sandbox user**, like the bot:
   variable (`http.https://github.com/.extraHeader`). It never goes on a command
   line, into `.git/config`, or back to the browser.
 
+- **Kojy's `run_command`** runs the same way (the bot's sandbox user, its
+  folder and secrets), with a time limit (`timeout`, at most 180 s). Secret
+  values are replaced by `[secret]` in what the model sees. It isn't allowed in
+  automatic crash fixes, and needs the owner's approval in check-up runs. Kojy's
+  `git` tool uses the Git panel's code above, with the same limits.
+- **Start commands** (`run: <command>`): a bot can be any program, started
+  with `bash -c` as the bot's sandbox user, exactly like a Highrise bot.
+  Network egress isn't filtered (see below), so such a program can reach any
+  host, as a Highrise bot already could.
+
 ## Not covered yet
 
 These need host or orchestration changes:

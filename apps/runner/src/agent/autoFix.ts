@@ -21,7 +21,7 @@ export type AutomatedKind = "crash" | "checkup";
 export const AUTOMATED_KINDS = new Set<string>(["crash", "checkup"]);
 
 /** A check-up run can't use these until the owner approves a plan. */
-export const NEEDS_OWNER = new Set(["write_file", "edit_file", "delete_file", "bot_control", "set_entrypoint", "request_secrets", "remember", "save_test"]);
+export const NEEDS_OWNER = new Set(["write_file", "edit_file", "delete_file", "bot_control", "set_entrypoint", "request_secrets", "remember", "save_test", "run_command", "git"]);
 export const OWNER_APPROVAL_NEEDED =
   "Not allowed yet: this run was started by the daily check-up, not by the owner. " +
   "Investigate and test as much as you like, then explain the cause and call propose_plan with the fix. Once the owner approves, you can change files and restart the bot.";
@@ -33,6 +33,8 @@ const CRASH_RUN_LOCKED: Record<string, string> = {
   request_secrets: "asking for secrets",
   remember: "saving long-term notes",
   save_test: "saving tests",
+  run_command: "running shell commands",
+  git: "using git (pushing or pulling)",
 };
 
 /** Kinds of code a crash fix may not add (counted before and after the change). */
