@@ -32,14 +32,15 @@ import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
 import { chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
 import type { GitService } from "../git.js";
-import { TOOL_SPECS, runTool, loadMemories, type ToolContext, type ToolResult } from "./tools.js";
+import { TOOL_SPECS, runTool, loadMemories, loadSecrets, projectCodeFiles, discordSecrets, type ToolContext, type ToolResult } from "./tools.js";
+import { diagnoseDiscord, isDiscordSetupError, type DiscordDiagnosis } from "./discord.js";
 import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
 import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, announcesNextStep, MAX_NUDGES, NUDGE, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
 import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
-import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, crashSignature, isNetworkFailure, type AutomatedKind } from "./autoFix.js";
+import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, crashSignature, isNetworkFailure, lastException, type AutomatedKind } from "./autoFix.js";
 
 const log = createLogger("agent");
 
@@ -129,12 +130,15 @@ export class Agent {
   /** Automatic fixes being watched: the snapshot from before the fix and the crash it was for. */
   private watching = new Map<string, { snapshotId: string; signature: string; timer: NodeJS.Timeout }>();
   private again = new Set<string>();
+  /** What the owner was last told about a Discord bot's setup (so it's said once, not on every restart). */
+  private discordWarned = new Map<string, string>();
 
   /** The Git panel's operations, for Kojy's git tool (set by boot.ts). */
   git?: GitService;
 
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
     supervisor.onCrash = (uuid, streak, tail) => void this.onCrash(uuid, streak, tail);
+    supervisor.onDiscordConnected = (uuid) => void this.onDiscordConnected(uuid).catch((err) => log.warn({ err, uuid }, "Discord check failed"));
     // Daily check-ups: look every hour for bots that are due.
     const tick = () => void runCheckups(this.db, (uuid) => void this.run(uuid)).catch((err) => log.warn({ err }, "Check-ups failed"));
     setTimeout(tick, 60_000).unref();
@@ -462,6 +466,49 @@ export class Agent {
 
   // ── stabilizer ─────────────────────────────────────────────────────────────
 
+  /** Asks Discord about a Discord bot's setup; null when it isn't one (no token in its secrets). */
+  private async discordDiagnosis(project: { id: number; uuid: string }): Promise<DiscordDiagnosis | null> {
+    const { token, guildId } = discordSecrets(await loadSecrets(this.db, project.id));
+    if (!token) return null;
+    return diagnoseDiscord({ token, guildId, files: projectCodeFiles(project.uuid) });
+  }
+
+  /**
+   * Tells the owner (bot chat + notification) the Discord steps only they can
+   * do, once per set of steps — not again on every restart.
+   */
+  private async tellOwnerAboutDiscord(project: typeof botProjects.$inferSelect, ownerSteps: string[], botName: string | undefined, title: string): Promise<void> {
+    if (!ownerSteps.length) return;
+    const key = ownerSteps.join("\n");
+    if (this.discordWarned.get(project.uuid) === key) return;
+    this.discordWarned.set(project.uuid, key);
+    const steps = ownerSteps.map((s, i) => `${ownerSteps.length > 1 ? `${i + 1}. ` : ""}${s}`).join("\n");
+    // In the bot's chat too, so Kojy sees it when the owner answers "done" (not while Kojy is mid-run).
+    if (!this.active.has(project.uuid)) {
+      await this.add({ thread: `project:${project.id}`, projectId: project.id, key: project.uuid, orgId: project.orgId }, "assistant",
+        `Discord needs ${ownerSteps.length > 1 ? "a few things" : "one thing"} from you${botName ? ` for **${botName}**` : ""}:\n\n${steps}\n\nWhen it's done, say “done” here and I'll restart the bot and check it.`);
+    }
+    await notifyUser(this.db, project.ownerId, "bot_error", title, steps.slice(0, 900), `/studio/p/${project.uuid}`);
+  }
+
+  /**
+   * A Discord bot connected. It can be running and still useless: not in any
+   * server, or not in GUILD_ID (slash commands can't sync). Check, and give
+   * the owner the invite link; say so once it's sorted out.
+   */
+  private async onDiscordConnected(uuid: string): Promise<void> {
+    const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+    if (!project) return;
+    const d = await this.discordDiagnosis(project);
+    if (!d) return;
+    const serverProblem = d.ownerSteps.length > 0;
+    if (serverProblem) return this.tellOwnerAboutDiscord(project, d.ownerSteps, d.botName, `${project.name} isn't in your Discord server yet`);
+    if (this.discordWarned.delete(uuid) && d.servers?.length && !this.active.has(uuid)) {
+      await this.add({ thread: `project:${project.id}`, projectId: project.id, key: uuid, orgId: project.orgId }, "assistant",
+        `✓ ${d.botName ?? "The bot"} is connected and in ${d.servers.length} Discord server${d.servers.length === 1 ? "" : "s"} now.`, "event");
+    }
+  }
+
   private async onCrash(uuid: string, streak: number, tail: string[]): Promise<void> {
     if (this.active.has(uuid)) return;
     // Only code errors (a traceback, or code the watchdog caught frozen): a
@@ -472,6 +519,14 @@ export class Agent {
     if (!project) return;
     // A crash soon after an automatic fix: the fix didn't hold. Put the code back.
     if (await this.fixDidNotHold(uuid, project, tail)) return;
+    // A Discord setup error (intents, token): ask Discord what's wrong, so the
+    // fix is the right one, and tell the owner what only they can do.
+    const discord = isDiscordSetupError(lastException(tail)) ? await this.discordDiagnosis(project).catch(() => null) : null;
+    if (discord && !discord.ok) {
+      // Without automatic fixes nobody would make the code change: the owner is told what to ask Kojy.
+      const steps = [...discord.ownerSteps, ...(project.autoFix ? [] : discord.codeFixes.map((c) => `Open the bot's chat and ask Kojy: “${c}”`))];
+      await this.tellOwnerAboutDiscord(project, steps, discord.botName, `${project.name} can't connect to Discord`);
+    }
     if (!project.autoFix || project.desiredState !== "running") return;
     if (!configuredLanes().length) return; // no AI key of any kind
 
@@ -492,6 +547,8 @@ export class Agent {
       "Fix it now — the owner wants crashes fixed without waiting for them: find the cause in the code, make the smallest fix, check it with check_code, test_in_room and run_saved_tests, " +
       "then restart the bot with bot_control and confirm with get_logs that it's back in the room." +
       (frozen ? " It froze: the lines above show where its code was stuck. Make that code stop blocking (await asyncio.sleep instead of time.sleep, asyncio.to_thread or a timeout for slow calls, or end the endless loop)." : "") +
+      (discord ? `\n\nKojyAI asked Discord about this bot (this part comes from KojyAI, not from the bot):\n${discord.report}\n` +
+        "Follow its \"What to do\" exactly. Never add a privileged intent to fix PrivilegedIntentsRequired. If only OWNER steps are listed, don't change code: tell the owner the steps (with the links) and stop.\n" : "") +
       " Finish with one or two sentences for the owner: what was wrong and what you changed.",
       "crash");
     log.info({ uuid, streak, frozen }, "Auto-fix started");
@@ -648,6 +705,7 @@ function describeCall(name: string, args: Record<string, unknown>): string {
     case "run_saved_tests": return "Running the saved tests…";
     case "save_test": return "Saving the test…";
     case "test_secrets": return "Testing secrets…";
+    case "discord_check": return "Checking the bot with Discord…";
     case "bot_control": return `${String(args.action ?? "")} the bot…`;
     case "list_bots": return "Looking at your bots…";
     case "analytics": case "room_activity": return "Checking the numbers…";

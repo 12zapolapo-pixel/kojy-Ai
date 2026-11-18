@@ -29,6 +29,7 @@ import { ActivityRecorder, notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger } from "./logger.js";
 import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./sandbox.js";
 import { NOT_MODERATOR_MARK, PLATFORM_RESTART_LINE, ROOM_RIGHTS_PREFIX } from "./agent/botHealth.js";
+import { DISCORD_CONNECTED } from "./agent/discord.js";
 import { HostRunner, type HostRef, type HostRunnerOptions, type RunProject } from "./hostRunner.js";
 import { isStartCommand, startCommand } from "@kojyai/shared/projects";
 
@@ -108,12 +109,16 @@ export class Supervisor {
   private tails = new Map<string, string[]>();
   /** Set by the coder AI: called when a bot crashes on its own (not stopped). */
   onCrash?: (uuid: string, streak: number, tail: string[]) => void;
+  /** A Discord bot connected to Discord (once per start; see agent/discord.ts). */
+  onDiscordConnected?: (uuid: string) => void;
 
   private activity: ActivityRecorder;
   /** Crash streak at which the owner was last told, so they hear once per streak. */
   private alerted = new Map<string, number>();
   /** Bots whose owner was told the bot isn't a moderator in its room (once per runner run). */
   private rightsWarned = new Set<string>();
+  /** Bots whose Discord connection was already reported since they last started. */
+  private discordSeen = new Set<string>();
   /** Bots running on an outside bot host. */
   private hosts: HostRunner;
   private pendingTimer: NodeJS.Timeout | null = null;
@@ -606,6 +611,13 @@ export class Supervisor {
     if (stream === "stdout" || stream === "stderr") {
       const t = this.tails.get(uuid);
       if (t) { t.push(line.slice(0, 500)); if (t.length > 80) t.shift(); }
+      // Here and on a bot host alike (its lines come through here too).
+      if (!this.discordSeen.has(uuid) && DISCORD_CONNECTED.test(line)) {
+        this.discordSeen.add(uuid);
+        this.onDiscordConnected?.(uuid);
+      }
+    } else if (stream === "system" && line.startsWith("▶ Starting")) {
+      this.discordSeen.delete(uuid);
     }
     const file = path.join(LOG_DIR, `${uuid}.log`);
     try {

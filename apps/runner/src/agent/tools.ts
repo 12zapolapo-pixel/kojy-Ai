@@ -27,7 +27,8 @@ import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js
 import { queryData, roomActivity } from "./dataTools.js";
 import type { GitService } from "../git.js";
 import { VENVS_DIR } from "../supervisor.js";
-import { entrypointProblem, isStartCommand } from "@kojyai/shared/projects";
+import { entrypointProblem, isStartCommand, isPersistentData } from "@kojyai/shared/projects";
+import { diagnoseDiscord, type CodeFile } from "./discord.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -104,6 +105,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
   fn("test_secrets", "Check that secrets work: Highrise room+token (connects to Highrise), DISCORD_TOKEN (asks Discord), GUILD_ID (is the bot in that server), TELEGRAM_BOT_TOKEN, GROQ_API_KEY, OPENAI_API_KEY; others are only checked for being set — that's normal, continue the task after testing.", { names: { type: "array", items: { type: "string" } } }),
+  fn("discord_check", "For Discord bots: asks Discord itself and reads the code, then says exactly what to fix — whether the token works, which privileged intents the code asks for vs. which are switched on in the Developer Portal vs. which the code really uses, which servers the bot is in (and GUILD_ID), plus an invite link with the right permissions. Use it FIRST when a Discord bot won't connect, crashes (PrivilegedIntentsRequired, LoginFailure) or its slash commands don't show."),
   fn("set_entrypoint", "Set what starts the bot. A Highrise bot: module.path:ClassName (a class based on BaseBot). Any other long-running program (a Discord or Telegram bot, a web server, a scheduler): run: <command>, e.g. run: python main.py. Both get Run/Stop, the console, crash restarts and the secrets as environment variables.", { entrypoint: str("e.g. bot:MyBot or run: python main.py") }, ["entrypoint"]),
   fn("run_command", "Run a shell command (bash) in the bot's folder, as the bot's own sandboxed user, with its Python environment and secrets, and return the output. For things the other tools can't do: pip install/list, python -c checks, running a script once, unzipping, moving many files, inspecting the environment. It stops after timeout_seconds (default 60, at most 180). Not for starting the bot or anything that keeps running: use bot_control. Don't print secret values.",
     { command: str("e.g. pip list | grep highrise"), timeout_seconds: { type: "integer" } }, ["command"]),
@@ -202,11 +204,35 @@ function changeDiff(before: string, after: string): string {
   return lineDiff(before, after, 2, 4000)?.text ?? "";
 }
 
-async function secretsMap(ctx: ToolContext): Promise<Map<string, string>> {
-  const rows = await ctx.db.select().from(projectSecrets).where(eq(projectSecrets.projectId, ctx.project.id));
+/** A project's secrets, decrypted (one that can't be is left out). */
+export async function loadSecrets(db: Database, projectId: number): Promise<Map<string, string>> {
+  const rows = await db.select().from(projectSecrets).where(eq(projectSecrets.projectId, projectId));
   const map = new Map<string, string>();
   for (const r of rows) { try { map.set(r.key, decryptApiKey(r.valueVault)); } catch { /* reported by test_secrets */ } }
   return map;
+}
+
+function secretsMap(ctx: ToolContext): Promise<Map<string, string>> {
+  return loadSecrets(ctx.db, ctx.project.id);
+}
+
+/** The bot's Python code (not its data), for checks that read it. */
+export function projectCodeFiles(uuid: string): CodeFile[] {
+  const root = projectDir(uuid);
+  const out: CodeFile[] = [];
+  for (const f of listFiles(uuid)) {
+    if (f.isDir || !f.path.endsWith(".py") || isPersistentData(f.path) || f.size > 300_000) continue;
+    try { out.push({ path: f.path, text: readFileSync(path.join(root, f.path), "utf8") }); } catch { /* unreadable: skip */ }
+    if (out.length >= 300) break;
+  }
+  return out;
+}
+
+/** The Discord token and server id a bot's secrets hold, under the usual names. */
+export function discordSecrets(set: Map<string, string>): { token?: string; guildId?: string } {
+  const token = set.get("DISCORD_TOKEN") ?? set.get("DISCORD_BOT_TOKEN");
+  const guildId = set.get("GUILD_ID") ?? set.get("DISCORD_GUILD_ID") ?? set.get("SERVER_ID") ?? set.get("DISCORD_SERVER_ID");
+  return { ...(token ? { token } : {}), ...(guildId ? { guildId } : {}) };
 }
 
 // ── secret checks ────────────────────────────────────────────────────────────
@@ -554,9 +580,28 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           else if (/^TELEGRAM(_BOT)?_TOKEN$/.test(n)) out.push(`${n}: ${await checkTelegramToken(v)}`);
           else out.push(`${n}: set (${v.length} characters). There's no automatic check for this one; that's fine — carry on, and the bot's logs will show if it's wrong.`);
         }
-        const bad = out.filter((l) => /rejected|missing|not set|couldn't|no answer/i.test(l)).length;
+        let bad = out.filter((l) => /rejected|missing|not set|couldn't|no answer/i.test(l)).length;
+        // A Discord bot: the whole setup (intents, servers), not just the token.
+        const discord = discordSecrets(set);
+        if (discord.token && wanted.some((n) => /^(?:DISCORD(?:_BOT)?_TOKEN|(?:DISCORD_)?(?:GUILD|SERVER)_ID)$/.test(n))) {
+          const d = await diagnoseDiscord({ token: discord.token, guildId: discord.guildId, files: projectCodeFiles(uuid) });
+          out.push(`Discord check:\n${d.report}`);
+          if (!d.ok) bad++;
+        }
         const next = bad ? "\nTell the owner which one is wrong and how to fix it." : "\nNow continue the task (e.g. start the bot with bot_control and confirm with get_logs) — don't stop here.";
         return { ok: bad === 0, output: (out.join("\n") || "No secrets to test.") + next, summary: bad ? `Tested secrets: ${bad} problem${bad > 1 ? "s" : ""}` : "Tested secrets: all good" };
+      }
+
+      case "discord_check": {
+        const { token, guildId } = discordSecrets(await secretsMap(ctx));
+        if (!token) {
+          return { ok: false, output: "No DISCORD_TOKEN (or DISCORD_BOT_TOKEN) in this bot's secrets. If it's a Discord bot, call request_secrets for DISCORD_TOKEN (Discord Developer Portal → your app → Bot → Reset Token).", summary: "Discord check: no token" };
+        }
+        const d = await diagnoseDiscord({ token, guildId, files: projectCodeFiles(uuid) });
+        const n = d.codeFixes.length + d.ownerSteps.length;
+        const summary = d.ok ? `Discord check: all good${d.botName ? ` (${d.botName})` : ""}`
+          : n ? `Discord check: ${n} thing${n === 1 ? "" : "s"} to fix` : "Discord check: couldn't finish";
+        return { ok: d.ok, output: d.report, summary };
       }
 
       case "run_command": {
