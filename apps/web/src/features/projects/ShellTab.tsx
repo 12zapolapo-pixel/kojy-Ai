@@ -16,9 +16,9 @@ import { useAuthStore } from "../../state/authStore";
 type State = "connecting" | "open" | "closed";
 
 const THEME = {
-  background: "#0b0d10", foreground: "#d7dde3", cursor: "#49dcb5", cursorAccent: "#0b0d10",
-  selectionBackground: "#49dcb540", black: "#1b1f24", brightBlack: "#5c6670",
-  green: "#49dcb5", brightGreen: "#6ff0cb", cyan: "#5cc8ff", brightCyan: "#8ad8ff",
+  background: "#0F1222", foreground: "#E6E8F2", cursor: "#9DB0FF", cursorAccent: "#0F1222",
+  selectionBackground: "#3B5BFD40", black: "#1b1f24", brightBlack: "#5c6670",
+  green: "#3B5BFD", brightGreen: "#6ff0cb", cyan: "#5cc8ff", brightCyan: "#8ad8ff",
 };
 
 function socketUrl(): string {
@@ -114,18 +114,18 @@ export function ShellTab({ projectId, visible = true }: { projectId: string; vis
   const clear = () => term.current?.clear();
 
   return (
-    <div className="h-full w-full min-w-0 flex flex-col min-h-0 overflow-hidden bg-[#0b0d10]">
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/5 text-xs min-w-0">
-        <span className={state === "open" ? "w-2 h-2 rounded-full bg-[#49dcb5]" : state === "connecting" ? "w-2 h-2 rounded-full bg-amber-300 animate-pulse" : "w-2 h-2 rounded-full bg-white/25"} />
-        <span className="text-white/50">{state === "open" ? "Connected" : state === "connecting" ? "Connecting…" : "Closed"}</span>
-        <span className="text-white/25 truncate min-w-0 flex-1 max-md:hidden">Runs in this bot's folder, as its own sandboxed user. Secrets are environment variables.</span>
+    <div className="h-full w-full min-w-0 flex flex-col min-h-0 overflow-hidden bg-canvas">
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-line text-xs min-w-0">
+        <span className={state === "open" ? "w-2 h-2 rounded-full bg-co" : state === "connecting" ? "w-2 h-2 rounded-full bg-amber-300 animate-pulse" : "w-2 h-2 rounded-full bg-ink/[0.12]"} />
+        <span className="text-ink-3">{state === "open" ? "Connected" : state === "connecting" ? "Connecting…" : "Closed"}</span>
+        <span className="text-ink-3 truncate min-w-0 flex-1 max-md:hidden">Runs in this bot's folder, as its own sandboxed user. Secrets are environment variables.</span>
         <div className="ml-auto flex gap-1.5 shrink-0">
-          <button onClick={clear} className="px-2 py-0.5 border border-white/10 text-white/60 rounded hover:bg-white/5">Clear</button>
-          {state === "closed" && <button onClick={reconnect} className="px-2 py-0.5 bg-[#49dcb5] text-black font-semibold rounded hover:bg-[#49dcb5]/90">Reconnect</button>}
+          <button onClick={clear} className="px-2 py-0.5 border border-line text-ink-2 rounded hover:bg-ink/[0.04]">Clear</button>
+          {state === "closed" && <button onClick={reconnect} className="px-2 py-0.5 bg-co text-white font-semibold rounded hover:bg-co-press">Reconnect</button>}
         </div>
       </div>
-      {error && state !== "open" && <p className="px-3 py-1 text-xs text-red-400 border-b border-white/5">{error}</p>}
-      <div ref={host} className="flex-1 min-h-0 min-w-0 overflow-hidden px-2 py-1" onClick={() => term.current?.focus()} />
+      {error && state !== "open" && <p className="px-3 py-1 text-xs text-red-700 border-b border-line">{error}</p>}
+      <div ref={host} className="flex-1 min-h-0 min-w-0 overflow-hidden m-2 px-3 py-2 rounded-xl bg-ink" onClick={() => term.current?.focus()} />
     </div>
   );
 }

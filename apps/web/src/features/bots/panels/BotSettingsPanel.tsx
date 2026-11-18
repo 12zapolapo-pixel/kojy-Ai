@@ -49,49 +49,49 @@ export function BotSettingsPanel({ bot }: { bot: BotRow }) {
     },
   });
 
-  const input = "w-full bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white/80 focus:outline-none focus:border-[#49dcb5]/40";
+  const input = "w-full bg-ink/[0.03] border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-co/40";
 
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="max-w-xl space-y-6">
         <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); setSaved(false); save.mutate(); }}>
           <label className="block">
-            <span className="text-xs text-white/40">Name</span>
+            <span className="text-xs text-ink-3">Name</span>
             <input className={input} value={name} onChange={(e) => setName(e.target.value)} maxLength={150} />
           </label>
           <label className="block">
-            <span className="text-xs text-white/40">Greeting message</span>
+            <span className="text-xs text-ink-3">Greeting message</span>
             <textarea className={input} rows={2} value={greet} onChange={(e) => setGreet(e.target.value)} maxLength={2000} />
           </label>
           <label className="block">
-            <span className="text-xs text-white/40">Highrise room ID</span>
+            <span className="text-xs text-ink-3">Highrise room ID</span>
             <input className={`${input} font-mono`} value={roomId} onChange={(e) => setRoomId(e.target.value)} />
           </label>
           <label className="block">
-            <span className="text-xs text-white/40">New bot token (leave blank to keep the current one)</span>
+            <span className="text-xs text-ink-3">New bot token (leave blank to keep the current one)</span>
             <input className={`${input} font-mono`} type="password" value={newToken}
               onChange={(e) => setNewToken(e.target.value)} placeholder="••••••••" autoComplete="off" />
           </label>
           {(roomChanged || newToken.trim()) && (
-            <p className="text-[11px] text-amber-400/80">
+            <p className="text-[11px] text-amber-700">
               Highrise will be asked to confirm the token and room before anything is saved.
               Restart the bot afterwards to use them.
             </p>
           )}
-          {save.isError && <p className="text-xs text-red-400">{(save.error as any)?.message ?? "Could not save"}</p>}
-          {saved && <p className="text-xs text-[#49dcb5]">Saved.</p>}
+          {save.isError && <p className="text-xs text-red-700">{(save.error as any)?.message ?? "Could not save"}</p>}
+          {saved && <p className="text-xs text-co-ink">Saved.</p>}
           <button type="submit" disabled={save.isPending || !name.trim()}
-            className="px-4 py-2 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg hover:bg-[#49dcb5]/90 disabled:opacity-50">
+            className="px-4 py-2 bg-co text-white text-sm font-semibold rounded-lg hover:bg-co-press disabled:opacity-50">
             {save.isPending ? "Saving…" : "Save changes"}
           </button>
         </form>
 
-        <div className="border-t border-white/5 pt-5">
-          <p className="text-xs text-white/40 mb-2">Delete this bot. It stops and is removed from your dashboard.</p>
-          {remove.isError && <p className="text-xs text-red-400 mb-2">{(remove.error as any)?.message ?? "Could not delete"}</p>}
+        <div className="border-t border-line pt-5">
+          <p className="text-xs text-ink-3 mb-2">Delete this bot. It stops and is removed from your dashboard.</p>
+          {remove.isError && <p className="text-xs text-red-700 mb-2">{(remove.error as any)?.message ?? "Could not delete"}</p>}
           <button type="button" disabled={remove.isPending}
             onClick={() => { if (window.confirm(`Delete ${bot.name}? This can't be undone.`)) remove.mutate(); }}
-            className="px-4 py-2 border border-red-500/30 text-red-400 text-sm rounded-lg hover:bg-red-500/10 disabled:opacity-50">
+            className="px-4 py-2 border border-red-500/30 text-red-700 text-sm rounded-lg hover:bg-red-500/10 disabled:opacity-50">
             {remove.isPending ? "Deleting…" : "Delete bot"}
           </button>
         </div>

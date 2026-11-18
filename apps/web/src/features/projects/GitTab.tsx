@@ -9,14 +9,14 @@ import { useState } from "react";
 import clsx from "clsx";
 import { trpc, type RouterOutputs } from "../../lib/trpc";
 
-const input = "w-full bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white/80 focus:outline-none focus:border-[#49dcb5]/40";
-const primaryBtn = "px-3 py-1.5 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg hover:bg-[#49dcb5]/90 disabled:opacity-50";
-const ghostBtn = "px-3 py-1.5 border border-white/10 text-white/70 text-sm rounded-lg hover:bg-white/5 disabled:opacity-50";
-const card = "rounded-xl border border-white/5 bg-white/[0.02] p-4 space-y-3";
+const input = "w-full bg-ink/[0.03] border border-line rounded-lg px-3 py-2 text-sm text-ink focus:outline-none focus:border-co/40";
+const primaryBtn = "px-3 py-1.5 bg-co text-white text-sm font-semibold rounded-lg hover:bg-co-press disabled:opacity-50";
+const ghostBtn = "px-3 py-1.5 border border-line text-ink-2 text-sm rounded-lg hover:bg-ink/[0.04] disabled:opacity-50";
+const card = "rounded-xl border border-line bg-ink/[0.02] p-4 space-y-3";
 const TOKEN_URL = "https://github.com/settings/tokens/new?scopes=repo&description=KojyAI";
 
 const CHANGE_COLORS: Record<string, string> = {
-  new: "text-[#49dcb5]", added: "text-[#49dcb5]", modified: "text-amber-300", deleted: "text-red-400", renamed: "text-sky-300", conflict: "text-red-400",
+  new: "text-co-ink", added: "text-co-ink", modified: "text-amber-700", deleted: "text-red-700", renamed: "text-sky-700", conflict: "text-red-700",
 };
 
 function ago(ms: number): string {
@@ -47,16 +47,16 @@ export function GitTab({ projectId }: { projectId: string }) {
       <GitHubAccount connected={account.data?.connected ?? false} login={account.data?.connected ? account.data.login : null} loading={account.isLoading} />
 
       {notice && (
-        <div className={clsx("text-sm rounded-lg px-3 py-2 border flex gap-2", notice.ok ? "border-[#49dcb5]/30 text-[#49dcb5] bg-[#49dcb5]/5" : "border-red-400/30 text-red-300 bg-red-400/5")}>
+        <div className={clsx("text-sm rounded-lg px-3 py-2 border flex gap-2", notice.ok ? "border-co/30 text-co-ink bg-co/5" : "border-red-400/30 text-red-700 bg-red-400/5")}>
           <span className="flex-1">{notice.text}</span>
-          <button onClick={() => setNotice(null)} className="text-white/40 hover:text-white">×</button>
+          <button onClick={() => setNotice(null)} className="text-ink-3 hover:text-ink">×</button>
         </div>
       )}
 
-      {status.isLoading && <p className="text-sm text-white/40">Checking the repository…</p>}
+      {status.isLoading && <p className="text-sm text-ink-3">Checking the repository…</p>}
       {status.isError && (
         <div className={card}>
-          <p className="text-sm text-red-300">{status.error.message}</p>
+          <p className="text-sm text-red-700">{status.error.message}</p>
           <button className={ghostBtn} onClick={() => void status.refetch()}>Try again</button>
         </div>
       )}
@@ -80,10 +80,10 @@ function GitHubAccount({ connected, login, loading }: { connected: boolean; logi
 
   if (connected) {
     return (
-      <div className="flex items-center gap-2 text-sm text-white/60">
-        <span className="w-2 h-2 rounded-full bg-[#49dcb5]" />
-        GitHub: <a className="text-white hover:underline" href={`https://github.com/${login}`} target="_blank" rel="noreferrer">@{login}</a>
-        <button className="ml-auto text-xs text-white/40 hover:text-red-300" disabled={disconnect.isPending}
+      <div className="flex items-center gap-2 text-sm text-ink-2">
+        <span className="w-2 h-2 rounded-full bg-co" />
+        GitHub: <a className="text-ink hover:underline" href={`https://github.com/${login}`} target="_blank" rel="noreferrer">@{login}</a>
+        <button className="ml-auto text-xs text-ink-3 hover:text-red-700" disabled={disconnect.isPending}
           onClick={() => { if (window.confirm("Disconnect GitHub? Bots stay linked to their repositories, but pushing and private repos stop working until you connect again.")) disconnect.mutate(); }}>
           Disconnect
         </button>
@@ -95,15 +95,15 @@ function GitHubAccount({ connected, login, loading }: { connected: boolean; logi
     <div className={card}>
       <div className="flex items-center gap-3">
         <div className="flex-1">
-          <p className="text-sm text-white font-medium">Connect GitHub</p>
-          <p className="text-xs text-white/40">Needed to push, to use private repositories and to create new ones. Public repos can be pulled without it.</p>
+          <p className="text-sm text-ink font-medium">Connect GitHub</p>
+          <p className="text-xs text-ink-3">Needed to push, to use private repositories and to create new ones. Public repos can be pulled without it.</p>
         </div>
         {!open && <button className={primaryBtn} onClick={() => setOpen(true)}>Connect</button>}
       </div>
       {open && (
         <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); connect.mutate({ token: token.trim() }); }}>
-          <ol className="text-xs text-white/50 list-decimal pl-4 space-y-0.5">
-            <li><a className="text-[#49dcb5] hover:underline" href={TOKEN_URL} target="_blank" rel="noreferrer">Make a token on GitHub</a> with the <b>repo</b> scope (or a fine-grained token with Contents: read and write).</li>
+          <ol className="text-xs text-ink-3 list-decimal pl-4 space-y-0.5">
+            <li><a className="text-co-ink hover:underline" href={TOKEN_URL} target="_blank" rel="noreferrer">Make a token on GitHub</a> with the <b>repo</b> scope (or a fine-grained token with Contents: read and write).</li>
             <li>Paste it here. It's checked with GitHub and stored encrypted; it's never shown again.</li>
           </ol>
           <div className="flex gap-2">
@@ -111,7 +111,7 @@ function GitHubAccount({ connected, login, loading }: { connected: boolean; logi
             <button className={primaryBtn} disabled={connect.isPending || token.trim().length < 20}>{connect.isPending ? "Checking…" : "Save"}</button>
             <button type="button" className={ghostBtn} onClick={() => setOpen(false)}>Cancel</button>
           </div>
-          {connect.error && <p className="text-xs text-red-400">{connect.error.message}</p>}
+          {connect.error && <p className="text-xs text-red-700">{connect.error.message}</p>}
         </form>
       )}
     </div>
@@ -151,26 +151,26 @@ function ConnectRepo({ projectId, canCreate, hasRepo, onDone, onError }: {
   if (step) {
     return (
       <div className={card}>
-        <p className="text-sm text-white">Linked to <span className="font-mono text-white/80">{step.url.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")}</span>. Which copy should win?</p>
+        <p className="text-sm text-ink">Linked to <span className="font-mono text-ink">{step.url.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")}</span>. Which copy should win?</p>
         <div className="grid sm:grid-cols-2 gap-2">
           <button className={ghostBtn} disabled={busy} onClick={() => pull.mutateAsync({ id: projectId }).then((r) => onDone(r.message), onError)}>
-            ⬇ Use GitHub's code<span className="block text-[11px] text-white/40">Pull it into this bot (a snapshot is kept to undo)</span>
+            ⬇ Use GitHub's code<span className="block text-[11px] text-ink-3">Pull it into this bot (a snapshot is kept to undo)</span>
           </button>
           <button className={ghostBtn} disabled={busy || !canCreate} onClick={() => push.mutateAsync({ id: projectId, message: "Code from KojyAI" }).then((r) => onDone(r.message), onError)}>
-            ⬆ Use this bot's code<span className="block text-[11px] text-white/40">{canCreate ? "Commit it and push to GitHub" : "Connect GitHub first to push"}</span>
+            ⬆ Use this bot's code<span className="block text-[11px] text-ink-3">{canCreate ? "Commit it and push to GitHub" : "Connect GitHub first to push"}</span>
           </button>
         </div>
-        {busy && <p className="text-xs text-white/40">Working…</p>}
+        {busy && <p className="text-xs text-ink-3">Working…</p>}
       </div>
     );
   }
 
   return (
     <div className={card}>
-      <p className="text-sm text-white font-medium">{hasRepo ? "Link this bot's repository to GitHub" : "Put this bot on GitHub"}</p>
+      <p className="text-sm text-ink font-medium">{hasRepo ? "Link this bot's repository to GitHub" : "Put this bot on GitHub"}</p>
       <div className="flex gap-1 text-xs">
         {(["existing", "new"] as const).map((m) => (
-          <button key={m} onClick={() => setMode(m)} className={clsx("px-2.5 py-1 rounded-md", mode === m ? "bg-white/10 text-white" : "text-white/40 hover:text-white/70")}>
+          <button key={m} onClick={() => setMode(m)} className={clsx("px-2.5 py-1 rounded-md", mode === m ? "bg-ink/[0.06] text-ink" : "text-ink-3 hover:text-ink-2")}>
             {m === "existing" ? "Existing repository" : "New repository"}
           </button>
         ))}
@@ -183,32 +183,32 @@ function ConnectRepo({ projectId, canCreate, hasRepo, onDone, onError }: {
             <button className={primaryBtn} disabled={busy || !url.trim()}>Link</button>
           </form>
           {canCreate && (
-            <div className="max-h-64 overflow-y-auto rounded-lg border border-white/5 divide-y divide-white/5">
-              {repos.isLoading && <p className="p-3 text-xs text-white/40">Loading your repositories…</p>}
-              {repos.error && <p className="p-3 text-xs text-red-400">{repos.error.message}</p>}
+            <div className="max-h-64 overflow-y-auto rounded-lg border border-line divide-y divide-line">
+              {repos.isLoading && <p className="p-3 text-xs text-ink-3">Loading your repositories…</p>}
+              {repos.error && <p className="p-3 text-xs text-red-700">{repos.error.message}</p>}
               {repos.data?.map((r) => (
                 <button key={r.fullName} disabled={busy} onClick={() => void linkExisting(r.url)}
-                  className="w-full text-left px-3 py-2 hover:bg-white/5 flex items-center gap-2 text-sm">
-                  <span className="text-white/80 truncate">{r.fullName}</span>
-                  {r.private && <span className="text-[10px] px-1.5 rounded bg-white/10 text-white/50">private</span>}
-                  <span className="ml-auto text-[11px] text-white/30">{r.pushedAt ? ago(Date.parse(r.pushedAt)) : ""}</span>
+                  className="w-full text-left px-3 py-2 hover:bg-ink/[0.04] flex items-center gap-2 text-sm">
+                  <span className="text-ink truncate">{r.fullName}</span>
+                  {r.private && <span className="text-[10px] px-1.5 rounded bg-ink/[0.06] text-ink-3">private</span>}
+                  <span className="ml-auto text-[11px] text-ink-3">{r.pushedAt ? ago(Date.parse(r.pushedAt)) : ""}</span>
                 </button>
               ))}
-              {repos.data?.length === 0 && <p className="p-3 text-xs text-white/40">No repositories yet — make a new one.</p>}
+              {repos.data?.length === 0 && <p className="p-3 text-xs text-ink-3">No repositories yet — make a new one.</p>}
             </div>
           )}
         </div>
       ) : canCreate ? (
         <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); void createAndPush(); }}>
           <input className={input} placeholder="my-highrise-bot" value={name} onChange={(e) => setName(e.target.value)} />
-          <label className="flex items-center gap-2 text-sm text-white/60">
+          <label className="flex items-center gap-2 text-sm text-ink-2">
             <input type="checkbox" checked={priv} onChange={(e) => setPriv(e.target.checked)} /> Private
           </label>
           <button className={primaryBtn} disabled={busy || !/^[A-Za-z0-9._-]{1,100}$/.test(name.trim())}>{busy ? "Creating…" : "Create and push this bot"}</button>
-          <p className="text-[11px] text-white/35">Your bot's saved data (data/, *.db) and secrets are never pushed.</p>
+          <p className="text-[11px] text-ink-3">Your bot's saved data (data/, *.db) and secrets are never pushed.</p>
         </form>
       ) : (
-        <p className="text-sm text-white/50">Connect GitHub above to create a repository.</p>
+        <p className="text-sm text-ink-3">Connect GitHub above to create a repository.</p>
       )}
     </div>
   );
@@ -234,11 +234,11 @@ function Repo({ projectId, status, canPush, onDone, onError, refreshing, onRefre
     <>
       <div className={card}>
         <div className="flex flex-wrap items-center gap-2 text-sm">
-          <a className="text-white font-medium hover:underline" href={`https://github.com/${repo}`} target="_blank" rel="noreferrer">{repo}</a>
-          {status.branch && <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-white/5 text-white/60">⎇ {status.branch}</span>}
-          {status.ahead > 0 && <span className="text-xs text-amber-300">{status.ahead} to push</span>}
-          {status.behind > 0 && <span className="text-xs text-sky-300">{status.behind} to pull</span>}
-          {!status.tracking && status.commits.length > 0 && <span className="text-xs text-white/40">not pushed yet</span>}
+          <a className="text-ink font-medium hover:underline" href={`https://github.com/${repo}`} target="_blank" rel="noreferrer">{repo}</a>
+          {status.branch && <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-ink/[0.04] text-ink-2">⎇ {status.branch}</span>}
+          {status.ahead > 0 && <span className="text-xs text-amber-700">{status.ahead} to push</span>}
+          {status.behind > 0 && <span className="text-xs text-sky-700">{status.behind} to pull</span>}
+          {!status.tracking && status.commits.length > 0 && <span className="text-xs text-ink-3">not pushed yet</span>}
           <div className="ml-auto flex gap-2">
             <button className={ghostBtn} disabled={refreshing} onClick={onRefresh} title="Refresh">↻</button>
             <button className={ghostBtn} disabled={busy} onClick={() => pull.mutate({ id: projectId })}>{pull.isPending ? "Pulling…" : "⬇ Pull"}</button>
@@ -249,14 +249,14 @@ function Repo({ projectId, status, canPush, onDone, onError, refreshing, onRefre
       </div>
 
       <div className={card}>
-        <p className="text-sm text-white font-medium">Changes <span className="text-white/40 font-normal">({changes})</span></p>
-        {changes === 0 ? <p className="text-xs text-white/40">Nothing changed since the last commit.</p> : (
+        <p className="text-sm text-ink font-medium">Changes <span className="text-ink-3 font-normal">({changes})</span></p>
+        {changes === 0 ? <p className="text-xs text-ink-3">Nothing changed since the last commit.</p> : (
           <>
             <ul className="max-h-48 overflow-y-auto font-mono text-xs space-y-0.5">
               {status.changes.map((c) => (
                 <li key={c.path} className="flex gap-2">
-                  <span className={clsx("w-16 shrink-0", CHANGE_COLORS[c.status] ?? "text-white/50")}>{c.status}</span>
-                  <span className="text-white/70 truncate">{c.path}</span>
+                  <span className={clsx("w-16 shrink-0", CHANGE_COLORS[c.status] ?? "text-ink-3")}>{c.status}</span>
+                  <span className="text-ink-2 truncate">{c.path}</span>
                 </li>
               ))}
             </ul>
@@ -274,19 +274,19 @@ function Repo({ projectId, status, canPush, onDone, onError, refreshing, onRefre
       </div>
 
       <div className={card}>
-        <p className="text-sm text-white font-medium">History</p>
-        {status.commits.length === 0 ? <p className="text-xs text-white/40">No commits yet.</p> : (
+        <p className="text-sm text-ink font-medium">History</p>
+        {status.commits.length === 0 ? <p className="text-xs text-ink-3">No commits yet.</p> : (
           <ul className="space-y-1.5">
             {status.commits.map((c) => (
               <li key={c.hash} className="flex items-baseline gap-2 text-sm">
-                <a className="font-mono text-xs text-[#49dcb5]/80 hover:underline" href={`https://github.com/${repo}/commit/${c.hash}`} target="_blank" rel="noreferrer">{c.hash.slice(0, 7)}</a>
-                <span className="text-white/80 truncate flex-1">{c.subject}</span>
-                <span className="text-[11px] text-white/35 shrink-0">{c.author} · {ago(c.at)}</span>
+                <a className="font-mono text-xs text-co-ink hover:underline" href={`https://github.com/${repo}/commit/${c.hash}`} target="_blank" rel="noreferrer">{c.hash.slice(0, 7)}</a>
+                <span className="text-ink truncate flex-1">{c.subject}</span>
+                <span className="text-[11px] text-ink-3 shrink-0">{c.author} · {ago(c.at)}</span>
               </li>
             ))}
           </ul>
         )}
-        <p className="text-[11px] text-white/30">Branches, diffs, rebases and everything else: use the Shell panel (git is installed there).</p>
+        <p className="text-[11px] text-ink-3">Branches, diffs, rebases and everything else: use the Shell panel (git is installed there).</p>
       </div>
     </>
   );

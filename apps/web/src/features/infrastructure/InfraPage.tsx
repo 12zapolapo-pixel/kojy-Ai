@@ -21,14 +21,14 @@ const dur = (s: number) => (s < 3600 ? `${Math.round(s / 60)} min` : s < 172800 
 
 function Service({ name, ok, detail, hint }: { name: string; ok: boolean; detail: string; hint?: string | undefined }) {
   return (
-    <div className={clsx("rounded-xl border p-4", ok ? "border-white/8 bg-white/[0.03]" : "border-red-500/30 bg-red-500/5")}>
+    <div className={clsx("rounded-xl border p-4", ok ? "border-line bg-ink/[0.03]" : "border-red-500/30 bg-red-500/5")}>
       <div className="flex items-center gap-2">
-        <span className={clsx("w-2 h-2 rounded-full", ok ? "bg-[#49dcb5]" : "bg-red-400")} />
-        <span className="text-sm text-white/85">{name}</span>
-        <span className={clsx("ml-auto text-[11px]", ok ? "text-[#49dcb5]" : "text-red-300")}>{ok ? "OK" : "DOWN"}</span>
+        <span className={clsx("w-2 h-2 rounded-full", ok ? "bg-co" : "bg-red-400")} />
+        <span className="text-sm text-ink">{name}</span>
+        <span className={clsx("ml-auto text-[11px]", ok ? "text-co-ink" : "text-red-700")}>{ok ? "OK" : "DOWN"}</span>
       </div>
-      <p className="text-xs text-white/45 mt-2">{detail}</p>
-      {!ok && hint && <p className="text-[11px] text-red-200/70 mt-1">{hint}</p>}
+      <p className="text-xs text-ink-3 mt-2">{detail}</p>
+      {!ok && hint && <p className="text-[11px] text-red-700 mt-1">{hint}</p>}
     </div>
   );
 }
@@ -37,8 +37,8 @@ function Meter({ label, used, total, unit }: { label: string; used: number; tota
   const pct = total ? Math.min(100, Math.round((used / total) * 100)) : 0;
   return (
     <div>
-      <div className="flex justify-between text-xs text-white/50"><span>{label}</span><span>{used.toLocaleString()} / {total.toLocaleString()} {unit} ({pct}%)</span></div>
-      <div className="h-1.5 bg-white/5 rounded mt-1"><div className={clsx("h-full rounded", pct > 90 ? "bg-red-400" : pct > 75 ? "bg-amber-400" : "bg-[#49dcb5]")} style={{ width: `${pct}%` }} /></div>
+      <div className="flex justify-between text-xs text-ink-3"><span>{label}</span><span>{used.toLocaleString()} / {total.toLocaleString()} {unit} ({pct}%)</span></div>
+      <div className="h-1.5 bg-ink/[0.04] rounded mt-1"><div className={clsx("h-full rounded", pct > 90 ? "bg-red-400" : pct > 75 ? "bg-amber-400" : "bg-co")} style={{ width: `${pct}%` }} /></div>
     </div>
   );
 }
@@ -51,7 +51,7 @@ export default function InfraPage() {
     refetchInterval: 15_000,
   });
   if (isLoading) return <PageLoader message="Checking the server…" />;
-  if (isError || !data) return <p className="p-6 text-sm text-red-400">{error?.message ?? "Couldn't load status"}</p>;
+  if (isError || !data) return <p className="p-6 text-sm text-red-700">{error?.message ?? "Couldn't load status"}</p>;
 
   const runner = data.runner.heartbeat as null | { bots: number; rssMb: number; load: number[]; cpus: number; memTotalMb: number; memFreeMb: number; hostUptimeS: number; uptimeS: number; disk: { totalGb: number; freeGb: number } | null };
   const worker = data.worker.heartbeat as null | { rssMb: number; uptimeS: number };
@@ -63,9 +63,9 @@ export default function InfraPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="px-6 py-4 border-b border-white/5 bg-[#07111f]">
-        <h1 className="text-lg font-semibold text-white/90">Server status</h1>
-        <p className="text-xs text-white/35 mt-0.5">Checked {ago(data.checkedAt)} · refreshes every 15 seconds</p>
+      <div className="px-6 py-4 border-b border-line bg-canvas">
+        <h1 className="text-lg font-semibold text-ink">Server status</h1>
+        <p className="text-xs text-ink-3 mt-0.5">Checked {ago(data.checkedAt)} · refreshes every 15 seconds</p>
       </div>
       <div className="p-6 space-y-6 max-w-6xl">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -78,47 +78,47 @@ export default function InfraPage() {
         </div>
 
         {runner && (
-          <section className="bg-white/[0.02] border border-white/8 rounded-xl p-4 space-y-3">
-            <h2 className="text-sm text-white/70">Server</h2>
+          <section className="bg-ink/[0.02] border border-line rounded-xl p-4 space-y-3">
+            <h2 className="text-sm text-ink-2">Server</h2>
             <Meter label="Memory" used={runner.memTotalMb - runner.memFreeMb} total={runner.memTotalMb} unit="MB" />
             {runner.disk && <Meter label="Disk (bots volume)" used={+(runner.disk.totalGb - runner.disk.freeGb).toFixed(1)} total={runner.disk.totalGb} unit="GB" />}
-            <p className="text-xs text-white/45">CPU load {runner.load.join(" / ")} (1/5/15 min) on {runner.cpus} cores · server up {dur(runner.hostUptimeS)}</p>
+            <p className="text-xs text-ink-3">CPU load {runner.load.join(" / ")} (1/5/15 min) on {runner.cpus} cores · server up {dur(runner.hostUptimeS)}</p>
           </section>
         )}
 
         <div className="grid gap-6 lg:grid-cols-2">
-          <section className="bg-white/[0.02] border border-white/8 rounded-xl p-4 space-y-2">
-            <h2 className="text-sm text-white/70">Bots</h2>
-            <p className="text-xs text-white/55">🐍 Python: {sum(py)} total · {py.running ?? 0} running{py.crashed ? ` · ${py.crashed} crashed` : ""}{py.error ? ` · ${py.error} error` : ""}</p>
-            <p className="text-xs text-white/55">JS: {sum(js)} total · {js.online ?? 0} online{js.error ? ` · ${js.error} error` : ""}{js.suspended ? ` · ${js.suspended} suspended` : ""}</p>
-            <p className="text-xs text-white/40 pt-2">Coder AI: {data.ai.groq ? "Groq key set" : "no Groq key — set GROQ_API_KEY in .env"} · Alerts: {data.ai.alertsWebhook ? "webhook on" : "set ALERT_WEBHOOK_URL in .env to get alerts in Discord"}</p>
+          <section className="bg-ink/[0.02] border border-line rounded-xl p-4 space-y-2">
+            <h2 className="text-sm text-ink-2">Bots</h2>
+            <p className="text-xs text-ink-2">🐍 Python: {sum(py)} total · {py.running ?? 0} running{py.crashed ? ` · ${py.crashed} crashed` : ""}{py.error ? ` · ${py.error} error` : ""}</p>
+            <p className="text-xs text-ink-2">JS: {sum(js)} total · {js.online ?? 0} online{js.error ? ` · ${js.error} error` : ""}{js.suspended ? ` · ${js.suspended} suspended` : ""}</p>
+            <p className="text-xs text-ink-3 pt-2">Coder AI: {data.ai.groq ? "Groq key set" : "no Groq key — set GROQ_API_KEY in .env"} · Alerts: {data.ai.alertsWebhook ? "webhook on" : "set ALERT_WEBHOOK_URL in .env to get alerts in Discord"}</p>
           </section>
 
-          <section className={clsx("border rounded-xl p-4 space-y-2", backup && !backup.ok ? "border-red-500/30 bg-red-500/5" : backupStale ? "border-amber-500/30 bg-amber-500/5" : "border-white/8 bg-white/[0.02]")}>
-            <h2 className="text-sm text-white/70">Backups</h2>
-            {!backup && <p className="text-xs text-white/45">No backup has run since the worker started. They run daily.</p>}
+          <section className={clsx("border rounded-xl p-4 space-y-2", backup && !backup.ok ? "border-red-500/30 bg-red-500/5" : backupStale ? "border-amber-500/30 bg-amber-500/5" : "border-line bg-ink/[0.02]")}>
+            <h2 className="text-sm text-ink-2">Backups</h2>
+            {!backup && <p className="text-xs text-ink-3">No backup has run since the worker started. They run daily.</p>}
             {backup?.ok && (
               <>
-                <p className="text-xs text-white/60">Last backup {ago(backup.at)} · {((backup.size ?? 0) / 1048576).toFixed(1)} MB · {backup.entries} items, archive checked OK</p>
-                <p className="text-xs text-white/45">{backup.drill
+                <p className="text-xs text-ink-2">Last backup {ago(backup.at)} · {((backup.size ?? 0) / 1048576).toFixed(1)} MB · {backup.entries} items, archive checked OK</p>
+                <p className="text-xs text-ink-3">{backup.drill
                   ? `Restore drill passed ${ago(backup.drillAt!)}: ${backup.drill.users} users, ${backup.drill.bots} JS bots, ${backup.drill.projects} Python bots restored into a test database.`
                   : "A full restore drill runs every Sunday."}</p>
-                {backupStale && <p className="text-xs text-amber-300">The last backup is over a day and a half old — check the worker.</p>}
+                {backupStale && <p className="text-xs text-amber-700">The last backup is over a day and a half old — check the worker.</p>}
               </>
             )}
-            {backup && !backup.ok && <p className="text-xs text-red-300">Last backup FAILED {ago(backup.at)}: {backup.error}</p>}
+            {backup && !backup.ok && <p className="text-xs text-red-700">Last backup FAILED {ago(backup.at)}: {backup.error}</p>}
           </section>
         </div>
 
-        <section className="bg-white/[0.02] border border-white/8 rounded-xl p-4 overflow-x-auto">
-          <h2 className="text-sm text-white/70 mb-3">Job queues</h2>
+        <section className="bg-ink/[0.02] border border-line rounded-xl p-4 overflow-x-auto">
+          <h2 className="text-sm text-ink-2 mb-3">Job queues</h2>
           <table className="w-full text-xs">
-            <thead className="text-white/35 text-left"><tr><th className="py-1">Queue</th><th>Waiting</th><th>Running</th><th>Delayed</th><th>Failed</th><th>Done</th></tr></thead>
-            <tbody className="text-white/70">
+            <thead className="text-ink-3 text-left"><tr><th className="py-1">Queue</th><th>Waiting</th><th>Running</th><th>Delayed</th><th>Failed</th><th>Done</th></tr></thead>
+            <tbody className="text-ink-2">
               {data.queues.map((q) => (
-                <tr key={q.name} className="border-t border-white/5">
+                <tr key={q.name} className="border-t border-line">
                   <td className="py-1 font-mono">{q.name}</td><td>{q.waiting}</td><td>{q.active}</td><td>{q.delayed}</td>
-                  <td className={clsx(q.failed > 0 && "text-amber-300")}>{q.failed}</td><td className="text-white/40">{q.completed}</td>
+                  <td className={clsx(q.failed > 0 && "text-amber-700")}>{q.failed}</td><td className="text-ink-3">{q.completed}</td>
                 </tr>
               ))}
             </tbody>

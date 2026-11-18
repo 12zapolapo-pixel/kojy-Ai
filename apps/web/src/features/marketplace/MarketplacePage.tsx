@@ -54,13 +54,13 @@ export default function MarketplacePage() {
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex-shrink-0 px-6 py-4 border-b border-white/5 bg-[#07111f]">
+      <div className="flex-shrink-0 px-6 py-4 border-b border-line bg-canvas">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-lg font-semibold text-white/90">Marketplace</h1>
-            <p className="text-xs text-white/35 mt-0.5">Bot configs, personalities, plugins, and rentals</p>
+            <h1 className="text-lg font-semibold text-ink">Marketplace</h1>
+            <p className="text-xs text-ink-3 mt-0.5">Bot configs, personalities, plugins, and rentals</p>
           </div>
-          <button className="px-4 py-2 bg-[#49dcb5]/10 border border-[#49dcb5]/30 text-[#49dcb5] text-xs font-medium rounded-lg hover:bg-[#49dcb5]/20 transition-colors">
+          <button className="px-4 py-2 bg-co/10 border border-co/30 text-co-ink text-xs font-medium rounded-lg hover:bg-co/20 transition-colors">
             + Publish Item
           </button>
         </div>
@@ -71,7 +71,7 @@ export default function MarketplacePage() {
             {(Object.keys(TYPE_LABELS) as ItemType[]).map((t) => (
               <button key={t} onClick={() => setFilter(t)}
                 className={clsx("px-3 py-1 rounded-lg border text-xs transition-colors",
-                  filter === t ? "bg-[#49dcb5]/15 border-[#49dcb5]/30 text-[#49dcb5]" : "border-white/8 text-white/35 hover:text-white/60")}>
+                  filter === t ? "bg-co/15 border-co/30 text-co-ink" : "border-line text-ink-3 hover:text-ink-2")}>
                 {TYPE_LABELS[t]}
               </button>
             ))}
@@ -79,9 +79,9 @@ export default function MarketplacePage() {
 
           <div className="ml-auto flex items-center gap-2">
             <input value={searchQ} onChange={(e) => setSearchQ(e.target.value)} placeholder="Search…"
-              className="w-40 bg-white/[0.04] border border-white/8 rounded-lg px-3 py-1.5 text-xs text-white/70 placeholder:text-white/20 outline-none focus:border-[#49dcb5]/40" />
+              className="w-40 bg-ink/[0.04] border border-line rounded-lg px-3 py-1.5 text-xs text-ink-2 placeholder:text-ink-3 outline-none focus:border-co/40" />
             <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}
-              className="bg-white/[0.04] border border-white/8 rounded-lg px-3 py-1.5 text-xs text-white/60 outline-none">
+              className="bg-ink/[0.04] border border-line rounded-lg px-3 py-1.5 text-xs text-ink-2 outline-none">
               <option value="popular">Most Popular</option>
               <option value="rating">Highest Rated</option>
               <option value="price_asc">Price: Low to High</option>
@@ -93,12 +93,12 @@ export default function MarketplacePage() {
 
       {/* Grid */}
       <div className="flex-1 overflow-y-auto scrollbar-thin p-6">
-        {isLoading && <div className="flex items-center justify-center h-40"><div className="text-white/30 text-sm animate-pulse">Loading marketplace…</div></div>}
+        {isLoading && <div className="flex items-center justify-center h-40"><div className="text-ink-3 text-sm animate-pulse">Loading marketplace…</div></div>}
 
         {sorted.length === 0 && !isLoading && (
           <div className="text-center py-20">
             <span className="text-5xl">◎</span>
-            <p className="text-sm text-white/30 mt-4">No items found</p>
+            <p className="text-sm text-ink-3 mt-4">No items found</p>
           </div>
         )}
 
@@ -117,30 +117,30 @@ export default function MarketplacePage() {
 
 function MarketplaceCard({ item, onClick }: { item: any; onClick: () => void }) {
   return (
-    <div onClick={onClick} className="group cursor-pointer bg-[#0b1220] border border-white/5 rounded-xl p-4 hover:border-white/10 hover:-translate-y-0.5 transition-all">
+    <div onClick={onClick} className="group cursor-pointer bg-white border border-line rounded-xl p-4 hover:border-line hover:-translate-y-0.5 transition-all">
       {/* Type badge */}
       <div className="flex items-start justify-between mb-3">
-        <span className="text-[9px] font-mono px-2 py-0.5 bg-white/5 text-white/40 rounded uppercase">{item.type.replace("_"," ")}</span>
+        <span className="text-[9px] font-mono px-2 py-0.5 bg-ink/[0.04] text-ink-3 rounded uppercase">{item.type.replace("_"," ")}</span>
         <span className="text-lg">{TYPE_ICONS[item.type] ?? "◎"}</span>
       </div>
 
-      <h3 className="text-sm font-semibold text-white/80 mb-1">{item.title}</h3>
-      <p className="text-xs text-white/40 line-clamp-2 mb-3">{item.desc}</p>
+      <h3 className="text-sm font-semibold text-ink mb-1">{item.title}</h3>
+      <p className="text-xs text-ink-3 line-clamp-2 mb-3">{item.desc}</p>
 
       <div className="flex items-center justify-between">
         <div>
           <div className="flex items-center gap-1">
             {"★★★★★".split("").map((_, i) => (
-              <span key={i} className={clsx("text-[10px]", i < Math.floor(item.rating) ? "text-amber-400" : "text-white/15")}>★</span>
+              <span key={i} className={clsx("text-[10px]", i < Math.floor(item.rating) ? "text-amber-700" : "text-ink-3")}>★</span>
             ))}
-            <span className="text-[10px] text-white/30 ml-1">({item.purchases})</span>
+            <span className="text-[10px] text-ink-3 ml-1">({item.purchases})</span>
           </div>
-          <p className="text-[10px] text-white/25 mt-0.5">by {item.seller}</p>
+          <p className="text-[10px] text-ink-3 mt-0.5">by {item.seller}</p>
         </div>
         <div className="text-right">
           {item.price === 0
-            ? <span className="text-sm font-bold text-[#34d399]">Free</span>
-            : <span className="text-sm font-bold text-[#49dcb5]">${(item.price / 100).toFixed(0)}</span>
+            ? <span className="text-sm font-bold text-ok">Free</span>
+            : <span className="text-sm font-bold text-co-ink">${(item.price / 100).toFixed(0)}</span>
           }
         </div>
       </div>
@@ -160,27 +160,27 @@ function ItemDetailModal({ id, items, onClose }: { id: string; items: any[]; onC
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/60 z-[500]" onClick={onClose} />
-      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-[#121b31] border border-white/10 rounded-2xl p-6 z-[501] shadow-modal animate-scale-in">
+      <div className="fixed inset-0 bg-ink/40 z-[500]" onClick={onClose} />
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-white border border-line rounded-2xl p-6 z-[501] shadow-modal animate-scale-in">
         <div className="flex items-start justify-between mb-4">
           <div>
-            <span className="text-[9px] font-mono text-white/30 uppercase">{item.type.replace("_"," ")}</span>
-            <h2 className="text-base font-semibold text-white/90 mt-1">{item.title}</h2>
-            <p className="text-xs text-white/40 mt-1">by {item.seller}</p>
+            <span className="text-[9px] font-mono text-ink-3 uppercase">{item.type.replace("_"," ")}</span>
+            <h2 className="text-base font-semibold text-ink mt-1">{item.title}</h2>
+            <p className="text-xs text-ink-3 mt-1">by {item.seller}</p>
           </div>
-          <button onClick={onClose} className="text-white/30 hover:text-white/60 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/5">✕</button>
+          <button onClick={onClose} className="text-ink-3 hover:text-ink-2 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-ink/[0.04]">✕</button>
         </div>
-        <p className="text-sm text-white/60 mb-5">{item.desc}</p>
-        <div className="flex items-center justify-between border-t border-white/5 pt-4">
+        <p className="text-sm text-ink-2 mb-5">{item.desc}</p>
+        <div className="flex items-center justify-between border-t border-line pt-4">
           <div>
-            <p className="text-xl font-bold text-[#49dcb5]">{item.price === 0 ? "Free" : `$${(item.price / 100).toFixed(0)}`}</p>
+            <p className="text-xl font-bold text-co-ink">{item.price === 0 ? "Free" : `$${(item.price / 100).toFixed(0)}`}</p>
             <div className="flex items-center gap-1 mt-0.5">
-              {"★★★★★".split("").map((_, i) => <span key={i} className={clsx("text-xs", i < Math.floor(item.rating) ? "text-amber-400" : "text-white/15")}>★</span>)}
-              <span className="text-xs text-white/30">({item.purchases} sales)</span>
+              {"★★★★★".split("").map((_, i) => <span key={i} className={clsx("text-xs", i < Math.floor(item.rating) ? "text-amber-700" : "text-ink-3")}>★</span>)}
+              <span className="text-xs text-ink-3">({item.purchases} sales)</span>
             </div>
           </div>
           <button onClick={() => purchase.mutate()} disabled={purchase.isPending}
-            className="px-6 py-2.5 bg-[#49dcb5] text-black text-sm font-semibold rounded-xl hover:bg-[#49dcb5]/90 transition-colors disabled:opacity-50">
+            className="px-6 py-2.5 bg-co text-white text-sm font-semibold rounded-xl hover:bg-co-press transition-colors disabled:opacity-50">
             {purchase.isPending ? "Processing…" : item.price === 0 ? "Get Free" : `Buy — $${(item.price / 100).toFixed(0)}`}
           </button>
         </div>

@@ -48,7 +48,7 @@ export function health(models: Model[]): "green" | "amber" | "red" | "grey" {
   return ready === models.length ? "green" : "amber";
 }
 
-const DOT = { green: "bg-emerald-400", amber: "bg-amber-400", red: "bg-red-400", grey: "bg-white/30" } as const;
+const DOT = { green: "bg-emerald-400", amber: "bg-amber-400", red: "bg-red-400", grey: "bg-ink/[0.12]" } as const;
 
 /** The list itself (also used on its own for previews and tests). */
 export function AiUsageList({ data }: { data: AiUsageData }) {
@@ -60,33 +60,33 @@ export function AiUsageList({ data }: { data: AiUsageData }) {
   return (
     <div className="space-y-2">
       <div className="px-1">
-        <p className="text-white/80 text-sm font-medium">AI models Kojy uses</p>
-        <p className="text-white/40">Tried from the top; the next one takes over when one is resting or out.</p>
+        <p className="text-ink text-sm font-medium">AI models Kojy uses</p>
+        <p className="text-ink-3">Tried from the top; the next one takes over when one is resting or out.</p>
       </div>
-      {data.models.length === 0 && <p className="px-1 text-white/40">No AI models reported yet. They appear after the runner starts.</p>}
+      {data.models.length === 0 && <p className="px-1 text-ink-3">No AI models reported yet. They appear after the runner starts.</p>}
       <ul className="space-y-1">
         {data.models.map((m, i) => (
           <li key={m.id} className={clsx("rounded-lg border px-2.5 py-2",
-            m.state === "ready" ? "border-white/10" : m.state === "refused" ? "border-red-400/30" : "border-amber-400/30")}>
+            m.state === "ready" ? "border-line" : m.state === "refused" ? "border-red-400/30" : "border-amber-400/30")}>
             <div className="flex items-center gap-2">
-              <span className="text-white/30 w-4 text-right">{i + 1}</span>
-              <span className="text-white/85 font-medium truncate">{PROVIDER[m.provider] ?? m.provider} · {m.model}</span>
-              {keysOf(m.provider) && <span className="text-white/40 border border-white/10 rounded px-1">key {m.keyNo}</span>}
-              {lastUsed?.id === m.id && <span className="ml-auto text-[#49dcb5] whitespace-nowrap">last used</span>}
+              <span className="text-ink-3 w-4 text-right">{i + 1}</span>
+              <span className="text-ink font-medium truncate">{PROVIDER[m.provider] ?? m.provider} · {m.model}</span>
+              {keysOf(m.provider) && <span className="text-ink-3 border border-line rounded px-1">key {m.keyNo}</span>}
+              {lastUsed?.id === m.id && <span className="ml-auto text-co-ink whitespace-nowrap">last used</span>}
             </div>
-            <div className="pl-6 pt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-white/55">
+            <div className="pl-6 pt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-ink-2">
               <span className="flex items-center gap-1.5">
                 <span className={clsx("inline-block w-1.5 h-1.5 rounded-full", m.state === "ready" ? DOT.green : m.state === "refused" ? DOT.red : DOT.amber)} />
                 {STATE_TEXT[m.state]}{m.state !== "ready" && m.state !== "refused" ? ` · back in ${formatWait(m.restSeconds)}` : ""}
               </span>
               <span>{m.requests} {m.requests === 1 ? "request" : "requests"}</span>
               <span title={`${m.tokensIn.toLocaleString()} in · ${m.tokensOut.toLocaleString()} out`}>{formatTokens(m.tokensIn + m.tokensOut)} tokens</span>
-              {m.failures > 0 && <span className="text-amber-300/80">{m.failures} {m.failures === 1 ? "failure" : "failures"}</span>}
+              {m.failures > 0 && <span className="text-amber-700">{m.failures} {m.failures === 1 ? "failure" : "failures"}</span>}
             </div>
           </li>
         ))}
       </ul>
-      <p className="px-1 text-white/40">
+      <p className="px-1 text-ink-3">
         Today ({data.date}, UTC): {totalReq} {totalReq === 1 ? "request" : "requests"}, {formatTokens(totalTok)} tokens. Counts start again at midnight UTC.
         Providers don't say how much free quota is left, so a model shows "Out of quota" only once it has refused a request.
       </p>
@@ -118,14 +118,14 @@ export function AiUsageCircle() {
       <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-label="AI models and usage"
         title="AI models and usage"
         className={clsx("w-6 h-6 rounded-full border flex items-center justify-center transition-colors",
-          open ? "border-[#49dcb5]/60 bg-[#49dcb5]/10" : "border-white/20 hover:border-white/40")}>
+          open ? "border-co/60 bg-co/10" : "border-line-strong hover:border-[#B4BACB]")}>
         <span className={clsx("w-2.5 h-2.5 rounded-full", DOT[h])} />
       </button>
       {open && (
         <div role="dialog" aria-label="AI models and usage"
-          className="absolute right-0 top-8 z-20 w-[min(26rem,calc(100vw-2rem))] max-h-[70vh] overflow-y-auto bg-[#0d1525] border border-white/10 rounded-lg p-3 shadow-xl text-xs">
-          {usage.isLoading && <p className="text-white/40">Loading…</p>}
-          {usage.isError && <p className="text-red-400">Couldn't load the AI usage: {usage.error.message}</p>}
+          className="absolute right-0 top-8 z-20 w-[min(26rem,calc(100vw-2rem))] max-h-[70vh] overflow-y-auto bg-white border border-line rounded-lg p-3 shadow-xl text-xs">
+          {usage.isLoading && <p className="text-ink-3">Loading…</p>}
+          {usage.isError && <p className="text-red-700">Couldn't load the AI usage: {usage.error.message}</p>}
           {usage.data && <AiUsageList data={usage.data} />}
         </div>
       )}

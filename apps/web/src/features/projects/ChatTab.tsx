@@ -204,7 +204,7 @@ export function ChatTab({ project, jsBot, onPanel }: {
       <div ref={box} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3">
         {older.hasMore && (
           <div className="text-center">
-            <button onClick={() => void loadOlder()} disabled={older.loading} className="text-xs text-white/45 hover:text-white/75 disabled:opacity-50">
+            <button onClick={() => void loadOlder()} disabled={older.loading} className="text-xs text-ink-3 hover:text-ink-2 disabled:opacity-50">
               {older.loading ? "Loading…" : "↑ Load earlier messages"}
             </button>
           </div>
@@ -213,17 +213,17 @@ export function ChatTab({ project, jsBot, onPanel }: {
           <div className="max-w-xl mx-auto text-center space-y-4 pt-8">
             {project ? (
               <>
-                <p className="text-white/70">Hi! I'm Kojy, your bot's coder. Upload your bot or tell me what to build — I'll set it up, ask for any secrets it needs, test it and keep it running.</p>
-                <button onClick={() => fileInput.current?.click()} className="px-4 py-2 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg">📎 Upload my bot (.zip)</button>
+                <p className="text-ink-2">Hi! I'm Kojy, your bot's coder. Upload your bot or tell me what to build — I'll set it up, ask for any secrets it needs, test it and keep it running.</p>
+                <button onClick={() => fileInput.current?.click()} className="px-4 py-2 bg-co text-white text-sm font-semibold rounded-lg">📎 Upload my bot (.zip)</button>
               </>
             ) : jsBot ? (
-              <p className="text-white/70">Hi! I'm Kojy. {jsBot.name} is a JavaScript bot — small scripts that react to the room. I can read, change and test its scripts, or turn it into a Python bot that can do much more.</p>
+              <p className="text-ink-2">Hi! I'm Kojy. {jsBot.name} is a JavaScript bot — small scripts that react to the room. I can read, change and test its scripts, or turn it into a Python bot that can do much more.</p>
             ) : (
-              <p className="text-white/70">Hi! I'm Kojy. Ask me anything about all your bots — how they're doing, numbers, the server — or tell me to start, stop or restart them. To build or fix one bot, open it on the left (or make a new one).</p>
+              <p className="text-ink-2">Hi! I'm Kojy. Ask me anything about all your bots — how they're doing, numbers, the server — or tell me to start, stop or restart them. To build or fix one bot, open it on the left (or make a new one).</p>
             )}
             <div className="grid gap-2 sm:grid-cols-2 text-left">
               {(project ? SUGGESTIONS : jsBot ? JS_SUGGESTIONS : STUDIO_SUGGESTIONS).map((s) => (
-                <button key={s} onClick={() => void send(s)} className="text-xs text-white/60 border border-white/10 rounded-lg p-3 hover:border-[#49dcb5]/40 hover:text-white/80">{s}</button>
+                <button key={s} onClick={() => void send(s)} className="text-xs text-ink-2 border border-line rounded-lg p-3 hover:border-co/40 hover:text-ink">{s}</button>
               ))}
             </div>
           </div>
@@ -231,31 +231,34 @@ export function ChatTab({ project, jsBot, onPanel }: {
         {messages.map((m) => <Fragment key={m.id}><MessageView m={m} projectId={pid} onPanel={onPanel} onOpenBot={openBot} onDraft={draft} onResolved={(id, saved, extra) =>
           setMessages((prev) => prev.map((x) => (x.id === id && x.card ? { ...x, card: { ...x.card, ...extra, resolved: true, saved } } : x)))} /></Fragment>)}
         {working && (
-          <div className="flex items-center gap-2 text-xs text-white/50">
-            <span className="inline-block w-2 h-2 rounded-full bg-[#49dcb5] animate-pulse" />
+          <div className="flex items-center gap-2 text-xs text-ink-3">
+            <span className="inline-block w-2 h-2 rounded-full bg-co animate-pulse" />
             {state.progress ?? "Working…"}
           </div>
         )}
       </div>
 
-      <div className="border-t border-white/5 p-3 space-y-2">
-        {error && <p className="text-xs text-red-400">{error}</p>}
+      <div className="px-4 pb-4 pt-2 space-y-2">
+        {error && <p className="text-[13.5px] text-red-700">{error}</p>}
         <form className="flex gap-2 items-end" onSubmit={(e) => { e.preventDefault(); void send(text); }}>
           {project && (
             <>
               <input ref={fileInput} type="file" accept=".zip,application/zip" className="hidden"
                 onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void upload(f); }} />
-              <button type="button" title="Upload code (.zip)" disabled={uploading} onClick={() => fileInput.current?.click()}
-                className="px-3 py-2 border border-white/10 rounded-lg text-white/60 hover:bg-white/5 disabled:opacity-50">{uploading ? "…" : "📎"}</button>
+              <button type="button" title="Upload code (.zip)" aria-label="Upload code (.zip)" disabled={uploading} onClick={() => fileInput.current?.click()}
+                className="h-11 w-11 inline-flex items-center justify-center bg-white border border-line-strong rounded-[10px] text-ink-2 hover:text-ink hover:border-[#B4BACB] disabled:opacity-50">
+                {uploading ? "…" : <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 11.5 12 19.5a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9.7 17.2a1.7 1.7 0 0 1-2.4-2.4l7.6-7.6" /></svg>}
+              </button>
             </>
           )}
           <textarea ref={textArea} value={text} onChange={(e) => setText(e.target.value)} rows={Math.min(6, Math.max(1, text.split("\n").length))}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(text); } }}
             placeholder={working ? "Kojy is working — you can still add a message" : project || jsBot ? "Ask Kojy to build, fix or explain something…" : "Ask Kojy about your bots…"}
-            className="flex-1 resize-none bg-white/[0.03] border border-white/10 rounded-lg px-3 py-2 text-sm text-white/85 focus:outline-none focus:border-[#49dcb5]/40" maxLength={8000} />
+            aria-label="Message to Kojy"
+            className="flex-1 resize-none bg-white border border-line-strong rounded-2xl px-4 py-2.5 text-[15.5px] text-ink placeholder:text-ink-3 shadow-[0_8px_24px_-18px_rgba(15,18,34,0.35)] focus:outline-none focus:border-co focus:ring-[3px] focus:ring-[#E2E8FF]" maxLength={8000} />
           {working
-            ? <button type="button" onClick={stop} className="px-3 py-2 border border-red-500/30 text-red-300 text-sm rounded-lg">Stop</button>
-            : <button type="submit" disabled={!text.trim()} className="px-4 py-2 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg disabled:opacity-40">Send</button>}
+            ? <button type="button" onClick={stop} className="h-11 px-4 bg-white border border-[#F0C7C7] text-[#B42323] text-[14.5px] font-semibold rounded-[10px] hover:bg-[#FDF3F3]">Stop</button>
+            : <button type="submit" disabled={!text.trim()} className="h-11 px-5 bg-co text-white text-[14.5px] font-semibold rounded-[10px] shadow-glow-primary hover:bg-co-press disabled:opacity-40 disabled:shadow-none">Send</button>}
         </form>
       </div>
     </div>
@@ -282,15 +285,15 @@ function BuildProgress({ messages, working }: { messages: Msg[]; working: boolea
   ];
   const current = stages.findIndex((x) => !x.done);
   return (
-    <div className="px-4 py-2 border-b border-white/5 flex items-center gap-1.5 text-[11px] overflow-x-auto">
+    <div className="px-4 py-2 border-b border-line flex items-center gap-1.5 text-[11px] overflow-x-auto">
       {stages.map((st, i) => (
         <span key={st.label} className="flex items-center gap-1.5 whitespace-nowrap">
           <span className={clsx("px-2 py-0.5 rounded-full border",
-            st.done ? "border-[#49dcb5]/40 text-[#49dcb5] bg-[#49dcb5]/10"
-              : i === current && working ? "border-sky-400/40 text-sky-300 animate-pulse" : "border-white/10 text-white/35")}>
+            st.done ? "border-co/40 text-co-ink bg-co/10"
+              : i === current && working ? "border-sky-400/40 text-sky-700 animate-pulse" : "border-line text-ink-3")}>
             {st.done ? "✓ " : ""}{st.label}
           </span>
-          {i < stages.length - 1 && <span className="text-white/20">→</span>}
+          {i < stages.length - 1 && <span className="text-ink-3">→</span>}
         </span>
       ))}
     </div>
@@ -301,11 +304,11 @@ function StudioToolbar({ working, onCleared, jsBot }: { working: boolean; onClea
   const clear = trpc.studio.chatClear.useMutation({ onSuccess: onCleared });
   const clearJs = trpc.studio.jsChatClear.useMutation({ onSuccess: onCleared });
   return (
-    <div className="px-4 py-2 border-b border-white/5 flex items-center text-xs relative">
-      <span className="text-white/45">{jsBot ? `${jsBot.name} — JavaScript bot` : "Studio chat — about all your bots"}</span>
+    <div className="px-4 py-2 border-b border-line flex items-center text-xs relative">
+      <span className="text-ink-3">{jsBot ? `${jsBot.name} — JavaScript bot` : "Studio chat — about all your bots"}</span>
       <div className="ml-auto flex items-center gap-3">
         <AiUsageCircle />
-        <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending || clearJs.isPending}
+        <button className="text-ink-3 hover:text-ink disabled:opacity-40" disabled={working || clear.isPending || clearJs.isPending}
           onClick={() => {
             if (!window.confirm("Start a new chat? Kojy keeps what it learned.")) return;
             if (jsBot) clearJs.mutate({ id: jsBot.id }); else clear.mutate();
@@ -332,61 +335,61 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
   const clear = trpc.projects.chatClear.useMutation({ onSuccess: onCleared });
 
   return (
-    <div className="px-4 py-2 border-b border-white/5 flex flex-wrap items-center gap-3 text-xs relative">
-      <label className="flex items-center gap-1.5 text-white/60 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — no approval needed (up to 3 times a day). A fix that would delete files, touch the bot's data, packages or secrets, or add internet or secret access asks you first. If the bot crashes again within 15 minutes of a fix, Kojy puts the code back as it was and tells you.">
+    <div className="px-4 py-2 border-b border-line flex flex-wrap items-center gap-3 text-xs relative">
+      <label className="flex items-center gap-1.5 text-ink-2 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — no approval needed (up to 3 times a day). A fix that would delete files, touch the bot's data, packages or secrets, or add internet or secret access asks you first. If the bot crashes again within 15 minutes of a fix, Kojy puts the code back as it was and tells you.">
         <input type="checkbox" checked={autoFixOn} onChange={(e) => autoFix.mutate({ id: project.id, autoFix: e.target.checked })} />
         Auto-fix crashes
       </label>
-      <label className="flex items-center gap-1.5 text-white/60 cursor-pointer" title="Once a day Kojy looks at the bot's errors and tells you what it found. It only uses the AI when there are errors, and asks before changing anything.">
+      <label className="flex items-center gap-1.5 text-ink-2 cursor-pointer" title="Once a day Kojy looks at the bot's errors and tells you what it found. It only uses the AI when there are errors, and asks before changing anything.">
         <input type="checkbox" checked={checkupOn} onChange={(e) => checkup.mutate({ id: project.id, dailyCheckup: e.target.checked })} />
         Daily check-up
       </label>
       <div className="ml-auto flex items-center gap-2">
         <AiUsageCircle />
-        <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working} onClick={onIdeas}>💡 Ideas</button>
+        <button className="text-ink-3 hover:text-ink disabled:opacity-40" disabled={working} onClick={onIdeas}>💡 Ideas</button>
         <WorkHistoryButton projectId={project.id} />
-        <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working} onClick={() => setShowUndo((v) => !v)}>↶ Undo AI changes</button>
-        <button className="text-white/50 hover:text-white disabled:opacity-40" disabled={working || clear.isPending}
+        <button className="text-ink-3 hover:text-ink disabled:opacity-40" disabled={working} onClick={() => setShowUndo((v) => !v)}>↶ Undo AI changes</button>
+        <button className="text-ink-3 hover:text-ink disabled:opacity-40" disabled={working || clear.isPending}
           onClick={() => { if (window.confirm("Start a new chat? Kojy keeps what it learned about this bot and the work history.")) clear.mutate({ id: project.id }); }}>New chat</button>
       </div>
       {showUndo && (
-        <div className="absolute right-4 top-full mt-1 z-10 w-[26rem] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto bg-[#0d1525] border border-white/10 rounded-lg p-2 shadow-xl space-y-1"
+        <div className="absolute right-4 top-full mt-1 z-10 w-[26rem] max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto bg-white border border-line rounded-lg p-2 shadow-xl space-y-1"
           onKeyDown={(e) => { if (e.key === "Escape") setShowUndo(false); }}>
           <div className="flex items-start gap-2 px-1 pb-1">
-            <p className="flex-1 text-white/40">Put the code back to how it was before a change (your bot's data is never touched). Preview first to see what would change.</p>
-            <button onClick={() => setShowUndo(false)} title="Close" aria-label="Close" className="text-white/40 hover:text-white">✕</button>
+            <p className="flex-1 text-ink-3">Put the code back to how it was before a change (your bot's data is never touched). Preview first to see what would change.</p>
+            <button onClick={() => setShowUndo(false)} title="Close" aria-label="Close" className="text-ink-3 hover:text-ink">✕</button>
           </div>
-          {snapshots.isLoading && <p className="px-1 text-white/40">Loading…</p>}
-          {snapshots.data?.length === 0 && <p className="px-1 text-white/40">No saved versions yet.</p>}
+          {snapshots.isLoading && <p className="px-1 text-ink-3">Loading…</p>}
+          {snapshots.data?.length === 0 && <p className="px-1 text-ink-3">No saved versions yet.</p>}
           {snapshots.data?.map((s) => (
-            <div key={s.id} className="rounded hover:bg-white/[0.03]">
-              <button onClick={() => setPreview(preview === s.id ? null : s.id)} className="w-full text-left px-2 py-1.5 text-white/70">
+            <div key={s.id} className="rounded hover:bg-ink/[0.03]">
+              <button onClick={() => setPreview(preview === s.id ? null : s.id)} className="w-full text-left px-2 py-1.5 text-ink-2">
                 <span className="block truncate">{s.reason || "Saved version"}</span>
-                <span className="text-white/30">{new Date(s.createdAt).toLocaleString()} · {s.files} file{s.files === 1 ? "" : "s"} · {preview === s.id ? "hide" : "preview"}</span>
+                <span className="text-ink-3">{new Date(s.createdAt).toLocaleString()} · {s.files} file{s.files === 1 ? "" : "s"} · {preview === s.id ? "hide" : "preview"}</span>
               </button>
               {preview === s.id && (
                 <div className="px-2 pb-2 space-y-2">
-                  {diff.isLoading && <p className="text-white/40">Comparing…</p>}
-                  {diff.isError && <p className="text-red-400">{diff.error.message}</p>}
-                  {diff.data && diff.data.files.length === 0 && <p className="text-white/40">The code is the same as this version — nothing would change.</p>}
+                  {diff.isLoading && <p className="text-ink-3">Comparing…</p>}
+                  {diff.isError && <p className="text-red-700">{diff.error.message}</p>}
+                  {diff.data && diff.data.files.length === 0 && <p className="text-ink-3">The code is the same as this version — nothing would change.</p>}
                   {diff.data?.files.map((f) => (
-                    <details key={f.path} className="text-white/60">
+                    <details key={f.path} className="text-ink-2">
                       <summary className="cursor-pointer font-mono">
                         {f.change === "added" ? "＋ brings back " : f.change === "removed" ? "✕ removes " : "✎ "}{f.path}
-                        {f.change === "modified" && <span className="text-white/30"> (restoring: +{f.added} −{f.removed} lines)</span>}
+                        {f.change === "modified" && <span className="text-ink-3"> (restoring: +{f.added} −{f.removed} lines)</span>}
                       </summary>
                       {f.diff && <div className="mt-1"><DiffView diff={f.diff} /></div>}
                     </details>
                   ))}
-                  {!!diff.data?.more && <p className="text-white/30">…and {diff.data.more} more files</p>}
+                  {!!diff.data?.more && <p className="text-ink-3">…and {diff.data.more} more files</p>}
                   <button disabled={restore.isPending || (diff.data?.files.length === 0)}
                     onClick={() => { if (window.confirm(`Restore the code from ${new Date(s.createdAt).toLocaleString()}?`)) restore.mutate({ id: project.id, snapshotId: s.id }); }}
-                    className="px-3 py-1 rounded bg-[#49dcb5] text-black font-semibold disabled:opacity-40">{restore.isPending ? "Restoring…" : "Restore this version"}</button>
+                    className="px-3 py-1 rounded bg-co text-white font-semibold disabled:opacity-40">{restore.isPending ? "Restoring…" : "Restore this version"}</button>
                 </div>
               )}
             </div>
           ))}
-          {restore.isError && <p className="px-1 text-red-400">{restore.error.message}</p>}
+          {restore.isError && <p className="px-1 text-red-700">{restore.error.message}</p>}
         </div>
       )}
     </div>
@@ -405,7 +408,7 @@ function RichText({ text }: { text: string }) {
   return (
     <>
       {parts.map((p, i) => i % 2
-        ? <pre key={i} className="my-2 p-2 bg-black/40 rounded text-xs overflow-x-auto font-mono">{p.replace(/\n$/, "")}</pre>
+        ? <pre key={i} className="my-2 p-2 bg-ink/[0.04] rounded text-xs overflow-x-auto font-mono">{p.replace(/\n$/, "")}</pre>
         : <MarkdownBlocks key={i} text={p} />)}
     </>
   );
@@ -439,7 +442,7 @@ function MarkdownBlocks({ text }: { text: string }) {
       list.items.push((bullet ?? numbered)![1]!);
     } else if (heading) {
       flushPara(); flushList();
-      blocks.push(<p key={`h${blocks.length}`} className="font-semibold text-white/95">{inline(heading[1]!)}</p>);
+      blocks.push(<p key={`h${blocks.length}`} className="font-semibold text-ink">{inline(heading[1]!)}</p>);
     } else if (!line.trim()) {
       flushPara(); flushList();
     } else {
@@ -459,10 +462,10 @@ export function inline(text: string): React.ReactNode[] {
   for (let m = re.exec(text); m; m = re.exec(text)) {
     if (m.index > last) out.push(text.slice(last, m.index));
     const k = out.length;
-    if (m[1] !== undefined) out.push(<code key={k} className="px-1 rounded bg-black/40 font-mono text-[0.85em]">{m[1]}</code>);
-    else if (m[2] !== undefined) out.push(<strong key={k} className="font-semibold text-white">{m[2]}</strong>);
+    if (m[1] !== undefined) out.push(<code key={k} className="px-1 rounded bg-ink/[0.04] font-mono text-[0.85em]">{m[1]}</code>);
+    else if (m[2] !== undefined) out.push(<strong key={k} className="font-semibold text-ink">{m[2]}</strong>);
     else if (m[3] !== undefined) out.push(<em key={k}>{m[3]}</em>);
-    else out.push(<a key={k} href={m[5]} target="_blank" rel="noopener noreferrer nofollow" className="text-[#49dcb5] underline">{m[4]}</a>);
+    else out.push(<a key={k} href={m[5]} target="_blank" rel="noopener noreferrer nofollow" className="text-co-ink underline">{m[4]}</a>);
     last = m.index + m[0].length;
   }
   if (last < text.length) out.push(text.slice(last));
@@ -472,10 +475,10 @@ export function inline(text: string): React.ReactNode[] {
 /** A line diff ("@@ line N @@", " kept", "-removed", "+added") with colours. */
 export function DiffView({ diff }: { diff: string }) {
   return (
-    <pre className="max-h-80 overflow-auto bg-black/30 rounded p-2 font-mono text-[11px] leading-snug">
+    <pre className="max-h-80 overflow-auto bg-ink/[0.04] rounded p-2 font-mono text-[11px] leading-snug">
       {diff.split("\n").map((l, i) => (
         <div key={i} className={clsx("whitespace-pre-wrap break-all",
-          l.startsWith("@@") ? "text-sky-300/60 pt-1" : l.startsWith("+") ? "text-emerald-300 bg-emerald-500/10" : l.startsWith("-") ? "text-red-300 bg-red-500/10" : "text-white/45")}>
+          l.startsWith("@@") ? "text-sky-700 pt-1" : l.startsWith("+") ? "text-emerald-700 bg-emerald-500/10" : l.startsWith("-") ? "text-red-700 bg-red-500/10" : "text-ink-3")}>
           {l || " "}
         </div>
       ))}
@@ -500,15 +503,15 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot, onDraft }: 
     const c = m.card;
     return (
       <div className="text-xs space-y-1">
-        <p className="text-white/45">✓ {m.summary}</p>
+        <p className="text-ink-3">✓ {m.summary}</p>
         {c.openBot && (
-          <button onClick={() => onOpenBot(c.openBot!.kind, c.openBot!.id)} className="px-3 py-1.5 rounded-lg border border-[#49dcb5]/40 text-[#49dcb5] hover:bg-[#49dcb5]/10">
+          <button onClick={() => onOpenBot(c.openBot!.kind, c.openBot!.id)} className="px-3 py-1.5 rounded-lg border border-co/40 text-co-ink hover:bg-co/10">
             Open {c.openBot.name}'s chat →
           </button>
         )}
         {c.panel && (
           <button onClick={() => (projectId && onPanel ? onPanel(c.panel!) : navigate(PANEL_PAGE[c.panel!] ?? "/analytics"))}
-            className="px-3 py-1.5 rounded-lg border border-white/15 text-white/70 hover:bg-white/5">
+            className="px-3 py-1.5 rounded-lg border border-line-strong text-ink-2 hover:bg-ink/[0.04]">
             Show {PANEL_LABEL[c.panel] ?? c.panel} →
           </button>
         )}
@@ -517,45 +520,50 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot, onDraft }: 
   }
 
   if (m.role === "user" && m.kind === "text") {
-    return <div className="flex justify-end"><div className="max-w-[80%] bg-[#49dcb5]/10 border border-[#49dcb5]/20 rounded-2xl rounded-br-sm px-3 py-2 text-sm text-white/90"><RichText text={m.content} /></div></div>;
+    return <div className="flex justify-end"><div className="max-w-[86%] bg-co text-white rounded-2xl rounded-br-[4px] px-3.5 py-2.5 text-[15px] leading-relaxed [&_a]:text-white [&_a]:underline [&_code]:bg-white/15 [&_code]:text-white"><RichText text={m.content} /></div></div>;
   }
   if (m.kind === "checkup") {
     return (
       <div className="border border-sky-500/30 bg-sky-500/5 rounded-lg px-3 py-2 text-xs">
-        <button className="text-sky-200" onClick={() => setOpen((v) => !v)}>🩺 Daily check-up found errors — Kojy is looking into them {open ? "▾" : "▸"}</button>
-        {open && <pre className="mt-2 whitespace-pre-wrap text-sky-100/70 font-mono">{m.content}</pre>}
+        <button className="text-sky-700" onClick={() => setOpen((v) => !v)}>🩺 Daily check-up found errors — Kojy is looking into them {open ? "▾" : "▸"}</button>
+        {open && <pre className="mt-2 whitespace-pre-wrap text-sky-700 font-mono">{m.content}</pre>}
       </div>
     );
   }
   if (m.kind === "crash") {
     return (
       <div className="border border-amber-500/30 bg-amber-500/5 rounded-lg px-3 py-2 text-xs">
-        <button className="text-amber-200" onClick={() => setOpen((v) => !v)}>⚠ The bot kept crashing — Kojy is fixing it automatically {open ? "▾" : "▸"}</button>
-        {open && <pre className="mt-2 whitespace-pre-wrap text-amber-100/70 font-mono">{m.content}</pre>}
+        <button className="text-amber-700" onClick={() => setOpen((v) => !v)}>⚠ The bot kept crashing — Kojy is fixing it automatically {open ? "▾" : "▸"}</button>
+        {open && <pre className="mt-2 whitespace-pre-wrap text-amber-700 font-mono">{m.content}</pre>}
       </div>
     );
   }
   if (m.role === "user") {
     // App events ("secrets saved", "code restored"): shown small, without the AI-facing instructions.
-    return <p className="text-center text-[11px] text-white/35">{m.content.replace(/ (Test them|Restart the bot|Read it again|Files you read|Go ahead|Stop and).*$/, "")}</p>;
+    return <p className="text-center text-[11px] text-ink-3">{m.content.replace(/ (Test them|Restart the bot|Read it again|Files you read|Go ahead|Stop and).*$/, "")}</p>;
   }
   if (m.kind === "plan" && m.card && projectId) return <PlanCardView m={m} projectId={projectId} onResolved={onResolved} onDraft={onDraft} />;
   if (m.kind === "secret_request" && m.card && projectId) return <SecretCard m={m} projectId={projectId} onResolved={onResolved} />;
   if (m.role === "tool") {
     return (
       <div className="text-xs">
-        <button onClick={() => setOpen((v) => !v)} className={`text-left ${m.ok === false ? "text-amber-300/80" : "text-white/45"} hover:text-white/70`}>
-          {m.ok === false ? "✗" : "✓"} {m.summary ?? m.tool} {m.diff ? <span className="text-white/30">· {open ? "hide" : "see"} the change</span> : null} {open ? "▾" : "▸"}
+        <button onClick={() => setOpen((v) => !v)} className={`text-left ${m.ok === false ? "text-amber-700" : "text-ink-3"} hover:text-ink-2`}>
+          {m.ok === false ? "✗" : "✓"} {m.summary ?? m.tool} {m.diff ? <span className="text-ink-3">· {open ? "hide" : "see"} the change</span> : null} {open ? "▾" : "▸"}
         </button>
         {open && (m.diff
           ? <div className="mt-1 ml-4"><DiffView diff={m.diff} /></div>
-          : <pre className="mt-1 ml-4 max-h-80 overflow-auto whitespace-pre-wrap bg-black/30 rounded p-2 font-mono text-[11px] text-white/60">{m.content}</pre>)}
+          : <pre className="mt-1 ml-4 max-h-80 overflow-auto whitespace-pre-wrap bg-ink/[0.04] rounded p-2 font-mono text-[11px] text-ink-2">{m.content}</pre>)}
       </div>
     );
   }
-  if (m.kind === "error") return <p className="text-sm text-red-300/90">⚠ {m.content}</p>;
-  if (m.kind === "event") return <p className="text-xs text-white/40">{m.content}</p>;
-  return <div className="max-w-[85%] text-sm text-white/85 leading-relaxed"><RichText text={m.content} /></div>;
+  if (m.kind === "error") return <p className="text-sm text-red-700">⚠ {m.content}</p>;
+  if (m.kind === "event") return <p className="text-xs text-ink-3">{m.content}</p>;
+  return (
+    <div className="flex gap-3">
+      <span className="kj-face mt-0.5" style={{ width: 28, height: 28 }} aria-hidden="true" />
+      <div className="max-w-[88%] min-w-0 text-[15px] text-ink leading-relaxed"><RichText text={m.content} /></div>
+    </div>
+  );
 }
 
 function PlanCardView({ m, projectId, onResolved, onDraft }: {
@@ -566,26 +574,26 @@ function PlanCardView({ m, projectId, onResolved, onDraft }: {
   const reject = trpc.projects.chatRejectPlan.useMutation({ onSuccess: () => onResolved(m.id, [], { rejected: true }) });
   const busy = approve.isPending || reject.isPending;
   return (
-    <div className="max-w-lg border border-white/15 bg-white/[0.03] rounded-xl p-4 space-y-3">
-      <p className="text-sm text-white/85">📋 {card.title ?? "Plan"}</p>
-      <ol className="list-decimal list-inside space-y-1 text-sm text-white/70">
+    <div className="max-w-lg border border-line-strong bg-ink/[0.03] rounded-xl p-4 space-y-3">
+      <p className="text-sm text-ink">📋 {card.title ?? "Plan"}</p>
+      <ol className="list-decimal list-inside space-y-1 text-sm text-ink-2">
         {(card.steps ?? []).map((s, i) => <li key={i}>{s}</li>)}
       </ol>
       {card.resolved ? (
-        card.rejected ? <p className="text-xs text-white/40">✕ Declined</p> : <p className="text-xs text-[#49dcb5]">✓ Approved</p>
+        card.rejected ? <p className="text-xs text-ink-3">✕ Declined</p> : <p className="text-xs text-co-ink">✓ Approved</p>
       ) : (
         <div className="flex flex-wrap items-center gap-2">
           <button disabled={busy} onClick={() => approve.mutate({ id: projectId, messageId: m.id })}
-            className="px-4 py-1.5 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg disabled:opacity-40">{approve.isPending ? "…" : "Approve"}</button>
+            className="px-4 py-1.5 bg-co text-white text-sm font-semibold rounded-lg disabled:opacity-40">{approve.isPending ? "…" : "Approve"}</button>
           {onDraft && (
             <button disabled={busy} onClick={() => onDraft("Change the plan: ")}
-              className="px-3 py-1.5 border border-white/15 text-white/70 text-sm rounded-lg hover:bg-white/5 disabled:opacity-40">Change…</button>
+              className="px-3 py-1.5 border border-line-strong text-ink-2 text-sm rounded-lg hover:bg-ink/[0.04] disabled:opacity-40">Change…</button>
           )}
           <button disabled={busy} onClick={() => reject.mutate({ id: projectId, messageId: m.id })}
-            className="px-3 py-1.5 text-white/45 text-sm rounded-lg hover:text-red-300 disabled:opacity-40">{reject.isPending ? "…" : "Decline"}</button>
+            className="px-3 py-1.5 text-ink-3 text-sm rounded-lg hover:text-red-700 disabled:opacity-40">{reject.isPending ? "…" : "Decline"}</button>
         </div>
       )}
-      {(approve.error ?? reject.error) && <p className="text-xs text-red-400">{(approve.error ?? reject.error)!.message}</p>}
+      {(approve.error ?? reject.error) && <p className="text-xs text-red-700">{(approve.error ?? reject.error)!.message}</p>}
     </div>
   );
 }
@@ -596,24 +604,24 @@ function SecretCard({ m, projectId, onResolved }: { m: Msg; projectId: string; o
   const save = trpc.projects.chatSubmitSecrets.useMutation({ onSuccess: (r) => onResolved(m.id, r.saved) });
 
   if (card.resolved) {
-    return <p className="text-xs text-[#49dcb5]">🔒 Secrets saved: {(card.saved ?? card.secrets.map((s) => s.name)).join(", ")}</p>;
+    return <p className="text-xs text-co-ink">🔒 Secrets saved: {(card.saved ?? card.secrets.map((s) => s.name)).join(", ")}</p>;
   }
   return (
-    <form className="max-w-lg border border-[#49dcb5]/30 bg-[#49dcb5]/[0.04] rounded-xl p-4 space-y-3"
+    <form className="max-w-lg border border-co/30 bg-co/5 rounded-xl p-4 space-y-3"
       onSubmit={(e) => { e.preventDefault(); save.mutate({ id: projectId, messageId: m.id, values }); }}>
-      <p className="text-sm text-white/85">🔒 Your bot needs these secrets</p>
-      <p className="text-[11px] text-white/40">They're encrypted and handed to your bot as environment variables. Kojy never sees the values.</p>
+      <p className="text-sm text-ink">🔒 Your bot needs these secrets</p>
+      <p className="text-[11px] text-ink-3">They're encrypted and handed to your bot as environment variables. Kojy never sees the values.</p>
       {card.secrets.map((s) => (
         <label key={s.name} className="block space-y-1">
-          <span className="text-xs font-mono text-white/80">{s.name}{s.alreadySet && <span className="text-white/35 font-sans"> (already set — leave blank to keep)</span>}</span>
-          <span className="block text-[11px] text-white/45">{s.description}</span>
+          <span className="text-xs font-mono text-ink">{s.name}{s.alreadySet && <span className="text-ink-3 font-sans"> (already set — leave blank to keep)</span>}</span>
+          <span className="block text-[11px] text-ink-3">{s.description}</span>
           <input type="password" autoComplete="off" value={values[s.name] ?? ""} onChange={(e) => setValues((v) => ({ ...v, [s.name]: e.target.value }))}
-            className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-1.5 text-sm font-mono text-white/85 focus:outline-none focus:border-[#49dcb5]/40" />
+            className="w-full bg-ink/[0.04] border border-line rounded-lg px-3 py-1.5 text-sm font-mono text-ink focus:outline-none focus:border-co/40" />
         </label>
       ))}
-      {save.isError && <p className="text-xs text-red-400">{save.error.message}</p>}
+      {save.isError && <p className="text-xs text-red-700">{save.error.message}</p>}
       <button disabled={save.isPending || !Object.values(values).some((v) => v.trim())}
-        className="px-4 py-1.5 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg disabled:opacity-40">
+        className="px-4 py-1.5 bg-co text-white text-sm font-semibold rounded-lg disabled:opacity-40">
         {save.isPending ? "Saving…" : "Save secrets"}
       </button>
     </form>

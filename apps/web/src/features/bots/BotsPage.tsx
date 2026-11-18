@@ -57,30 +57,30 @@ export default function BotsPage() {
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex-shrink-0 px-6 py-4 border-b border-white/5 bg-[#07111f]">
+      <div className="flex-shrink-0 px-6 py-4 border-b border-line bg-canvas">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-lg font-semibold text-white/90">Bots</h1>
-            <p className="text-xs text-white/35 mt-0.5">
-              {stats.total} total · {stats.online} online · {stats.error > 0 && <span className="text-red-400">{stats.error} errors</span>}
+            <h1 className="text-lg font-semibold text-ink">Bots</h1>
+            <p className="text-xs text-ink-3 mt-0.5">
+              {stats.total} total · {stats.online} online · {stats.error > 0 && <span className="text-red-700">{stats.error} errors</span>}
             </p>
           </div>
           <div className="flex items-center gap-2">
             {selected.size > 0 && (
               <div className="flex items-center gap-2 mr-2">
-                <span className="text-xs text-white/40">{selected.size} selected</span>
-                <button onClick={() => setSelected(new Set())} className="text-xs text-white/30 hover:text-white/60">Clear</button>
+                <span className="text-xs text-ink-3">{selected.size} selected</span>
+                <button onClick={() => setSelected(new Set())} className="text-xs text-ink-3 hover:text-ink-2">Clear</button>
               </div>
             )}
             <button
               onClick={() => stopAllMutation.mutate()}
-              className="px-3 py-1.5 border border-red-500/20 text-red-400 text-xs rounded-lg hover:bg-red-500/10 transition-colors"
+              className="px-3 py-1.5 border border-red-500/20 text-red-700 text-xs rounded-lg hover:bg-red-500/10 transition-colors"
             >
               Stop All
             </button>
             <button
               onClick={() => setShowCreate(true)}
-              className="px-4 py-1.5 bg-[#49dcb5] text-black text-xs font-semibold rounded-lg hover:bg-[#49dcb5]/90 transition-colors"
+              className="px-4 py-1.5 bg-co text-white text-xs font-semibold rounded-lg hover:bg-co-press transition-colors"
             >
               + New Bot
             </button>
@@ -97,8 +97,8 @@ export default function BotsPage() {
                 className={clsx(
                   "px-3 py-1 rounded-lg border text-xs capitalize transition-colors",
                   filterStatus === s
-                    ? "bg-[#49dcb5]/15 border-[#49dcb5]/30 text-[#49dcb5]"
-                    : "border-white/8 text-white/35 hover:text-white/60",
+                    ? "bg-co/15 border-co/30 text-co-ink"
+                    : "border-line text-ink-3 hover:text-ink-2",
                 )}
               >
                 {s}{s !== "all" && stats[s as keyof typeof stats] != null ? ` (${stats[s as keyof typeof stats]})` : ""}
@@ -110,7 +110,7 @@ export default function BotsPage() {
               value={filterSearch}
               onChange={(e) => setFilterSearch(e.target.value)}
               placeholder="Search bots…"
-              className="w-full bg-white/[0.04] border border-white/8 rounded-lg px-3 py-1.5 text-xs text-white/70 placeholder:text-white/25 outline-none focus:border-[#49dcb5]/40 transition-colors"
+              className="w-full bg-ink/[0.04] border border-line rounded-lg px-3 py-1.5 text-xs text-ink-2 placeholder:text-ink-3 outline-none focus:border-co/40 transition-colors"
             />
           </div>
         </div>
@@ -119,7 +119,7 @@ export default function BotsPage() {
       {/* Grid */}
       <div className="flex-1 overflow-y-auto scrollbar-thin p-6">
         {error && (
-          <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-sm text-red-300 mb-4">
+          <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-sm text-red-700 mb-4">
             Failed to load bots. Please refresh.
           </div>
         )}
@@ -135,10 +135,10 @@ export default function BotsPage() {
                   onClick={(e) => { e.stopPropagation(); toggleSelect(bot.id); }}
                   className={clsx(
                     "absolute top-2 left-2 z-10 w-4 h-4 rounded border transition-all opacity-0 group-hover:opacity-100 cursor-pointer",
-                    selected.has(bot.id) ? "opacity-100 bg-[#49dcb5] border-[#49dcb5]" : "bg-white/10 border-white/20",
+                    selected.has(bot.id) ? "opacity-100 bg-co border-co" : "bg-ink/[0.06] border-line-strong",
                   )}
                 >
-                  {selected.has(bot.id) && <span className="text-black text-[9px] flex items-center justify-center h-full">✓</span>}
+                  {selected.has(bot.id) && <span className="text-white text-[9px] flex items-center justify-center h-full">✓</span>}
                 </div>
                 <BotCard botId={bot.id} />
               </div>
@@ -170,14 +170,14 @@ function CreateBotModal({ onClose, onCreated }: { onClose: () => void; onCreated
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/60 z-[500]" onClick={onClose} />
+      <div className="fixed inset-0 bg-ink/40 z-[500]" onClick={onClose} />
       <div className="fixed inset-0 flex items-center justify-center z-[501] p-4">
-        <div className="w-full max-w-md max-h-[calc(100vh-2rem)] bg-[#121b31] border border-white/10 rounded-2xl shadow-modal animate-scale-in flex flex-col">
+        <div className="w-full max-w-md max-h-[calc(100vh-2rem)] bg-white border border-line rounded-2xl shadow-modal animate-scale-in flex flex-col">
 
           {/* Header — never scrolls away */}
-          <div className="flex items-center justify-between px-6 pt-6 pb-4 flex-shrink-0 border-b border-white/5">
-            <h2 className="text-base font-semibold text-white/90">Create New Bot</h2>
-            <button onClick={onClose} className="text-white/30 hover:text-white/60 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/5">✕</button>
+          <div className="flex items-center justify-between px-6 pt-6 pb-4 flex-shrink-0 border-b border-line">
+            <h2 className="text-base font-semibold text-ink">Create New Bot</h2>
+            <button onClick={onClose} className="text-ink-3 hover:text-ink-2 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-ink/[0.04]">✕</button>
           </div>
 
           {/* Scrollable form fields */}
@@ -187,21 +187,21 @@ function CreateBotModal({ onClose, onCreated }: { onClose: () => void; onCreated
             <ModalField label="Room ID *"           value={roomId}   onChange={setRoomId}   placeholder="Your Highrise room ID" />
 
             <div>
-              <label className="text-xs text-white/40 block mb-2">Runtime Mode</label>
+              <label className="text-xs text-ink-3 block mb-2">Runtime Mode</label>
               <div className="flex gap-2">
                 {(["ai","scripted","hybrid"] as const).map((m) => (
                   <button key={m} onClick={() => setMode(m)}
                     className={clsx("flex-1 py-2 rounded-lg border text-xs capitalize transition-colors",
-                      mode === m ? "bg-[#49dcb5]/15 border-[#49dcb5]/30 text-[#49dcb5]" : "border-white/8 text-white/35 hover:text-white/60")}
+                      mode === m ? "bg-co/15 border-co/30 text-co-ink" : "border-line text-ink-3 hover:text-ink-2")}
                   >{m}</button>
                 ))}
               </div>
             </div>
 
             <div>
-              <label className="text-xs text-white/40 block mb-2">Language</label>
+              <label className="text-xs text-ink-3 block mb-2">Language</label>
               <select value={language} onChange={(e) => setLanguage(e.target.value)}
-                className="w-full bg-white/[0.04] border border-white/8 rounded-lg px-3 py-2 text-xs text-white/70 outline-none focus:border-[#49dcb5]/40">
+                className="w-full bg-ink/[0.04] border border-line rounded-lg px-3 py-2 text-xs text-ink-2 outline-none focus:border-co/40">
                 <option value="en">English</option>
                 <option value="es">Spanish</option>
                 <option value="fr">French</option>
@@ -212,18 +212,18 @@ function CreateBotModal({ onClose, onCreated }: { onClose: () => void; onCreated
             </div>
 
             {mutation.isError && (
-              <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-300">
+              <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-xs text-red-700">
                 {(mutation.error as any)?.message ?? "Failed to create bot"}
               </div>
             )}
           </div>
 
           {/* Submit — always pinned at bottom, never scrolls off-screen */}
-          <div className="px-6 pb-6 pt-3 flex-shrink-0 border-t border-white/5">
+          <div className="px-6 pb-6 pt-3 flex-shrink-0 border-t border-line">
             <button
               onClick={() => mutation.mutate()}
               disabled={mutation.isPending || !name || !apiKey || !roomId}
-              className="w-full py-2.5 bg-[#49dcb5] text-black text-sm font-semibold rounded-lg hover:bg-[#49dcb5]/90 transition-colors disabled:opacity-50"
+              className="w-full py-2.5 bg-co text-white text-sm font-semibold rounded-lg hover:bg-co-press transition-colors disabled:opacity-50"
             >
               {mutation.isPending ? "Creating…" : "Create Bot"}
             </button>
@@ -239,9 +239,9 @@ function ModalField({ label, value, onChange, placeholder, type = "text" }: {
 }) {
   return (
     <div>
-      <label className="text-xs text-white/40 block mb-1.5">{label}</label>
+      <label className="text-xs text-ink-3 block mb-1.5">{label}</label>
       <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
-        className="w-full bg-white/[0.04] border border-white/8 rounded-lg px-3 py-2.5 text-sm text-white/80 placeholder:text-white/20 outline-none focus:border-[#49dcb5]/40 transition-colors" />
+        className="w-full bg-ink/[0.04] border border-line rounded-lg px-3 py-2.5 text-sm text-ink placeholder:text-ink-3 outline-none focus:border-co/40 transition-colors" />
     </div>
   );
 }
@@ -250,9 +250,9 @@ function EmptyBotsState({ onCreate }: { onCreate: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-20 text-center">
       <span className="text-6xl mb-4">🤖</span>
-      <h2 className="text-xl font-semibold text-white/70">No bots yet</h2>
-      <p className="text-sm text-white/35 mt-2 max-w-sm">Deploy your first AI bot to start your civilization. Each bot lives in a Highrise room and interacts with real users.</p>
-      <button onClick={onCreate} className="mt-6 px-6 py-3 bg-[#49dcb5] text-black font-semibold rounded-lg hover:bg-[#49dcb5]/90 transition-colors">
+      <h2 className="text-xl font-semibold text-ink-2">No bots yet</h2>
+      <p className="text-sm text-ink-3 mt-2 max-w-sm">Deploy your first AI bot to start your civilization. Each bot lives in a Highrise room and interacts with real users.</p>
+      <button onClick={onCreate} className="mt-6 px-6 py-3 bg-co text-white font-semibold rounded-lg hover:bg-co-press transition-colors">
         Create First Bot
       </button>
     </div>
