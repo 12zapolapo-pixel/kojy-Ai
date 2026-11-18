@@ -39,6 +39,7 @@ import { composerRouter }     from "./modules/composer/router.js";
 import { gdprRouter }         from "./modules/gdpr/router.js";
 import { projectsRouter }     from "./modules/projects/router.js";
 import { botHostsRouter }     from "./modules/projects/hosts.js";
+import { gitRouter, githubRouter } from "./modules/projects/git.js";
 import { systemRouter }       from "./modules/system/router.js";
 import { studioRouter }       from "./modules/studio/router.js";
 
@@ -47,6 +48,8 @@ export const appRouter = router({
   bots:         botsRouter,
   projects:     projectsRouter,
   botHosts:     botHostsRouter,
+  git:          gitRouter,
+  github:       githubRouter,
   system:       systemRouter,
   studio:       studioRouter,
   rooms:        roomsRouter,

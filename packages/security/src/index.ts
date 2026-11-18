@@ -164,6 +164,12 @@ export const RATE_LIMITS = {
   PROJECT_ZIP:    { windowMs: 60_000,      maxHits: 6,     keyPrefix: "rl:project:zip" },
   // Connecting a bot host sends the key to the host: not a way to try many keys.
   BOT_HOST:       { windowMs: 3_600_000,   maxHits: 10,    keyPrefix: "rl:bothost:connect" },
+  // Connecting GitHub sends the token to GitHub: the same reasoning.
+  GIT_CONNECT:    { windowMs: 3_600_000,   maxHits: 10,    keyPrefix: "rl:git:connect" },
+  // Opening a shell starts a process on the runner.
+  TERMINAL_OPEN:  { windowMs: 60_000,      maxHits: 10,    keyPrefix: "rl:terminal:open" },
+  // Pull / push / import go to GitHub.
+  GIT_REMOTE:     { windowMs: 60_000,      maxHits: 20,    keyPrefix: "rl:git:remote" },
 } as const;
 
 // ─── SKILL #79: Toxicity Filter ──────────────────────────────────────────────

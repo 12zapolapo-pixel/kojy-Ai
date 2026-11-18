@@ -18,14 +18,16 @@ import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
 import { ChatTab } from "../projects/ChatTab";
 import { Header, CodeTab, ConsoleTab, SecretsTab, SettingsTab } from "../projects/ProjectPage";
 import { DataTab } from "../projects/DataTab";
+import { ShellTab } from "../projects/ShellTab";
+import { GitTab } from "../projects/GitTab";
 import { StatusBadge } from "../projects/StatusBadge";
 import { NewBot } from "./NewBot";
 
 type BotItem = RouterOutputs["studio"]["bots"][number];
-type Panel = "console" | "code" | "data" | "secrets" | "settings";
+type Panel = "console" | "code" | "shell" | "git" | "data" | "secrets" | "settings";
 const PANELS: { id: Panel; label: string }[] = [
-  { id: "console", label: "Console" }, { id: "code", label: "Code" }, { id: "data", label: "Data" },
-  { id: "secrets", label: "Secrets" }, { id: "settings", label: "Settings" },
+  { id: "console", label: "Console" }, { id: "code", label: "Code" }, { id: "shell", label: "Shell" }, { id: "git", label: "Git" },
+  { id: "data", label: "Data" }, { id: "secrets", label: "Secrets" }, { id: "settings", label: "Settings" },
 ];
 
 export default function StudioPage() {
@@ -95,7 +97,7 @@ function Split({ chat, panel, panelTabs, active, chatFocus }: {
         ))}
       </div>
       <section className={clsx("min-h-0 flex-1 lg:max-w-[52%] lg:border-r border-white/5", mobileView !== "chat" && "max-lg:hidden")}>{chat}</section>
-      <section className={clsx("min-h-0 flex-1 flex flex-col", mobileView !== "panel" && "max-lg:hidden")}>
+      <section className={clsx("min-h-0 min-w-0 flex-1 flex flex-col", mobileView !== "panel" && "max-lg:hidden")}>
         {panelTabs}
         <div className="flex-1 min-h-0">{panel}</div>
       </section>
@@ -109,6 +111,10 @@ function PythonBot({ id }: { id: string }) {
   const navigate = useNavigate();
   const project = trpc.projects.get.useQuery({ id }, { refetchInterval: 4000 });
   const [panel, setPanel] = useState<Panel>("console");
+  // The shell stays open (hidden) while other panels are shown, once opened.
+  const [shellOpened, setShellOpened] = useState(false);
+  useEffect(() => { if (panel === "shell") setShellOpened(true); }, [panel]);
+  useEffect(() => { setShellOpened(false); }, [id]);
   const [kojyPanel, setKojyPanel] = useState<string | undefined>();
   const [chatFocus, setChatFocus] = useState<number | undefined>();
 
@@ -148,11 +154,20 @@ function PythonBot({ id }: { id: string }) {
           </div>
         }
         panel={
-          panel === "console" ? <ConsoleTab key={`c-${p.id}`} project={p} onAskKojy={askKojy} />
-          : panel === "code" ? <CodeTab key={`k-${p.id}`} project={p} />
-          : panel === "data" ? <DataTab key={`d-${p.id}`} projectId={p.id} />
-          : panel === "secrets" ? <SecretsTab key={`s-${p.id}`} project={p} />
-          : <SettingsTab key={`t-${p.id}`} project={p} />
+          <>
+            {(shellOpened || panel === "shell") && (
+              <div className={clsx("h-full min-w-0", panel !== "shell" && "hidden")}>
+                <ShellTab key={`sh-${p.id}`} projectId={p.id} visible={panel === "shell"} />
+              </div>
+            )}
+            {panel === "console" ? <ConsoleTab key={`c-${p.id}`} project={p} onAskKojy={askKojy} />
+            : panel === "code" ? <CodeTab key={`k-${p.id}`} project={p} />
+            : panel === "git" ? <GitTab key={`g-${p.id}`} projectId={p.id} />
+            : panel === "data" ? <DataTab key={`d-${p.id}`} projectId={p.id} />
+            : panel === "secrets" ? <SecretsTab key={`s-${p.id}`} project={p} />
+            : panel === "settings" ? <SettingsTab key={`t-${p.id}`} project={p} />
+            : null}
+          </>
         }
       />
     </>

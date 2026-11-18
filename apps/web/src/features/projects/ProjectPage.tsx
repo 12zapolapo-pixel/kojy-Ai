@@ -470,14 +470,14 @@ export function SettingsTab({ project }: { project: Project }) {
             <input className={input} value={name} onChange={(e) => setName(e.target.value)} maxLength={150} />
           </label>
           <label className="block">
-            <span className="text-xs text-white/40">Bot entrypoint — <span className="font-mono">module.path:ClassName</span>, the same thing you'd pass to <span className="font-mono">python -m highrise</span></span>
+            <span className="text-xs text-white/40">What starts it — a Highrise bot: <span className="font-mono">module.path:ClassName</span> (what you'd pass to <span className="font-mono">python -m highrise</span>). Any other program (Discord, Telegram, a web server…): <span className="font-mono">run: python main.py</span></span>
             <div className="flex gap-2">
               <input className={`${input} font-mono`} value={entry} onChange={(e) => setEntry(e.target.value)} placeholder="highrise_bot.bot:MyBot" />
               <button type="button" className={ghostBtn}
                 onClick={async () => { const r = await detect.refetch(); if (r.data?.entrypoint) setEntry(r.data.entrypoint); }}>Detect</button>
             </div>
           </label>
-          {detect.data && !detect.data.entrypoint && <p className="text-xs text-amber-300/80">No class based on BaseBot was found.</p>}
+          {detect.data && !detect.data.entrypoint && <p className="text-xs text-amber-300/80">No class based on BaseBot was found. For a program that isn't a Highrise bot, use a start command like <span className="font-mono">run: python main.py</span>.</p>}
           {update.isError && <p className="text-xs text-red-400">{update.error.message}</p>}
           {update.isSuccess && <p className="text-xs text-[#49dcb5]">Saved. Restart the bot to use a new entrypoint.</p>}
           <button className={primaryBtn} disabled={update.isPending || !name.trim()}>{update.isPending ? "Saving…" : "Save"}</button>

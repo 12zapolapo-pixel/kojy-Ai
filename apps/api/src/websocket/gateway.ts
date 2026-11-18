@@ -217,7 +217,7 @@ const ALLOWED_WS_ORIGINS = new Set(
   [process.env.FRONTEND_URL ?? "http://localhost:5173", ...((process.env.WS_EXTRA_ALLOWED_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean))],
 );
 
-function isAllowedOrigin(origin: string | undefined): boolean {
+export function isAllowedOrigin(origin: string | undefined): boolean {
   // No Origin header at all means this isn't a browser request (browsers
   // always send Origin on a WS upgrade) — e.g. a server-to-server client
   // using the Bearer-token message-auth path, which isn't subject to CSWSH
@@ -230,9 +230,12 @@ function isAllowedOrigin(origin: string | undefined): boolean {
 
 // ─── Gateway Init ─────────────────────────────────────────────────────────────
 
-export function initWebSocketGateway(server: HttpServer): void {
+export function initWebSocketGateway(_server: HttpServer): WebSocketServer {
+  // noServer: boot.ts routes upgrades by path (/ws here, /ws/terminal to the
+  // shell). Two servers attached to one HTTP server would each reject the
+  // other's path with a 400.
   const wss = new WebSocketServer({
-    server,
+    noServer: true,
     path: "/ws",
     maxPayload: LIMITS.WS_MAX_MESSAGE_BYTES,
   });
@@ -303,6 +306,7 @@ export function initWebSocketGateway(server: HttpServer): void {
   }, LIMITS.PING_INTERVAL_MS);
 
   log.info("WebSocket gateway ready on /ws");
+  return wss;
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -319,7 +323,7 @@ export function initWebSocketGateway(server: HttpServer): void {
  * handleClose could only ever clear the most recent one. Verification and
  * completion are now separate.
  */
-async function verifySession(sessionId: string): Promise<number> {
+export async function verifySession(sessionId: string): Promise<number> {
   if (typeof sessionId !== "string" || sessionId.length === 0) throw new Error("Invalid session");
 
   const [session] = await db
@@ -344,6 +348,16 @@ async function verifySession(sessionId: string): Promise<number> {
   if (!user) throw new Error("User not found or suspended");
 
   return session.userId;
+}
+
+/** The session id inside a WS auth token (a signed JWT, or the raw session id). */
+export async function sessionIdFromToken(token: string): Promise<string> {
+  try {
+    const secret = new TextEncoder().encode(process.env.JWT_SECRET);
+    const { payload } = await jwtVerify(token, secret);
+    if (typeof payload["sessionId"] === "string" && payload["sessionId"]) return payload["sessionId"];
+  } catch { /* not a JWT */ }
+  return token;
 }
 
 async function authenticateByToken(

@@ -25,6 +25,9 @@ import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
 import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js";
 import { queryData, roomActivity } from "./dataTools.js";
+import type { GitService } from "../git.js";
+import { VENVS_DIR } from "../supervisor.js";
+import { entrypointProblem, isStartCommand } from "@kojyai/shared/projects";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -37,6 +40,8 @@ export interface ToolContext {
   changedFiles: Set<string>;
   /** What this run is for, as the undo label ("Before Kojy: add a !dance command"). */
   label?: string;
+  /** The Git panel's operations (run as the bot's sandbox user). */
+  git?: GitService | undefined;
 }
 
 export interface ToolResult {
@@ -99,15 +104,19 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
   fn("test_secrets", "Check that secrets work: Highrise room+token (connects to Highrise), GROQ_API_KEY, OPENAI_API_KEY; others are only checked for being set.", { names: { type: "array", items: { type: "string" } } }),
-  fn("set_entrypoint", "Set which class starts the bot, as module.path:ClassName (a class based on BaseBot).", { entrypoint: str("e.g. bot:MyBot") }, ["entrypoint"]),
+  fn("set_entrypoint", "Set what starts the bot. A Highrise bot: module.path:ClassName (a class based on BaseBot). Any other long-running program (a Discord or Telegram bot, a web server, a scheduler): run: <command>, e.g. run: python main.py. Both get Run/Stop, the console, crash restarts and the secrets as environment variables.", { entrypoint: str("e.g. bot:MyBot or run: python main.py") }, ["entrypoint"]),
+  fn("run_command", "Run a shell command (bash) in the bot's folder, as the bot's own sandboxed user, with its Python environment and secrets, and return the output. For things the other tools can't do: pip install/list, python -c checks, running a script once, unzipping, moving many files, inspecting the environment. It stops after timeout_seconds (default 60, at most 180). Not for starting the bot or anything that keeps running: use bot_control. Don't print secret values.",
+    { command: str("e.g. pip list | grep highrise"), timeout_seconds: { type: "integer" } }, ["command"]),
+  fn("git", "The bot's GitHub repository (only once the owner linked one in the Git panel): status (branch, changed files, recent commits), commit (all changes, needs message), push, commit_and_push, pull (GitHub's latest; a snapshot is kept to undo). Push only when the owner asked for it or agreed.",
+    { action: { type: "string", enum: ["status", "commit", "push", "commit_and_push", "pull"] }, message: str("commit message, for commit/commit_and_push") }, ["action"]),
   fn("bot_control", "Start, stop or restart the real bot (restart makes code changes live).", { action: { type: "string", enum: ["start", "stop", "restart"] } }, ["action"]),
   fn("get_logs", "Whether the real bot is in the room right now, what happened to its connection in the last day (KojyAI restarts, Highrise reconnects, the bot exiting), and its newest console lines (errors, tracebacks). Call it first when the owner says the bot disconnected, left or isn't answering.", { lines: { type: "integer", description: "console lines to show, newest last (default 40)" } }),
   fn("propose_plan", "Before a bigger change (a new feature, several files, a rewrite), show the owner a short plan with Approve/Change buttons, then stop and wait. Not for small fixes or questions.",
     { title: str("what you'll build, a few words"), steps: { type: "array", items: { type: "string" }, description: "3-7 short steps in plain words" } }, ["title", "steps"]),
   fn("find_emotes", "Search the list of emote ids that work in Highrise (checked in a real room) by name or id, e.g. 'dance', 'wave'. Use these ids in code; never guess emote ids.",
     { query: str("word to search, or empty for a sample") }),
-  fn("open_panel", "Show the owner a panel next to the chat: console (logs), code, data (the bot's database), secrets or settings.",
-    { panel: { type: "string", enum: ["console", "code", "data", "secrets", "settings"] } }, ["panel"]),
+  fn("open_panel", "Show the owner a panel next to the chat: console (logs), code, shell (a terminal), git (GitHub), data (the bot's database), secrets or settings.",
+    { panel: { type: "string", enum: ["console", "code", "shell", "git", "data", "secrets", "settings"] } }, ["panel"]),
   fn("query_data", "Read the bot's own saved data (its SQLite database, read-only). Without sql: lists the databases, tables, columns and row counts (and any JSON data files). With sql: runs ONE SELECT and returns up to 50 rows. Use it to answer questions about players, coins, scores, warnings, or to check a data bug.",
     { sql: str("one SELECT, e.g. SELECT name, coins FROM players ORDER BY coins DESC LIMIT 10"), db: str("database path if the bot has several, e.g. data/bot.db") }),
   fn("room_activity", "This bot's room activity: chats, whispers, replies, joins, different visitors, tips (and gold), emotes, crashes, most used commands, top tippers.",
@@ -373,6 +382,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           if (compile.code !== 0) return { ok: false, output: clip(`Syntax errors:\n${compile.out}`), summary: "Code check: syntax errors" };
           const entry = ctx.project.entrypoint;
           if (!entry) return { ok: true, output: "All files compile. No entrypoint set yet (use set_entrypoint).", summary: "Code check: compiles (no entrypoint yet)" };
+          if (isStartCommand(entry)) return { ok: true, output: `All files compile. The bot starts with a command (${entry}), so there's no Highrise class to load; run it once with run_command to test it.`, summary: "Code check: compiles" };
           const imp = await runCapture(uid, python, [BOTCHECK, entry], work, env, 60_000);
           if (!imp.out.includes("IMPORT_OK")) return { ok: false, output: clip(`Importing ${entry} failed:\n${imp.out}`), summary: "Code check: the bot fails to load" };
           const hidden = hiddenMethods(imp.out);
@@ -390,6 +400,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       case "test_in_room": {
+        if (isStartCommand(ctx.project.entrypoint)) return { ok: false, output: "This bot isn't a Highrise bot (it starts with a command), so the fake Highrise room can't run it. Test it with run_command instead.", summary: "Not a Highrise bot" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
         const events = normalizeEvents(args.events);
         const scenario = events.length ? events : chatToEvents(chat, args.join === true);
@@ -509,9 +520,74 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         return { ok: bad === 0, output: out.join("\n") || "No secrets to test.", summary: bad ? `Tested secrets: ${bad} problem${bad > 1 ? "s" : ""}` : "Tested secrets: all good" };
       }
 
+      case "run_command": {
+        const command = s(args.command).trim();
+        if (!command || command.length > 4000) return { ok: false, output: "Give one command (up to 4000 characters).", summary: "Invalid command" };
+        const seconds = Math.min(Math.max(Number(args.timeout_seconds) || 60, 1), 180);
+        // A command can change any file: keep the code as it was, for "undo".
+        ensureSnapshot(ctx);
+        const uid = sandboxUid(ctx.project.id);
+        const venv = path.join(VENVS_DIR, uuid);
+        const python = path.join(venv, "bin", "python");
+        const env = await ctx.supervisor.botEnv(ctx.project, existsSync(python) ? python : "/usr/bin/python3", dir);
+        delete env.KOJY_ENTRY;
+        Object.assign(env, { PIP_CACHE_DIR: path.join(venv, ".pip-cache"), LESSHISTFILE: "-", PAGER: "cat", GIT_PAGER: "cat", TERM: "dumb",
+          GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: dir });
+        grantDir(dir, uid);
+        // timeout(1) ends the whole command (and what it started in the foreground).
+        const r = await runCapture(uid, "timeout", ["-k", "5", String(seconds), "/bin/bash", "-c", command], dir, env, (seconds + 10) * 1000);
+        const secrets = Object.values(await ctx.supervisor.secrets(ctx.project)).filter((v) => v.length >= 6);
+        let out = r.out;
+        for (const v of secrets) out = out.split(v).join("[secret]");
+        const timedOut = r.code === 124 || r.code === 137;
+        const short = command.length > 60 ? `${command.slice(0, 60)}…` : command;
+        return {
+          ok: r.code === 0,
+          output: clip(`$ ${command}\n${out || "(no output)"}\n[exit ${timedOut ? `— stopped after ${seconds}s` : r.code}]`),
+          summary: `Ran \`${short}\`${r.code === 0 ? "" : timedOut ? " (timed out)" : ` (exit ${r.code})`}`,
+        };
+      }
+
+      case "git": {
+        if (!ctx.git) return { ok: false, output: "Git isn't available here.", summary: "Git unavailable" };
+        const action = s(args.action);
+        const message = s(args.message).trim();
+        const run = (op: "status" | "commit" | "push" | "pull", extra: { message?: string } = {}) => ctx.git!.execute(uuid, { op, ...extra });
+        const show = (st: { repo: boolean; branch: string | null; remote: string | null; ahead: number; behind: number; changes: { path: string; status: string }[]; commits: { hash: string; subject: string }[] }) =>
+          !st.repo || !st.remote ? "Not linked to a GitHub repository. The owner links one in the Git panel (open_panel git)."
+          : `${st.remote.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")} on ${st.branch ?? "(no branch)"}${st.ahead ? ` · ${st.ahead} to push` : ""}${st.behind ? ` · ${st.behind} to pull` : ""}\n` +
+            `Changed: ${st.changes.length ? st.changes.slice(0, 30).map((c) => `${c.status} ${c.path}`).join(", ") : "nothing"}\n` +
+            `Recent: ${st.commits.slice(0, 5).map((c) => `${c.hash.slice(0, 7)} ${c.subject}`).join(" | ") || "no commits"}`;
+        if (action === "status") {
+          const r = await run("status");
+          return r.ok ? { ok: true, output: show(r.status), summary: "Checked the git status" } : { ok: false, output: r.message, summary: "Git status failed" };
+        }
+        if (action === "pull") {
+          ensureSnapshot(ctx);
+          const r = await run("pull");
+          return r.ok ? { ok: true, output: `${r.message}\n${show(r.status)}\nRead files again before changing them.`, summary: "Pulled from GitHub" } : { ok: false, output: r.message, summary: "Pull failed" };
+        }
+        let committed = "";
+        if (action === "commit" || action === "commit_and_push") {
+          if (!message) return { ok: false, output: "Give a short commit message saying what changed.", summary: "No commit message" };
+          const c = await run("commit", { message });
+          if (!c.ok && !(action === "commit_and_push" && /Nothing to commit/i.test(c.message))) return { ok: false, output: c.message, summary: "Commit failed" };
+          committed = c.ok ? c.message : "";
+          if (action === "commit") return { ok: true, output: c.ok ? `${c.message}\n${show(c.status)}` : c.message, summary: `Committed: ${message.slice(0, 60)}` };
+        }
+        if (action === "push" || action === "commit_and_push") {
+          const p = await run("push");
+          return p.ok
+            ? { ok: true, output: `${committed} ${p.message}`.trim(), summary: committed ? "Committed and pushed to GitHub" : "Pushed to GitHub" }
+            : { ok: false, output: `${committed} ${p.message}`.trim(), summary: "Push failed" };
+        }
+        return { ok: false, output: "action must be status, commit, push, commit_and_push or pull", summary: "Invalid git action" };
+      }
+
       case "set_entrypoint": {
         const entry = s(args.entrypoint).trim();
-        if (!/^[A-Za-z_][\w.]*:[A-Za-z_]\w*$/.test(entry)) return { ok: false, output: "Use module.path:ClassName", summary: "Invalid entrypoint" };
+        const problem = entrypointProblem(entry);
+        if (problem) return { ok: false, output: problem, summary: "Invalid entrypoint" };
         await ctx.db.update(botProjects).set({ entrypoint: entry }).where(eq(botProjects.id, ctx.project.id));
         ctx.project.entrypoint = entry;
         return { ok: true, output: `Entrypoint set to ${entry}.`, summary: `Set the entrypoint to ${entry}` };
@@ -572,7 +648,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 
       case "open_panel": {
         const panel = s(args.panel);
-        if (!["console", "code", "data", "secrets", "settings"].includes(panel)) return { ok: false, output: "Unknown panel.", summary: "Unknown panel" };
+        if (!["console", "code", "shell", "git", "data", "secrets", "settings"].includes(panel)) return { ok: false, output: "Unknown panel.", summary: "Unknown panel" };
         return { ok: true, output: `The ${panel} panel is open next to the chat.`, summary: `Opened ${panel}`, cardKind: "ui", card: { panel } };
       }
 

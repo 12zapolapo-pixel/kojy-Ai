@@ -64,6 +64,13 @@
       "when": 1795392000000,
       "tag": "0008_improvements",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795996800000,
+      "tag": "0009_git_connections",
+      "breakpoints": true
     }
   ]
 }
