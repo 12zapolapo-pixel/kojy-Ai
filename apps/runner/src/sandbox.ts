@@ -105,6 +105,11 @@ function sandboxState(): { enabled: boolean; reason: string } {
   return state ?? { enabled: false, reason: "not initialised" };
 }
 
+/** Whether project code really runs as its own user (the self-test passed). */
+export function sandboxStatus(): { enabled: boolean; reason: string } {
+  return { ...sandboxState() };
+}
+
 /**
  * Gives `uid` read/write on `dir` (recursively) and makes new files there
  * readable/writable by both the project user and the runner/API user.

@@ -30,6 +30,8 @@ import {
 import { listDatabases, describeDatabase, readTable } from "./data.js";
 import { listThread, addToThread, agentProgress, noteOwnerEdit } from "./chat.js";
 import { hostError, loadHost } from "./hosts.js";
+import { importRepo } from "./git.js";
+import { normalizeGitHubUrl, isSafeBranch } from "@kojyai/shared/projects";
 import { HostApiError, botHostProvider } from "@kojyai/shared/bothost";
 
 /** Undo label for the owner's own edits; one snapshot per editing session of this length. */
@@ -146,6 +148,9 @@ export const projectsRouter = router({
       name: z.string().trim().min(1).max(150),
       templateId: z.string().max(40).optional(),
       description: z.string().trim().max(4000).optional(),
+      /** Import the code from this GitHub repository (instead of a template). */
+      gitUrl: z.string().trim().max(300).optional(),
+      gitBranch: z.string().trim().max(100).refine((b) => b === "" || isSafeBranch(b), "Not a valid branch name").optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const orgId = await resolveOrgId(ctx);
@@ -155,6 +160,9 @@ export const projectsRouter = router({
       }
       const template = input.templateId ? BOT_TEMPLATES.find((t) => t.id === input.templateId) : undefined;
       if (input.templateId && !template) throw new TRPCError({ code: "BAD_REQUEST", message: "Unknown template" });
+      const gitUrl = input.gitUrl ? normalizeGitHubUrl(input.gitUrl) : null;
+      if (input.gitUrl && !gitUrl) throw new TRPCError({ code: "BAD_REQUEST", message: "Use a GitHub repository address like https://github.com/you/your-bot." });
+      if (gitUrl && template) throw new TRPCError({ code: "BAD_REQUEST", message: "Pick a starter bot or a GitHub repository, not both." });
 
       const uuid = randomUUID();
       const [row] = await ctx.db.insert(botProjects)
@@ -162,16 +170,29 @@ export const projectsRouter = router({
       ensureProjectDir(uuid);
       if (template) for (const [file, content] of Object.entries(template.files)) writeProjectFile(uuid, file, content);
 
+      // From GitHub: the runner clones it (as the bot's sandbox user). A failed
+      // import still leaves the bot, empty, with the reason to show.
+      let imported: { ok: boolean; message: string; entrypoint: string | null } | null = null;
+      if (gitUrl) {
+        imported = await importRepo(ctx.db, row!, gitUrl, input.gitBranch || undefined)
+          .catch((err: Error) => ({ ok: false, message: err.message, entrypoint: null }));
+        if (imported.entrypoint) row!.entrypoint = imported.entrypoint;
+      }
+
       const asks = input.description?.trim();
-      if (template || asks) {
+      if (imported?.ok) {
+        const intro = `I imported this bot from GitHub (${gitUrl!.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")}).${asks ? ` I'd like these changes: ${asks}` : ""} Look through the code and briefly tell me what it does${row!.entrypoint ? "" : ", set the entrypoint"}, check it, test it in the fake room, then ask me for the secrets it needs.`;
+        await addToThread(ctx.db, `project:${row!.id}`, row!.id, "user", "text", intro);
+        await control(uuid, "agent").catch(() => undefined);
+      } else if (template || asks) {
         const intro = template
           ? `This bot was created from the ${template.name} template (${template.description}).${asks ? ` I'd like these changes: ${asks}` : ""} Briefly tell me what it does, ${asks ? "make the changes (plan first if they're big), " : ""}test it in the fake room (try: ${template.tryChat.join(", ")}), then ask me for the secrets it needs.`
           : `Build a new Highrise bot called "${input.name}": ${asks}\n\nStart small: write a working first version (Python, highrise-bot-sdk), set the entrypoint, check it and test it in the fake room. Then ask me for the secrets it needs (at least HIGHRISE_ROOM_ID and HIGHRISE_BOT_TOKEN).`;
         await addToThread(ctx.db, `project:${row!.id}`, row!.id, "user", "text", intro);
         await control(uuid, "agent").catch(() => undefined); // no runner/Redis: the chat waits
       }
-      await emitAuditLog(ctx.db, { orgId, actorId: ctx.user.id, actorType: "user", action: "project.create", resourceType: "project", resourceId: uuid, afterState: { template: template?.id ?? null } });
-      return publicProject(row!);
+      await emitAuditLog(ctx.db, { orgId, actorId: ctx.user.id, actorType: "user", action: "project.create", resourceType: "project", resourceId: uuid, afterState: { template: template?.id ?? null, git: gitUrl } });
+      return { ...publicProject(row!), importError: imported && !imported.ok ? imported.message : null };
     }),
 
   update: permittedProc("bots:update")

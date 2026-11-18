@@ -898,6 +898,26 @@ export const botHosts = pgTable("bot_hosts", {
   orgIdx: index("bot_hosts_org_idx").on(t.orgId),
 }));
 
+// An org's GitHub account, for the Git panel (pull, commit & push, import).
+// The token (a personal access token) is encrypted with ENCRYPTION_KEY; the
+// runner decrypts it only for the git command that needs it, and it never
+// goes back to the browser or into a project's .git/config.
+export const gitConnections = pgTable("git_connections", {
+  id:          serial("id").primaryKey(),
+  orgId:       integer("org_id").notNull(),
+  createdBy:   integer("created_by").notNull(),
+  provider:    varchar("provider", { length: 16 }).default("github").notNull(),
+  login:       varchar("login", { length: 100 }).notNull(),
+  // Commit author: the account's name (or login) and its GitHub no-reply email.
+  name:        varchar("name", { length: 200 }).default("").notNull(),
+  email:       varchar("email", { length: 200 }).notNull(),
+  tokenVault:  text("token_vault").notNull(),
+  createdAt:   createdAt(),
+  updatedAt:   updatedAt(),
+}, (t) => ({
+  orgProviderIdx: uniqueIndex("git_connections_org_provider_idx").on(t.orgId, t.provider),
+}));
+
 // Environment variables handed to a project's process (HIGHRISE_ROOM_ID,
 // HIGHRISE_BOT_TOKEN, GROQ_API_KEY, ...). Values are encrypted with the
 // platform ENCRYPTION_KEY and never sent back to the browser.

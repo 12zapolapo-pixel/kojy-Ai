@@ -32,6 +32,8 @@ import type { Server as HttpServer } from "http";
 import { appRouter } from "./router.js";
 import { createContext } from "./trpc.js";
 import { initWebSocketGateway } from "./websocket/gateway.js";
+import { initTerminalGateway } from "./websocket/terminal.js";
+import { routeUpgrades } from "./websocket/upgrade.js";
 import { initBotRuntimeManager } from "./modules/bots/runtime-manager.js";
 import { createLogger } from "./utils/logger.js";
 import { configureErrorReporting, flushErrors, installCrashReporting } from "@kojyai/shared/error-reporting";
@@ -292,7 +294,8 @@ async function main() {
   }) as unknown as HttpServer;
 
   // WebSocket gateway attaches to the same HTTP server (no separate port)
-  initWebSocketGateway(server);
+  // and /ws/terminal is the owner's shell for a bot (see websocket/upgrade.ts).
+  routeUpgrades(server, { "/ws": initWebSocketGateway(server), "/ws/terminal": initTerminalGateway() });
   log.info("WebSocket gateway initialized");
 
   // Bot runtime manager — restores bots that were online before restart

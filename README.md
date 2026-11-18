@@ -6,7 +6,10 @@ bots, a chat with **Kojy** (an AI that writes, tests, fixes and runs them),
 and live logs, code, data and secrets side by side.
 
 Bots are real Python bots on the official `highrise-bot-sdk` — upload one
-(e.g. from Replit), describe a new one, or start from 9 ready-made bots.
+(e.g. from Replit), import one from GitHub, describe a new one, or start from
+9 ready-made bots. Each bot has a **Shell** (a real terminal in its folder,
+with git, pip and Python) and a **Git** panel (connect GitHub, pull, commit &
+push, history).
 Status of each part: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Run it on a server

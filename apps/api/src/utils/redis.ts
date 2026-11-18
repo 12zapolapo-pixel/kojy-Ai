@@ -62,6 +62,38 @@ export function getRedis():      Redis | null { return _redis; }
 export function getRedisPublisher():  Redis | null { return _publisher; }
 export function getRedisSubscriber(): Redis | null { return _subscriber; }
 
+// A fourth connection for replies from the runner (git results, shell
+// output): exact channels, kept apart from the gateway's event subscriber so
+// its handlers never see these messages.
+let _replies: Redis | null = null;
+const replyHandlers = new Map<string, (message: string) => void>();
+
+/**
+ * Calls `handler` for each message on `channel` until the returned function
+ * is called. Resolves once the subscription is active, so a request sent
+ * after it can't be answered before anyone listens. Throws without Redis.
+ */
+export async function listenChannel(channel: string, handler: (message: string) => void): Promise<() => void> {
+  if (!_redis) throw new Error("Redis is not connected");
+  if (!_replies) {
+    _replies = createClient("replies");
+    _replies.on("message", (ch: string, message: string) => {
+      const h = replyHandlers.get(ch);
+      if (!h) return;
+      try { h(message); } catch (err) { log.warn({ err, channel: ch }, "Reply handler failed"); }
+    });
+  }
+  replyHandlers.set(channel, handler);
+  await _replies.subscribe(channel);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    replyHandlers.delete(channel);
+    _replies?.unsubscribe(channel).catch(() => undefined);
+  };
+}
+
 /** Cache helper — get or compute with TTL */
 export async function cacheOrCompute<T>(
   key:     string,

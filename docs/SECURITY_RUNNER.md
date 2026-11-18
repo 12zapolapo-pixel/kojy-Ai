@@ -40,6 +40,27 @@ xfs do).
 
 Check the runner log at start-up for `Bot sandbox is on`.
 
+## Shell and Git panel
+
+Both run on the runner **as the project's sandbox user**, like the bot:
+
+- **Shell** (`apps/runner/src/terminal.ts`, `kojy_shell.py`): bash in the bot's
+  folder, with its secrets as environment variables (as the bot has them).
+  Refused when the sandbox isn't working, since it would then run as the
+  runner's user and could read the runner's secrets. Set
+  `RUNNER_TERMINAL_UNSANDBOXED=true` only for local development. Opening one
+  needs `bots:update` and `bots:start`, is rate-limited, audit-logged, and
+  re-checked every 5 minutes. Keystrokes from the API are signed like control
+  messages. Idle shells close after an hour; at most 3 per bot and
+  `RUNNER_TERMINAL_MAX` (default 12) per runner.
+- **Git** (`apps/runner/src/git.ts`): never runs in the API, because a
+  project's `.git/config` is the owner's to edit (from the shell), and settings
+  like `core.fsmonitor` run commands. Remotes must be `https://github.com/...`,
+  and git may only use https (no `file://`, `ssh://` or `ext::`). The org's
+  GitHub token is stored encrypted, and reaches git only as an environment
+  variable (`http.https://github.com/.extraHeader`). It never goes on a command
+  line, into `.git/config`, or back to the browser.
+
 ## Not covered yet
 
 These need host or orchestration changes:

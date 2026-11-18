@@ -21,6 +21,9 @@ import { Supervisor, PROJECTS_DIR, VENVS_DIR } from "./supervisor.js";
 import { initSandbox } from "./sandbox.js";
 import { Agent } from "./agent/agent.js";
 import { setUsageSink } from "./agent/groq.js";
+import { Terminals } from "./terminal.js";
+import { GitService } from "./git.js";
+import { TERM_IN_PREFIX } from "@kojyai/shared/projects";
 
 const log = createLogger("runner-boot");
 // Errors to Sentry when SENTRY_DSN is set (see @kojyai/shared/error-reporting).
@@ -56,6 +59,9 @@ async function main(): Promise<void> {
 
   setUsageSink(redis); // per-model AI usage for the chat's "AI models" circle
   const agent = new Agent(db, supervisor, redis);
+  // The owner's shells and the Git panel (both run as the project's sandbox user).
+  const terminals = new Terminals(db, supervisor, redis);
+  const git = new GitService(db, redis);
   await agent.resetStates();
   // Subscribe only once both connections are fully ready: a subscribe issued
   // while ioredis is still connecting could leave the runner deaf to start/
@@ -63,7 +69,7 @@ async function main(): Promise<void> {
   // message proves the subscription works, now and every minute after.
   const ready = (c: Redis) => (c.status === "ready" ? Promise.resolve() : new Promise<void>((res) => c.once("ready", () => res())));
   await Promise.all([ready(sub), ready(redis)]);
-  await sub.psubscribe(`${CONTROL_PREFIX}*`);
+  await sub.psubscribe(`${CONTROL_PREFIX}*`, `${TERM_IN_PREFIX}*`);
   const SELFTEST = `${CONTROL_PREFIX}__selftest__`;
   let lastSelftest = 0;
   const checkSubscription = async (): Promise<void> => {
@@ -76,10 +82,15 @@ async function main(): Promise<void> {
   };
   sub.on("pmessage", (_pattern: string, channel: string, raw: string) => {
     if (channel === SELFTEST) { lastSelftest = Number(raw) || Date.now(); return; }
+    if (channel.startsWith(TERM_IN_PREFIX)) { terminals.input(channel.slice(TERM_IN_PREFIX.length), raw); return; }
     const uuid = channel.slice(CONTROL_PREFIX.length);
     const verified = verifyBotControlMessage(uuid, raw);
     if (!verified.ok) { log.warn(`Rejected project_control message for ${uuid}: ${verified.reason}`); return; }
-    const target = verified.action.startsWith("agent") ? agent.handle(uuid, verified.action) : supervisor.handle(uuid, verified.action, verified.payload);
+    if (verified.action === "purge") terminals.closeProject(uuid);
+    const target = verified.action.startsWith("agent") ? agent.handle(uuid, verified.action)
+      : verified.action === "terminal_open" ? terminals.open(uuid, verified.payload)
+      : verified.action === "git" ? git.handle(uuid, verified.payload)
+      : supervisor.handle(uuid, verified.action, verified.payload);
     target
       .catch((err) => log.error({ err, uuid, action: verified.action }, "Control action failed"));
   });
@@ -114,6 +125,7 @@ async function main(): Promise<void> {
     if (closing) return;
     closing = true;
     log.info(`${signal} — stopping bots`);
+    terminals.closeAll();
     await supervisor.shutdown();
     await Promise.allSettled([sub.quit(), redis.quit(), pool.end()]);
     process.exit(0);
