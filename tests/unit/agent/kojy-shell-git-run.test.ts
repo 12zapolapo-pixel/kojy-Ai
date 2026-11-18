@@ -144,3 +144,40 @@ describe("Kojy's git tool", () => {
     expect(r).toMatchObject({ ok: false, summary: "Not a Highrise bot" });
   });
 });
+
+describe("test_secrets for Discord", () => {
+  const realFetch = globalThis.fetch;
+  const answer = (status: number, body: unknown) => async () => new Response(JSON.stringify(body), { status });
+  afterAll(() => { globalThis.fetch = realFetch; });
+
+  it("asks Discord who the bot is, and explains a bad token", async () => {
+    globalThis.fetch = answer(200, { username: "Kojy Helper", bot: true }) as never;
+    expect(await tools.checkDiscordToken("abc")).toBe('OK — Discord accepted it (bot "Kojy Helper")');
+    globalThis.fetch = answer(200, { username: "me", bot: false }) as never;
+    expect(await tools.checkDiscordToken("abc")).toMatch(/user account token/);
+    globalThis.fetch = answer(401, { message: "401: Unauthorized" }) as never;
+    expect(await tools.checkDiscordToken("abc")).toMatch(/wrong or was reset/);
+  });
+
+  it("checks the server ID's shape and whether the bot is in it", async () => {
+    expect(await tools.checkDiscordGuild("my server", "t")).toMatch(/17–20 digit/);
+    globalThis.fetch = answer(200, { name: "Cool Server" }) as never;
+    expect(await tools.checkDiscordGuild("123456789012345678", "t")).toBe('OK — the bot is in the server "Cool Server"');
+    globalThis.fetch = answer(403, {}) as never;
+    expect(await tools.checkDiscordGuild("123456789012345678", "t")).toMatch(/isn't in that server/);
+  });
+
+  it("tells Kojy to carry on after testing (the 'I can't test this' dead end)", async () => {
+    globalThis.fetch = answer(200, { username: "Kojy Helper", bot: true }) as never;
+    const c = ctx();
+    const secrets = { DISCORD_TOKEN: "tok", SOME_SETTING: "x" };
+    const withSecrets = { ...(c as object), db: { select: () => ({ from: () => ({ where: async () => Object.entries(secrets).map(([key, v]) => ({ key, valueVault: v })) }) }) } };
+    const crypto = await import("../../../packages/shared/src/crypto/index.js");
+    for (const [k, v] of Object.entries(secrets)) (secrets as Record<string, string>)[k] = crypto.encryptApiKey(v);
+    const r = await tools.runTool("test_secrets", {}, withSecrets as never);
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain('DISCORD_TOKEN: OK — Discord accepted it');
+    expect(r.output).toMatch(/SOME_SETTING: set .*carry on/);
+    expect(r.output).toMatch(/continue the task .*don't stop here/);
+  });
+});

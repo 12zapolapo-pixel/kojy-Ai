@@ -103,7 +103,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("find_env_vars", "Find the environment variables (secrets/settings) the code reads, and which are already set."),
   fn("request_secrets", "Show the owner a form in the chat to add missing secrets. Ask for all missing ones at once, then stop and wait.",
     { secrets: { type: "array", items: { type: "object", properties: { name: str("ENV_NAME"), description: str("what it is and where to get it") }, required: ["name", "description"] } } }, ["secrets"]),
-  fn("test_secrets", "Check that secrets work: Highrise room+token (connects to Highrise), GROQ_API_KEY, OPENAI_API_KEY; others are only checked for being set.", { names: { type: "array", items: { type: "string" } } }),
+  fn("test_secrets", "Check that secrets work: Highrise room+token (connects to Highrise), DISCORD_TOKEN (asks Discord), GUILD_ID (is the bot in that server), TELEGRAM_BOT_TOKEN, GROQ_API_KEY, OPENAI_API_KEY; others are only checked for being set — that's normal, continue the task after testing.", { names: { type: "array", items: { type: "string" } } }),
   fn("set_entrypoint", "Set what starts the bot. A Highrise bot: module.path:ClassName (a class based on BaseBot). Any other long-running program (a Discord or Telegram bot, a web server, a scheduler): run: <command>, e.g. run: python main.py. Both get Run/Stop, the console, crash restarts and the secrets as environment variables.", { entrypoint: str("e.g. bot:MyBot or run: python main.py") }, ["entrypoint"]),
   fn("run_command", "Run a shell command (bash) in the bot's folder, as the bot's own sandboxed user, with its Python environment and secrets, and return the output. For things the other tools can't do: pip install/list, python -c checks, running a script once, unzipping, moving many files, inspecting the environment. It stops after timeout_seconds (default 60, at most 180). Not for starting the bot or anything that keeps running: use bot_control. Don't print secret values.",
     { command: str("e.g. pip list | grep highrise"), timeout_seconds: { type: "integer" } }, ["command"]),
@@ -233,6 +233,41 @@ async function checkBearer(url: string, key: string): Promise<string> {
   try {
     const res = await fetch(url, { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10_000) });
     return res.ok ? "OK — key accepted" : res.status === 401 || res.status === 403 ? "rejected — the key is wrong or revoked" : `unexpected answer (HTTP ${res.status})`;
+  } catch (e) { return `couldn't check: ${(e as Error).message}`; }
+}
+
+/** A Discord bot token: asks Discord who the bot is. */
+export async function checkDiscordToken(token: string): Promise<string> {
+  try {
+    const res = await fetch("https://discord.com/api/v10/users/@me", { headers: { authorization: `Bot ${token.replace(/^Bot\s+/i, "")}` }, signal: AbortSignal.timeout(10_000) });
+    if (res.ok) {
+      const me = await res.json() as { username?: string; bot?: boolean };
+      return me.bot === false ? "rejected — that's a user account token, not a bot token (use the token from the Developer Portal → Bot)" : `OK — Discord accepted it (bot "${me.username ?? "?"}")`;
+    }
+    return res.status === 401 ? "rejected — Discord says the token is wrong or was reset (Developer Portal → Bot → Reset Token, then save the new one)"
+      : `unexpected answer from Discord (HTTP ${res.status})`;
+  } catch (e) { return `couldn't check: ${(e as Error).message}`; }
+}
+
+/** A Discord server id: the right shape, and (with a working token) whether the bot is in that server. */
+export async function checkDiscordGuild(id: string, token: string | undefined): Promise<string> {
+  if (!/^\d{17,20}$/.test(id.trim())) return "rejected — a server ID is a 17–20 digit number (Discord: Developer Mode on, right-click the server → Copy Server ID)";
+  if (!token) return "looks like a server ID (can't check membership without DISCORD_TOKEN)";
+  try {
+    const res = await fetch(`https://discord.com/api/v10/guilds/${id.trim()}`, { headers: { authorization: `Bot ${token.replace(/^Bot\s+/i, "")}` }, signal: AbortSignal.timeout(10_000) });
+    if (res.ok) { const g = await res.json() as { name?: string }; return `OK — the bot is in the server "${g.name ?? "?"}"`; }
+    return res.status === 403 || res.status === 404 ? "rejected — the bot isn't in that server yet (invite it with the install link) or the ID is wrong"
+      : res.status === 401 ? "couldn't check: DISCORD_TOKEN is rejected" : `unexpected answer from Discord (HTTP ${res.status})`;
+  } catch (e) { return `couldn't check: ${(e as Error).message}`; }
+}
+
+/** A Telegram bot token (from @BotFather). */
+async function checkTelegramToken(token: string): Promise<string> {
+  if (!/^\d+:[\w-]{30,}$/.test(token)) return "rejected — a Telegram bot token looks like 123456789:ABC… (from @BotFather)";
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(10_000) });
+    if (res.ok) { const b = await res.json() as { result?: { username?: string } }; return `OK — Telegram accepted it (@${b.result?.username ?? "?"})`; }
+    return res.status === 401 || res.status === 404 ? "rejected — Telegram says the token is wrong or revoked" : `unexpected answer from Telegram (HTTP ${res.status})`;
   } catch (e) { return `couldn't check: ${(e as Error).message}`; }
 }
 
@@ -514,10 +549,14 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
           if (v === undefined) { out.push(`${n}: not set`); continue; }
           if (n === "GROQ_API_KEY") out.push(`${n}: ${await checkBearer("https://api.groq.com/openai/v1/models", v)}`);
           else if (n === "OPENAI_API_KEY") out.push(`${n}: ${await checkBearer("https://api.openai.com/v1/models", v)}`);
-          else out.push(`${n}: set (${v.length} characters; no automatic check for this one)`);
+          else if (/^DISCORD(_BOT)?_TOKEN$/.test(n)) out.push(`${n}: ${await checkDiscordToken(v)}`);
+          else if (/^(DISCORD_)?(GUILD|SERVER)_ID$/.test(n)) out.push(`${n}: ${await checkDiscordGuild(v, set.get("DISCORD_TOKEN") ?? set.get("DISCORD_BOT_TOKEN"))}`);
+          else if (/^TELEGRAM(_BOT)?_TOKEN$/.test(n)) out.push(`${n}: ${await checkTelegramToken(v)}`);
+          else out.push(`${n}: set (${v.length} characters). There's no automatic check for this one; that's fine — carry on, and the bot's logs will show if it's wrong.`);
         }
         const bad = out.filter((l) => /rejected|missing|not set|couldn't|no answer/i.test(l)).length;
-        return { ok: bad === 0, output: out.join("\n") || "No secrets to test.", summary: bad ? `Tested secrets: ${bad} problem${bad > 1 ? "s" : ""}` : "Tested secrets: all good" };
+        const next = bad ? "\nTell the owner which one is wrong and how to fix it." : "\nNow continue the task (e.g. start the bot with bot_control and confirm with get_logs) — don't stop here.";
+        return { ok: bad === 0, output: (out.join("\n") || "No secrets to test.") + next, summary: bad ? `Tested secrets: ${bad} problem${bad > 1 ? "s" : ""}` : "Tested secrets: all good" };
       }
 
       case "run_command": {
