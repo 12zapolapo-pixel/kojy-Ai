@@ -283,9 +283,9 @@ function NotFound() {
   return (
     <div className="h-full flex items-center justify-center">
       <div className="text-center space-y-4">
-        <p className="text-6xl font-mono text-white/10">404</p>
-        <p className="text-white/40">Page not found</p>
-        <a href="/studio" className="text-[#49dcb5] text-sm hover:underline">
+        <p className="text-6xl font-mono text-ink-3">404</p>
+        <p className="text-ink-3">Page not found</p>
+        <a href="/studio" className="text-co-ink text-sm hover:underline">
           Back to Mission Control
         </a>
       </div>

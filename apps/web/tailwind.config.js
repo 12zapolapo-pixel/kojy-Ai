@@ -8,81 +8,69 @@ export default {
 
   theme: {
     extend: {
-      // ── Cosmic Color Palette ────────────────────────────────────────────────
+      // ── Open Room palette (light, one cobalt accent) ──────────────────────
       colors: {
-        // Surface layers
-        "void":     "#030712",
-        "base":     "#050510",
-        "surface":  "#0b1220",
-        "elevated": "#121b31",
-        "overlay":  "#1b2744",
+        // Ink: text and quiet fills
+        ink: { DEFAULT: "#0F1222", 2: "#4B5065", 3: "#6B7085" },
+        // Cobalt: the one accent — primary actions, selection, running
+        co: { DEFAULT: "#3B5BFD", press: "#2F4EF0", ink: "#2A44D6", deep: "#1F35B0", tint: "#E9EDFF" },
+        // Hairlines
+        line: { DEFAULT: "#E2E4EA", strong: "#D9DCE4" },
+        // Grounds
+        canvas: "#F7F8FB",
+        ground: "#F5F6F8",
+        // Success (kept apart from the accent)
+        ok: { DEFAULT: "#0E7A4F", dot: "#1F9D57" },
 
-        // Primary — Cosmic Cyan
+        // Legacy names, re-pointed so older classes stay on-palette
+        "void":     "#F5F6F8",
+        "base":     "#F5F6F8",
+        "surface":  "#FFFFFF",
+        "elevated": "#FFFFFF",
+        "overlay":  "#FFFFFF",
         primary: {
-          50:  "#e0f7ff",
-          100: "#b3ecff",
-          200: "#80dfff",
-          300: "#4dd2ff",
-          400: "#1ac8ff",
-          500: "#49dcb5",
-          600: "#0099cc",
-          700: "#0077a3",
-          800: "#005580",
-          900: "#003352",
-          DEFAULT: "#49dcb5",
+          50:  "#F3F5FF", 100: "#E9EDFF", 200: "#C9D3FF", 300: "#96A8FF", 400: "#5F7BFE",
+          500: "#3B5BFD", 600: "#2F4EF0", 700: "#2A44D6", 800: "#1F35B0", 900: "#17288A",
+          DEFAULT: "#3B5BFD",
         },
-
-        // Accent — Electric Violet
-        accent: {
-          300: "#a78bfa",
-          400: "#8b5cf6",
-          500: "#8b5cf6",
-          DEFAULT: "#8b5cf6",
-        },
-
-        // Status
-        "online":   "#34d399",
-        "offline":  "#4a4a6a",
-        "alert":    "#ef4444",
-        "warning":  "#f59e0b",
-        "pending":  "#6366f1",
-
-        // Delegation character palette
-        "agent-red":    "#ef4444",
-        "agent-blue":   "#49dcb5",
-        "agent-green":  "#22c55e",
-        "agent-yellow": "#f59e0b",
-        "agent-pink":   "#ec4899",
-        "agent-violet": "#8b5cf6",
+        accent: { 300: "#96A8FF", 400: "#5F7BFE", 500: "#3B5BFD", DEFAULT: "#3B5BFD" },
+        "online":   "#1F9D57",
+        "offline":  "#B4BACB",
+        "alert":    "#D93F3F",
+        "warning":  "#D98A00",
+        "pending":  "#3B5BFD",
+        "agent-red":    "#D93F3F",
+        "agent-blue":   "#3B5BFD",
+        "agent-green":  "#1F9D57",
+        "agent-yellow": "#D98A00",
+        "agent-pink":   "#D6457E",
+        "agent-violet": "#6250D6",
       },
 
-      // ── Background images ───────────────────────────────────────────────────
       backgroundImage: {
-        "cosmic-gradient":  "radial-gradient(ellipse at top, #0d0d22 0%, #030712 100%)",
-        "surface-gradient": "linear-gradient(135deg, #0b1220 0%, #121b31 100%)",
-        "primary-glow":     "radial-gradient(circle, rgba(73,220,181,0.16) 0%, transparent 70%)",
-        "grid-pattern": `
-          linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)
-        `,
+        "cosmic-gradient":  "none",
+        "surface-gradient": "none",
+        "primary-glow":     "none",
+        "grid-pattern":     "none",
       },
 
       // ── Typography ──────────────────────────────────────────────────────────
       fontFamily: {
-        sans:  ["Inter", "Segoe UI", "system-ui", "-apple-system", "sans-serif"],
+        sans:  ["Hanken Grotesk", "Segoe UI", "system-ui", "-apple-system", "sans-serif"],
+        display: ["Gabarito", "Hanken Grotesk", "system-ui", "sans-serif"],
         mono:  ["JetBrains Mono", "Fira Code", "Cascadia Code", "monospace"],
       },
 
       // ── Box shadows + Glows ─────────────────────────────────────────────────
       boxShadow: {
-        "panel":         "0 0 0 1px rgba(255,255,255,0.05), 0 4px 20px rgba(0,0,0,0.6)",
-        "card":          "0 0 0 1px rgba(255,255,255,0.05), 0 2px 8px rgba(0,0,0,0.5)",
-        "modal":         "0 0 0 1px rgba(255,255,255,0.08), 0 24px 64px rgba(0,0,0,0.9)",
-        "glow-primary":  "0 0 20px rgba(73,220,181,0.28), 0 0 40px rgba(73,220,181,0.12)",
-        "glow-strong":   "0 0 20px rgba(73,220,181,0.55), 0 0 60px rgba(73,220,181,0.24)",
-        "glow-success":  "0 0 15px rgba(34,211,165,0.3)",
-        "glow-error":    "0 0 15px rgba(239,68,68,0.3)",
-        "glow-accent":   "0 0 20px rgba(139,92,246,0.3), 0 0 40px rgba(139,92,246,0.1)",
+        "panel":         "0 1px 2px rgba(15,18,34,0.06), 0 8px 24px -16px rgba(15,18,34,0.25)",
+        "card":          "0 1px 2px rgba(15,18,34,0.06), 0 4px 12px -8px rgba(15,18,34,0.2)",
+        "modal":         "0 2px 6px rgba(15,18,34,0.08), 0 24px 64px -24px rgba(15,18,34,0.45)",
+        "glow-primary":  "0 1px 2px rgba(15,18,34,0.12), 0 6px 14px -8px rgba(59,91,253,0.6)",
+        "glow-strong":   "0 1px 2px rgba(15,18,34,0.12), 0 8px 18px -8px rgba(59,91,253,0.7)",
+        "glow-success":  "0 4px 12px -6px rgba(31,157,87,0.5)",
+        "glow-error":    "0 4px 12px -6px rgba(217,63,63,0.5)",
+        "glow-accent":   "0 1px 2px rgba(15,18,34,0.12), 0 6px 14px -8px rgba(59,91,253,0.6)",
       },
 
       // ── Border radius ───────────────────────────────────────────────────────
@@ -120,8 +108,8 @@ export default {
           "100%": { opacity: "1", transform: "scale(1)" },
         },
         glowPulse: {
-          "0%, 100%": { boxShadow: "0 0 10px rgba(73,220,181,0.2)" },
-          "50%":       { boxShadow: "0 0 20px rgba(73,220,181,0.5)" },
+          "0%, 100%": { boxShadow: "0 0 0 0 rgba(59,91,253,0.35)" },
+          "50%":       { boxShadow: "0 0 0 6px rgba(59,91,253,0)" },
         },
         float: {
           "0%, 100%": { transform: "translateY(0)" },
@@ -156,8 +144,8 @@ export default {
         ".scrollbar-thin": {
           "&::-webkit-scrollbar": { width: "4px", height: "4px" },
           "&::-webkit-scrollbar-track": { background: "transparent" },
-          "&::-webkit-scrollbar-thumb": { background: "rgba(255,255,255,0.1)", borderRadius: "2px" },
-          "&::-webkit-scrollbar-thumb:hover": { background: "rgba(255,255,255,0.2)" },
+          "&::-webkit-scrollbar-thumb": { background: "rgba(15,18,34,0.18)", borderRadius: "4px" },
+          "&::-webkit-scrollbar-thumb:hover": { background: "rgba(15,18,34,0.3)" },
         },
         ".scrollbar-hidden": {
           "&::-webkit-scrollbar": { display: "none" },
@@ -165,14 +153,12 @@ export default {
           "-ms-overflow-style": "none",
         },
         // Glass morphism helpers
-        ".glass-subtle": { background: "rgba(255,255,255,0.02)", backdropFilter: "blur(8px)" },
-        ".glass-light":  { background: "rgba(255,255,255,0.04)", backdropFilter: "blur(12px)" },
-        ".glass-medium": { background: "rgba(255,255,255,0.07)", backdropFilter: "blur(16px)" },
+        // "Glass" names kept for older markup; in the light theme they are plain white surfaces.
+        ".glass-subtle": { background: "#FFFFFF" },
+        ".glass-light":  { background: "#FFFFFF" },
+        ".glass-medium": { background: "#FFFFFF" },
         // Grid background pattern
-        ".bg-grid": {
-          backgroundImage: "linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px)",
-          backgroundSize: "40px 40px",
-        },
+        ".bg-grid": { backgroundImage: "none" },
       });
     },
   ],

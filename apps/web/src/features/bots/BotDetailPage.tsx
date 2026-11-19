@@ -66,8 +66,8 @@ export default function BotDetailPage() {
   if (error || !bot) return (
     <div className="h-full flex items-center justify-center">
       <div className="text-center space-y-3">
-        <p className="text-white/40">Bot not found</p>
-        <button onClick={() => navigate("/bots")} className="text-[#49dcb5] text-sm hover:underline">← Back to Bots</button>
+        <p className="text-ink-3">Bot not found</p>
+        <button onClick={() => navigate("/bots")} className="text-co-ink text-sm hover:underline">← Back to Bots</button>
       </div>
     </div>
   );
@@ -78,7 +78,7 @@ export default function BotDetailPage() {
     <div className="h-full flex flex-col overflow-hidden">
 
       {/* Bot Header */}
-      <div className="flex-shrink-0 px-6 py-4 border-b border-white/5 bg-[#07111f]">
+      <div className="flex-shrink-0 px-6 py-4 border-b border-line bg-canvas">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-4">
             {/* Avatar */}
@@ -89,13 +89,13 @@ export default function BotDetailPage() {
 
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-lg font-semibold text-white/90">{bot.name}</h1>
+                <h1 className="text-lg font-semibold text-ink">{bot.name}</h1>
                 <StatusPill status={(displayBot as any).status ?? bot.status} />
               </div>
               <div className="flex items-center gap-4 mt-1.5">
-                <span className="text-xs text-white/35 font-mono">{bot.id.slice(0, 12)}…</span>
-                <span className="text-xs text-white/35 capitalize">{bot.runtimeMode} mode</span>
-                <span className="text-xs text-white/35">{bot.language.toUpperCase()}</span>
+                <span className="text-xs text-ink-3 font-mono">{bot.id.slice(0, 12)}…</span>
+                <span className="text-xs text-ink-3 capitalize">{bot.runtimeMode} mode</span>
+                <span className="text-xs text-ink-3">{bot.language.toUpperCase()}</span>
               </div>
               <div className="mt-2 w-32">
                 <HealthBar score={(displayBot as any).healthScore ?? bot.healthScore} />
@@ -124,7 +124,7 @@ export default function BotDetailPage() {
             />
             <button
               onClick={() => navigate(`/simulation?botId=${bot.id}`)}
-              className="px-3 py-1.5 border border-violet-500/30 text-violet-400 rounded-lg text-xs font-medium hover:bg-violet-500/10 transition-colors"
+              className="px-3 py-1.5 border border-violet-500/30 text-violet-700 rounded-lg text-xs font-medium hover:bg-violet-500/10 transition-colors"
             >
               ⚡ Simulate
             </button>
@@ -133,7 +133,7 @@ export default function BotDetailPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex-shrink-0 flex items-center gap-0.5 px-6 border-b border-white/5 bg-[#07111f] overflow-x-auto scrollbar-hidden">
+      <div className="flex-shrink-0 flex items-center gap-0.5 px-6 border-b border-line bg-canvas overflow-x-auto scrollbar-hidden">
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -141,8 +141,8 @@ export default function BotDetailPage() {
             className={clsx(
               "flex items-center gap-1.5 px-3 py-3 text-xs font-medium whitespace-nowrap border-b-2 transition-colors",
               tab === t.id
-                ? "border-[#49dcb5] text-[#49dcb5]"
-                : "border-transparent text-white/35 hover:text-white/60",
+                ? "border-co text-co-ink"
+                : "border-transparent text-ink-3 hover:text-ink-2",
             )}
           >
             <span>{t.icon}</span>
@@ -179,8 +179,8 @@ const BotOverviewTab = memo(function BotOverviewTab({ bot }: { bot: any }) {
       </div>
 
       <div className="grid grid-cols-2 gap-6">
-        <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4 space-y-3">
-          <h3 className="text-xs font-mono tracking-widest text-white/30">CONFIGURATION</h3>
+        <div className="bg-white border border-line rounded-xl p-4 space-y-3">
+          <h3 className="text-xs font-mono tracking-widest text-ink-3">CONFIGURATION</h3>
           <ConfigRow label="Runtime Mode"  value={bot.runtimeMode} />
           <ConfigRow label="Language"      value={bot.language.toUpperCase()} />
           <ConfigRow label="Active Room"   value={bot.activeRoomId ?? "None"} />
@@ -188,16 +188,16 @@ const BotOverviewTab = memo(function BotOverviewTab({ bot }: { bot: any }) {
           <ConfigRow label="Created"       value={new Date(bot.createdAt).toLocaleDateString()} />
         </div>
 
-        <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4 space-y-3">
-          <h3 className="text-xs font-mono tracking-widest text-white/30">GREET MESSAGE</h3>
-          <p className="text-sm text-white/60 leading-relaxed">{bot.greetMessage ?? "Not set"}</p>
+        <div className="bg-white border border-line rounded-xl p-4 space-y-3">
+          <h3 className="text-xs font-mono tracking-widest text-ink-3">GREET MESSAGE</h3>
+          <p className="text-sm text-ink-2 leading-relaxed">{bot.greetMessage ?? "Not set"}</p>
 
           {bot.tags?.length > 0 && (
             <>
-              <h3 className="text-xs font-mono tracking-widest text-white/30 pt-2">TAGS</h3>
+              <h3 className="text-xs font-mono tracking-widest text-ink-3 pt-2">TAGS</h3>
               <div className="flex flex-wrap gap-1.5">
                 {bot.tags.map((tag: string) => (
-                  <span key={tag} className="px-2 py-0.5 bg-white/5 text-white/50 text-xs rounded-md">{tag}</span>
+                  <span key={tag} className="px-2 py-0.5 bg-ink/[0.04] text-ink-3 text-xs rounded-md">{tag}</span>
                 ))}
               </div>
             </>
@@ -212,12 +212,12 @@ const BotOverviewTab = memo(function BotOverviewTab({ bot }: { bot: any }) {
 
 function StatCard({ label, value, icon }: { label: string; value: string; icon: string }) {
   return (
-    <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4">
+    <div className="bg-white border border-line rounded-xl p-4">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs text-white/30">{label}</span>
+        <span className="text-xs text-ink-3">{label}</span>
         <span className="text-base">{icon}</span>
       </div>
-      <p className="text-xl font-semibold text-white/80 tabular-nums">{value}</p>
+      <p className="text-xl font-semibold text-ink tabular-nums">{value}</p>
     </div>
   );
 }
@@ -225,19 +225,19 @@ function StatCard({ label, value, icon }: { label: string; value: string; icon: 
 function ConfigRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between">
-      <span className="text-xs text-white/30">{label}</span>
-      <span className="text-xs text-white/60 font-mono">{value}</span>
+      <span className="text-xs text-ink-3">{label}</span>
+      <span className="text-xs text-ink-2 font-mono">{value}</span>
     </div>
   );
 }
 
 function StatusPill({ status }: { status: string }) {
   const map: Record<string, string> = {
-    online:     "bg-[#34d399]/15 text-[#34d399] border-[#34d399]/30",
-    offline:    "bg-white/5 text-white/40 border-white/10",
-    connecting: "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",
-    error:      "bg-red-500/15 text-red-400 border-red-500/30",
-    suspended:  "bg-amber-500/15 text-amber-400 border-amber-500/30",
+    online:     "bg-ok/15 text-ok border-ok/30",
+    offline:    "bg-ink/[0.04] text-ink-3 border-line",
+    connecting: "bg-indigo-500/15 text-indigo-700 border-indigo-500/30",
+    error:      "bg-red-500/15 text-red-700 border-red-500/30",
+    suspended:  "bg-amber-500/15 text-amber-700 border-amber-500/30",
   };
   return (
     <span className={clsx("px-2 py-0.5 rounded-md border text-xs font-medium capitalize", map[status] ?? map.offline)}>
@@ -249,7 +249,7 @@ function StatusPill({ status }: { status: string }) {
 function ActionBtn({ label, color, loading, disabled, onClick }: {
   label: string; color: "green"|"red"|"amber"; loading?: boolean; disabled?: boolean; onClick: () => void;
 }) {
-  const c = { green: "border-[#34d399]/30 text-[#34d399] hover:bg-[#34d399]/10", red: "border-red-500/30 text-red-400 hover:bg-red-500/10", amber: "border-amber-500/30 text-amber-400 hover:bg-amber-500/10" }[color];
+  const c = { green: "border-ok/30 text-ok hover:bg-ok/10", red: "border-red-500/30 text-red-700 hover:bg-red-500/10", amber: "border-amber-500/30 text-amber-700 hover:bg-amber-500/10" }[color];
   return (
     <button onClick={onClick} disabled={loading || disabled}
       className={clsx("px-3 py-1.5 border rounded-lg text-xs font-medium transition-colors", c, (loading || disabled) && "opacity-40 cursor-not-allowed")}>
@@ -259,6 +259,6 @@ function ActionBtn({ label, color, loading, disabled, onClick }: {
 }
 
 function getBotGradient(id: string): string {
-  const p = ["linear-gradient(135deg,#ef4444,#dc2626)","linear-gradient(135deg,#49dcb5,#0077a3)","linear-gradient(135deg,#22c55e,#16a34a)","linear-gradient(135deg,#f59e0b,#d97706)","linear-gradient(135deg,#8b5cf6,#5b21b6)","linear-gradient(135deg,#ec4899,#be185d)"];
+  const p = ["linear-gradient(135deg,#ef4444,#dc2626)","linear-gradient(135deg,#3B5BFD,#0077a3)","linear-gradient(135deg,#22c55e,#16a34a)","linear-gradient(135deg,#f59e0b,#d97706)","linear-gradient(135deg,#8b5cf6,#5b21b6)","linear-gradient(135deg,#ec4899,#be185d)"];
   return p[id.split("").reduce((a,c)=>a+c.charCodeAt(0),0) % p.length]!;
 }

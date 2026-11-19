@@ -1,38 +1,30 @@
 /**
- * App Shell — Persistent Layout
+ * App Shell — Persistent Layout ("Open Room")
  *
  * OWNERSHIP: apps/web/src/layouts
  * LAYER: Frontend — global layout wrapper
  *
- * STRUCTURE:
- * ┌──────────────────────────────────────────────────────┐
- * │ Sidebar (240px | 64px collapsed)  │  Main Content   │
- * │ ─────────────────────────────     │  ─────────────  │
- * │ Logo + Workspace Switcher         │  Topbar (48px)  │
- * │ ─────────────────────────────     │  ─────────────  │
- * │ Nav Items                         │  Page Content   │
- * │   • Bot Studio (home)             │  (flex-1)       │
- * │   • Analytics                     │                 │
- * │   • Server status                 │                 │
- * │   ▸ More: JS bots, Intelligence,  │                 │
- * │     Marketplace, Security         │                 │
- * │ ─────────────────────────────     │                 │
- * │ Settings + Profile                │                 │
- * └──────────────────────────────────────────────────────┘
+ * STRUCTURE (one white sidebar, no top bar):
+ * ┌─────────────────────────────┬────────────────────────┐
+ * │ Kojy · search · bell        │                        │
+ * │ [ New bot ]                 │  Page content          │
+ * │ Studio chat                 │  (each page owns its   │
+ * │ Your bots (live status)     │   own header)          │
+ * │ …                           │                        │
+ * │ Analytics · Server status   │                        │
+ * │ Settings · More ▸           │                        │
+ * │ profile · sign out          │                        │
+ * └─────────────────────────────┴────────────────────────┘
  *
- * Bot Studio (/studio) is home: every bot, Kojy's chats and the live panel.
- * Bot Composer, Delegation, Mission Control and Simulation were folded into
- * it; their old addresses redirect there (see App.tsx).
+ * The bot list used to be a second column inside Bot Studio; it lives here
+ * now so every page can jump to a bot. Older pages sit under "More".
  *
  * INTERACTIONS:
- * - ⌘B / Ctrl+B: toggle sidebar collapse
- * - ⌘K / Ctrl+K: open command palette
- * - Click notification bell → NotificationDrawer slides in from right
+ * - ⌘B / Ctrl+B: collapse the sidebar to icons
+ * - ⌘K / Ctrl+K: open the command palette
+ * - Bell → NotificationDrawer slides in from the right
  *
- * MOBILE:
- * - Sidebar becomes bottom tab bar on <768px
- * - Topbar simplified (just logo + notifications + profile)
- * - Content takes full width
+ * MOBILE (<768px): the sidebar is replaced by a bottom tab bar.
  */
 
 import { useState, useEffect } from "react";
@@ -40,256 +32,212 @@ import { AnimatePresence, motion } from "framer-motion";
 import { NavLink, useLocation } from "react-router-dom";
 import { useAuthStore } from "../state/authStore";
 import { useNotificationStore } from "../state/notificationStore";
-import { useBotStore } from "../state/botStore";
 import { useWsStore } from "../state/wsStore";
 import { NotificationDrawer } from "../components/NotificationDrawer";
 import { CommandPalette } from "../components/CommandPalette";
+import { Icon, type IconName } from "../components/Icon";
+import { KojyFace } from "../components/RoomScene";
+import { trpc } from "../lib/trpc";
+import { useMotionAllowed } from "../lib/motion";
 import clsx from "clsx";
-
-// ─── Nav Items ────────────────────────────────────────────────────────────────
 
 // ─── App Shell ────────────────────────────────────────────────────────────────
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const notifOpen = useNotificationStore((s) => s.isOpen);
-  const toggleNotif = useNotificationStore((s) => s.toggleOpen);
-  const unreadCount = useNotificationStore((s) => s.unreadCount);
-  const { user, logout } = useAuthStore();
-  const wsConnected = useWsStore((s) => s.connected);
-  const botStats = useBotStore((s) => s.getStats());
   const location = useLocation();
+  const motionOk = useMotionAllowed();
 
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey;
-      if (meta && e.key === "b") {
-        e.preventDefault();
-        setSidebarCollapsed((v) => !v);
-      }
-      if (meta && e.key === "k") {
-        e.preventDefault();
-        setCommandOpen(true);
-      }
-      if (e.key === "Escape") {
-        setCommandOpen(false);
-      }
+      if (meta && e.key === "b") { e.preventDefault(); setCollapsed((v) => !v); }
+      if (meta && e.key === "k") { e.preventDefault(); setCommandOpen(true); }
+      if (e.key === "Escape") setCommandOpen(false);
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
   return (
-    <div className="relative h-screen w-screen flex overflow-hidden bg-[#030712] text-white">
-      <div aria-hidden className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,rgba(73,220,181,0.14),transparent_38%),radial-gradient(ellipse_at_top_right,rgba(139,92,246,0.12),transparent_32%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_18%)]" />
-      <div aria-hidden className="pointer-events-none absolute inset-0 bg-grid opacity-[0.08]" />
-      {/* Sidebar */}
-      <aside
-        className={clsx(
-          "flex-shrink-0 flex flex-col border-r border-white/5 bg-[#07111f] transition-all duration-200",
-          sidebarCollapsed ? "w-16" : "w-60",
-          "max-md:hidden", // Hidden on mobile — bottom nav used instead
-        )}
-        style={{ zIndex: 200 }}
-      >
-        {/* Logo */}
-        <div className="h-12 flex items-center px-4 border-b border-white/5 flex-shrink-0">
-          {!sidebarCollapsed ? (
-            <div className="flex items-center gap-2.5">
-              <KojyaiLogo />
-              <span className="text-sm font-bold tracking-tight text-white">KOJYAI</span>
-            </div>
-          ) : (
-            <KojyaiLogo />
-          )}
-        </div>
+    <div className={clsx("relative h-screen w-screen flex overflow-hidden bg-ground text-ink", motionOk && "or-motion")}>
+      <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} onSearch={() => setCommandOpen(true)} />
 
-        {/* Navigation */}
-        <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
-          <NavSection label="MAIN" collapsed={sidebarCollapsed}>
-            {/* Bot Studio: every bot + the Kojy chat — the main product, always first */}
-            <SidebarItem path="/studio"         icon="✦" label="Bot Studio"     collapsed={sidebarCollapsed} primary />
-            <SidebarItem path="/analytics"      icon="▦" label="Analytics"      collapsed={sidebarCollapsed} />
-            <SidebarItem path="/infrastructure" icon="⟁" label="Server status"  collapsed={sidebarCollapsed} />
-          </NavSection>
-
-          {/* Older and rarely used pages; the Studio covers most of what they did. */}
-          <MoreSection collapsed={sidebarCollapsed}>
-            <SidebarItem path="/bots"            icon="◉"  label="JS bots (classic)" collapsed={sidebarCollapsed}
-              badge={botStats.error > 0 ? botStats.error : null} />
-            <SidebarItem path="/intelligence"    icon="◈"  label="Intelligence"     collapsed={sidebarCollapsed} />
-            <SidebarItem path="/marketplace"     icon="◎"  label="Marketplace"      collapsed={sidebarCollapsed} />
-            <SidebarItem path="/security"        icon="⛨"  label="Security"         collapsed={sidebarCollapsed} />
-          </MoreSection>
-        </nav>
-
-        {/* Bottom: Collapse toggle + Settings + Profile */}
-        <div className="flex-shrink-0 border-t border-white/5 p-2 space-y-0.5">
-          <SidebarItem path="/settings" icon="⚙" label="Settings" collapsed={sidebarCollapsed} />
-
-          {/* Collapse toggle */}
-          <button
-            onClick={() => setSidebarCollapsed((v) => !v)}
-            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-white/30 hover:text-white/60 hover:bg-white/5 transition-colors"
-            aria-label="Toggle sidebar"
-          >
-            <span className="text-sm flex-shrink-0">{sidebarCollapsed ? "›" : "‹"}</span>
-            {!sidebarCollapsed && <span className="text-xs">Collapse</span>}
-          </button>
-
-          {/* User profile */}
-          {user && (
-            <div className={clsx(
-              "flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer hover:bg-white/5 transition-colors",
-            )}>
-              <UserAvatar name={user.displayName ?? user.username} size="sm" />
-              {!sidebarCollapsed && (
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-white/70 truncate">{user.displayName ?? user.username}</p>
-                  <p className="text-[10px] text-white/30 capitalize">{user.tier}</p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </aside>
-
-      {/* Main content area */}
-      <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Topbar */}
-        <header className="h-12 flex items-center justify-between px-4 border-b border-white/5 bg-[#07111f] flex-shrink-0" style={{ zIndex: 300 }}>
-          {/* Left: Page breadcrumb */}
-          <Breadcrumb />
-
-          {/* Center: Search / Command trigger */}
-          <button
-            onClick={() => setCommandOpen(true)}
-            className="flex items-center gap-2 px-3 py-1.5 bg-white/[0.03] border border-white/5 rounded-lg text-xs text-white/30 hover:text-white/50 hover:bg-white/5 transition-colors"
-          >
-            <span>⌘</span>
-            <span>Search…</span>
-            <kbd className="text-[10px] bg-white/5 px-1 rounded">K</kbd>
-          </button>
-
-          {/* Right: WS status, notifications, profile */}
-          <div className="flex items-center gap-3">
-            {/* Live indicator */}
-            <div className="flex items-center gap-1.5">
-              <span className={clsx(
-                "w-1.5 h-1.5 rounded-full",
-                wsConnected ? "bg-[#34d399] animate-pulse" : "bg-red-500",
-              )} />
-              <span className="text-[10px] font-mono text-white/30 max-sm:hidden">
-                {wsConnected ? "LIVE" : "OFFLINE"}
-              </span>
-            </div>
-
-            {/* Notifications */}
-            <button
-              onClick={toggleNotif}
-              className="relative w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/5 transition-colors text-white/40 hover:text-white/70"
-              aria-label="Notifications"
-            >
-              <span>🔔</span>
-              {unreadCount > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 flex items-center justify-center bg-[#ef4444] text-white text-[9px] font-bold rounded-full">
-                  {unreadCount > 9 ? "9+" : unreadCount}
-                </span>
-              )}
-            </button>
-
-            {/* Profile dropdown trigger */}
-            <button
-              onClick={logout}
-              className="flex items-center gap-2 hover:opacity-70 transition-opacity"
-            >
-              {user && <UserAvatar name={user.displayName ?? user.username} size="xs" />}
-            </button>
-          </div>
-        </header>
-
-        {/* Page content */}
+      <div className="relative flex-1 flex flex-col min-w-0 overflow-hidden">
+        <MobileTopBar onSearch={() => setCommandOpen(true)} />
         <main className="relative flex-1 overflow-hidden">
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
-              key={location.pathname}
+              key={location.pathname.startsWith("/studio") ? "/studio" : location.pathname}
               className="h-full"
-              initial={{ opacity: 0, y: 14, filter: "blur(10px)" }}
-              animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-              exit={{ opacity: 0, y: -10, filter: "blur(8px)" }}
-              transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+              initial={motionOk ? { opacity: 0, y: 8 } : false}
+              animate={{ opacity: 1, y: 0 }}
+              exit={motionOk ? { opacity: 0 } : { opacity: 1 }}
+              transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
             >
               {children}
             </motion.div>
           </AnimatePresence>
         </main>
-
-        {/* Mobile bottom nav */}
         <MobileBottomNav />
       </div>
 
-      {/* Overlays */}
       {notifOpen   && <NotificationDrawer />}
       {commandOpen && <CommandPalette onClose={() => setCommandOpen(false)} />}
     </div>
   );
 }
 
-// ─── Sidebar Item ─────────────────────────────────────────────────────────────
+// ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-function SidebarItem({
-  path, icon, label, collapsed, badge, primary,
-}: {
-  path:      string;
-  icon:      string;
-  label:     string;
-  collapsed: boolean;
-  badge?:    number | null;
-  primary?:  boolean;
-}) {
+type BotRow = { kind: string; id: string; name: string; status: string; live?: boolean; working?: boolean };
+
+const STATUS_WORD: Record<string, string> = {
+  running: "Running", starting: "Starting", installing: "Installing",
+  crashed: "Crashed", error: "Error", stopped: "Stopped",
+};
+
+function Sidebar({ collapsed, onToggle, onSearch }: { collapsed: boolean; onToggle: () => void; onSearch: () => void }) {
+  const { user, logout } = useAuthStore();
+  const toggleNotif = useNotificationStore((s) => s.toggleOpen);
+  const unreadCount = useNotificationStore((s) => s.unreadCount);
+  const wsConnected = useWsStore((s) => s.connected);
+  const bots = trpc.studio.bots.useQuery(undefined, { refetchInterval: 5000 });
+  const list = (bots.data ?? []) as BotRow[];
+  const name = user?.displayName ?? user?.username ?? undefined;
+
   return (
-    <NavLink
-      to={path}
-      className={({ isActive }) => clsx(
-        "flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-all duration-150 relative group",
-        isActive && primary
-          ? "bg-[#49dcb5]/15 text-[#49dcb5] border border-[#49dcb5]/30 shadow-[0_0_12px_rgba(73,220,181,0.15)]"
-          : isActive
-            ? "bg-[#49dcb5]/10 text-[#49dcb5] border border-[#49dcb5]/20"
-            : primary
-              ? "text-white/60 hover:text-[#49dcb5] hover:bg-[#49dcb5]/[0.06] border border-transparent hover:border-[#49dcb5]/15"
-              : "text-white/40 hover:text-white/70 hover:bg-white/[0.04] border border-transparent",
+    <aside
+      className={clsx(
+        "flex-shrink-0 flex flex-col bg-white border-r border-line transition-[width] duration-200 max-md:hidden",
+        collapsed ? "w-[68px]" : "w-[248px]",
       )}
-      title={collapsed ? label : undefined}
+      style={{ zIndex: 200 }}
+      aria-label="Main"
     >
-      <span className={clsx("text-base flex-shrink-0 w-4 text-center", primary && "drop-shadow-sm")}>{icon}</span>
-      {!collapsed && (
-        <span className={clsx("flex-1 truncate text-xs font-medium", primary && "font-semibold")}>
-          {label}
-        </span>
-      )}
-      {!collapsed && primary && (
-        <span className="text-[9px] bg-[#49dcb5]/20 text-[#49dcb5] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0">
-          NEW
-        </span>
-      )}
-      {badge != null && badge > 0 && (
-        <span className="flex-shrink-0 w-4 h-4 flex items-center justify-center bg-red-500 text-white text-[9px] font-bold rounded-full">
-          {badge > 9 ? "9+" : badge}
-        </span>
-      )}
-      {collapsed && (
-        <div className="absolute left-full ml-2 px-2 py-1 bg-[#1b2744] border border-white/10 rounded-lg text-xs text-white/80 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
-          {label}
+      {/* Logo, search, notifications */}
+      <div className={clsx("flex items-center gap-1 px-3 pt-4 pb-3", collapsed ? "flex-col" : "justify-between")}>
+        <NavLink to="/studio" className="flex items-center gap-2.5 px-1.5 py-1 rounded-lg text-ink no-underline" aria-label="Bot Studio home">
+          <KojyFace size={28} />
+          {!collapsed && <span className="font-display text-[21px] font-extrabold tracking-[-0.025em]">Kojy</span>}
+        </NavLink>
+        <div className={clsx("flex items-center gap-0.5", collapsed && "flex-col")}>
+          <IconButton label="Search (Ctrl+K)" icon="search" onClick={onSearch} />
+          <button onClick={toggleNotif} aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
+            className="relative w-9 h-9 inline-flex items-center justify-center rounded-lg text-ink-2 hover:bg-ink/[0.04] hover:text-ink transition-colors">
+            <Icon name="bell" />
+            {unreadCount > 0 && (
+              <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 inline-flex items-center justify-center bg-[#D93F3F] text-white text-[10px] font-bold rounded-full">
+                {unreadCount > 9 ? "9+" : unreadCount}
+              </span>
+            )}
+          </button>
         </div>
-      )}
-    </NavLink>
+      </div>
+
+      <div className="px-3">
+        <NavLink to="/studio/new" title={collapsed ? "New bot" : undefined}
+          className="w-full inline-flex items-center justify-center gap-2 h-10 rounded-[10px] bg-co text-white text-[14.5px] font-semibold shadow-glow-primary hover:bg-co-press transition-colors">
+          <Icon name="plus" size={16} strokeWidth={2.2} />
+          {!collapsed && "New bot"}
+        </NavLink>
+      </div>
+
+      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5" aria-label="Studio">
+        <div className="space-y-0.5">
+          <SideLink to="/studio" end icon="chat" label="Studio chat" collapsed={collapsed} />
+        </div>
+
+        <div>
+          {!collapsed && <p className="px-2.5 pb-1.5 text-[12.5px] font-semibold text-ink-3">Your bots</p>}
+          {collapsed && <div className="h-px bg-line mx-2 mb-2" />}
+          {bots.isLoading && !collapsed && <p className="px-2.5 text-sm text-ink-3">Loading…</p>}
+          {!bots.isLoading && list.length === 0 && !collapsed && (
+            <p className="px-2.5 text-sm text-ink-2">No bots yet. Your first one shows up here.</p>
+          )}
+          <ul className="space-y-0.5">
+            {list.map((b) => {
+              const short = b.kind === "python" ? "p" : "j";
+              const bad = b.status === "crashed" || b.status === "error";
+              return (
+                <li key={`${short}-${b.id}`}>
+                  <NavLink to={`/studio/${short}/${b.id}`} title={collapsed ? `${b.name} · ${STATUS_WORD[b.status] ?? b.status}` : undefined}
+                    className={({ isActive }) => clsx(
+                      "flex items-center gap-2.5 h-10 px-2.5 rounded-[10px] text-[14.5px] font-medium transition-colors",
+                      isActive ? "bg-co-tint text-co-deep" : "text-ink-2 hover:bg-ink/[0.04] hover:text-ink",
+                      collapsed && "justify-center",
+                    )}>
+                    <span className={clsx("relative w-2 h-2 rounded-full shrink-0",
+                      b.live ? "bg-co" : bad ? "bg-[#D93F3F]" : "bg-[#B4BACB]")}>
+                      {b.live && <span className="absolute inset-0 rounded-full border-2 border-co animate-ping opacity-60" />}
+                    </span>
+                    {!collapsed && <span className="truncate flex-1">{b.name}</span>}
+                    {!collapsed && (b.working
+                      ? <span className="text-[12px] text-co-ink">Kojy is working</span>
+                      : <span className={clsx("text-[12.5px]", bad ? "text-red-700" : "text-ink-3")}>{STATUS_WORD[b.status] ?? b.status}</span>)}
+                  </NavLink>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </nav>
+
+      <div className="px-3 pb-2 space-y-0.5">
+        <SideLink to="/analytics" icon="chart" label="Analytics" collapsed={collapsed} />
+        <SideLink to="/infrastructure" icon="pulse" label="Server status" collapsed={collapsed}
+          trailing={!wsConnected ? <span className="text-[12px] text-amber-700">offline</span> : null} />
+        <SideLink to="/settings" icon="gear" label="Settings" collapsed={collapsed} />
+        <MoreSection collapsed={collapsed}>
+          <SideLink to="/bots" icon="bot" label="JS bots (classic)" collapsed={collapsed} />
+          <SideLink to="/intelligence" icon="spark" label="Intelligence" collapsed={collapsed} />
+          <SideLink to="/marketplace" icon="store" label="Marketplace" collapsed={collapsed} />
+          <SideLink to="/security" icon="shield" label="Security" collapsed={collapsed} />
+        </MoreSection>
+      </div>
+
+      <div className={clsx("flex items-center gap-2.5 mx-3 mb-3 pt-3 px-1.5 border-t border-line", collapsed && "flex-col")}>
+        <UserAvatar name={name} />
+        {!collapsed && (
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-ink truncate">{name ?? "Signed in"}</p>
+            {user?.email && <p className="text-[12.5px] text-ink-2 truncate">{user.email}</p>}
+          </div>
+        )}
+        <IconButton label="Sign out" icon="signout" onClick={logout} />
+      </div>
+      <button onClick={onToggle} className="mx-3 mb-3 h-8 inline-flex items-center justify-center gap-2 rounded-lg text-[12.5px] text-ink-3 hover:bg-ink/[0.04] hover:text-ink-2 transition-colors"
+        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
+        <Icon name={collapsed ? "chevronR" : "chevronL"} size={16} />
+        {!collapsed && "Collapse"}
+      </button>
+    </aside>
   );
 }
 
-// ─── Nav Section ─────────────────────────────────────────────────────────────
+function SideLink({ to, icon, label, collapsed, end, trailing }: {
+  to: string; icon: IconName; label: string; collapsed: boolean; end?: boolean; trailing?: React.ReactNode;
+}) {
+  return (
+    <NavLink
+      to={to}
+      end={end ?? false}
+      title={collapsed ? label : undefined}
+      className={({ isActive }) => clsx(
+        "flex items-center gap-2.5 h-10 px-2.5 rounded-[10px] text-[14.5px] font-medium transition-colors",
+        isActive ? "bg-co-tint text-co-deep" : "text-ink-2 hover:bg-ink/[0.04] hover:text-ink",
+        collapsed && "justify-center",
+      )}
+    >
+      <Icon name={icon} />
+      {!collapsed && <span className="truncate flex-1">{label}</span>}
+      {!collapsed && trailing}
+    </NavLink>
+  );
+}
 
 function MoreSection({ collapsed, children }: { collapsed: boolean; children: React.ReactNode }) {
   const [open, setOpen] = useState(() => {
@@ -297,84 +245,64 @@ function MoreSection({ collapsed, children }: { collapsed: boolean; children: Re
   });
   const toggle = () => setOpen((v) => { try { localStorage.setItem("kojy:nav-more", v ? "0" : "1"); } catch { /* private mode */ } return !v; });
   return (
-    <div className="mb-3">
-      <button onClick={toggle} className="w-full text-left text-[9px] font-mono tracking-widest text-white/25 hover:text-white/50 px-3 mb-1">
-        {collapsed ? "⋯" : `MORE ${open ? "▾" : "▸"}`}
+    <div>
+      <button onClick={toggle} aria-expanded={open} title={collapsed ? "More pages" : undefined}
+        className={clsx("w-full flex items-center gap-2.5 h-10 px-2.5 rounded-[10px] text-[14.5px] font-medium text-ink-2 hover:bg-ink/[0.04] hover:text-ink transition-colors", collapsed && "justify-center")}>
+        <Icon name="more" strokeWidth={3} />
+        {!collapsed && <span className="flex-1 text-left">More</span>}
+        {!collapsed && <Icon name={open ? "chevronD" : "chevronR"} size={16} className="text-ink-3" />}
       </button>
-      {open && children}
+      {open && <div className={clsx("space-y-0.5", !collapsed && "pl-3")}>{children}</div>}
     </div>
   );
 }
 
-function NavSection({ label, collapsed, children }: { label: string; collapsed: boolean; children: React.ReactNode }) {
+// ─── Mobile ───────────────────────────────────────────────────────────────────
+
+function MobileTopBar({ onSearch }: { onSearch: () => void }) {
+  const toggleNotif = useNotificationStore((s) => s.toggleOpen);
+  const unreadCount = useNotificationStore((s) => s.unreadCount);
   return (
-    <div className="mb-3">
-      {!collapsed && (
-        <p className="text-[9px] font-mono tracking-widest text-white/20 px-3 mb-1">{label}</p>
-      )}
-      {collapsed && <div className="h-px bg-white/5 mx-2 mb-2" />}
-      {children}
-    </div>
+    <header className="hidden max-md:flex items-center justify-between h-14 px-3 bg-white border-b border-line flex-shrink-0">
+      <NavLink to="/studio" className="flex items-center gap-2 text-ink" aria-label="Bot Studio home">
+        <KojyFace size={26} />
+        <span className="font-display text-[19px] font-extrabold tracking-[-0.025em]">Kojy</span>
+      </NavLink>
+      <div className="flex items-center gap-1">
+        <NavLink to="/studio/new" className="inline-flex items-center gap-1.5 h-9 px-3 rounded-[10px] bg-co text-white text-sm font-semibold">
+          <Icon name="plus" size={15} strokeWidth={2.2} />New bot
+        </NavLink>
+        <IconButton label="Search" icon="search" onClick={onSearch} />
+        <button onClick={toggleNotif} aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
+          className="relative w-10 h-10 inline-flex items-center justify-center rounded-lg text-ink-2 hover:bg-ink/[0.04]">
+          <Icon name="bell" size={20} />
+          {unreadCount > 0 && <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-[#D93F3F]" />}
+        </button>
+      </div>
+    </header>
   );
 }
-
-// ─── Breadcrumb ───────────────────────────────────────────────────────────────
-
-function Breadcrumb() {
-  const location = useLocation();
-  const segments = location.pathname.split("/").filter(Boolean);
-
-  const labelMap: Record<string, string> = {
-    "studio":          "Bot Studio",
-    "new":             "New bot",
-    "bots":            "JS bots",
-    "intelligence":    "Intelligence",
-    "analytics":       "Analytics",
-    "marketplace":     "Marketplace",
-    "infrastructure":  "Server status",
-    "security":        "Security",
-    "settings":        "Settings",
-    "admin":           "Admin",
-  };
-
-  return (
-    <div className="flex items-center gap-1.5 text-xs text-white/40">
-      <span className="text-white/20">KOJYAI</span>
-      {segments.map((seg, i) => (
-        <span key={seg} className="flex items-center gap-1.5">
-          <span className="text-white/15">/</span>
-          <span className={i === segments.length - 1 ? "text-white/60" : "text-white/30"}>
-            {labelMap[seg] ?? seg}
-          </span>
-        </span>
-      ))}
-    </div>
-  );
-}
-
-// ─── Mobile Bottom Nav ────────────────────────────────────────────────────────
 
 function MobileBottomNav() {
-  const items = [
-    { path: "/studio",          icon: "✦", label: "Studio" },
-    { path: "/analytics",       icon: "▦", label: "Analytics" },
-    { path: "/infrastructure",  icon: "⟁", label: "Status" },
-    { path: "/settings",        icon: "⚙", label: "Settings" },
+  const items: { path: string; icon: IconName; label: string }[] = [
+    { path: "/studio",          icon: "chat",  label: "Studio" },
+    { path: "/analytics",       icon: "chart", label: "Analytics" },
+    { path: "/infrastructure",  icon: "pulse", label: "Status" },
+    { path: "/settings",        icon: "gear",  label: "Settings" },
   ];
-
   return (
-    <nav className="hidden max-md:flex items-center justify-around h-14 border-t border-white/5 bg-[#07111f] flex-shrink-0">
+    <nav className="hidden max-md:flex items-stretch h-16 px-2 border-t border-line bg-white flex-shrink-0" aria-label="Main">
       {items.map((item) => (
         <NavLink
           key={item.path}
           to={item.path}
           className={({ isActive }) => clsx(
-            "flex flex-col items-center gap-1 px-3 py-1.5 rounded-lg transition-colors",
-            isActive ? "text-[#49dcb5]" : "text-white/30",
+            "flex-1 flex flex-col items-center justify-center gap-1 text-[11.5px] font-semibold transition-colors",
+            isActive ? "text-co-deep" : "text-ink-2",
           )}
         >
-          <span className="text-lg">{item.icon}</span>
-          <span className="text-[9px] font-mono">{item.label}</span>
+          <Icon name={item.icon} size={22} />
+          {item.label}
         </NavLink>
       ))}
     </nav>
@@ -383,20 +311,20 @@ function MobileBottomNav() {
 
 // ─── Primitives ───────────────────────────────────────────────────────────────
 
-function KojyaiLogo() {
+function IconButton({ label, icon, onClick }: { label: string; icon: IconName; onClick: () => void }) {
   return (
-    <div className="w-6 h-6 rounded bg-[#49dcb5]/15 border border-[#49dcb5]/30 flex items-center justify-center flex-shrink-0">
-      <span className="text-[10px] text-[#49dcb5] font-bold">K</span>
-    </div>
+    <button onClick={onClick} aria-label={label} title={label}
+      className="w-9 h-9 inline-flex items-center justify-center rounded-lg text-ink-2 hover:bg-ink/[0.04] hover:text-ink transition-colors">
+      <Icon name={icon} />
+    </button>
   );
 }
 
-function UserAvatar({ name, size }: { name?: string; size: "xs" | "sm" }) {
-  const sz = size === "xs" ? "w-6 h-6 text-[10px]" : "w-7 h-7 text-xs";
+function UserAvatar({ name }: { name?: string | undefined }) {
   const initial = name ? name.charAt(0).toUpperCase() : "?";
   return (
-    <div className={clsx(sz, "rounded-full bg-[#49dcb5]/20 border border-[#49dcb5]/30 flex items-center justify-center text-[#49dcb5] font-semibold flex-shrink-0")}>
+    <span className="w-8 h-8 rounded-full bg-ink text-white inline-flex items-center justify-center text-[13px] font-semibold flex-shrink-0" aria-hidden="true">
       {initial}
-    </div>
+    </span>
   );
 }

@@ -134,19 +134,19 @@ function BotContextMenu({ x, y, botId, botName, botStatus, onClose }: ContextMen
   return (
     <div
       ref={menuRef}
-      className="fixed z-[9999] min-w-[160px] rounded-lg border border-white/10 bg-[#0d0d20] shadow-2xl py-1"
+      className="fixed z-[9999] min-w-[160px] rounded-lg border border-line bg-white shadow-2xl py-1"
       style={{ left: safeX, top: safeY }}
       role="menu"
       aria-label={`Actions for ${botName}`}
     >
       {actions.map((action, i) =>
         action.divider ? (
-          <div key={i} className="my-1 border-t border-white/10" />
+          <div key={i} className="my-1 border-t border-line" />
         ) : (
           <button
             key={i}
             onClick={action.action}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-white/70 hover:bg-white/5 hover:text-white/90 transition-colors"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-ink-2 hover:bg-ink/[0.04] hover:text-ink transition-colors"
             role="menuitem"
           >
             <span className="w-4 text-center opacity-60">{action.icon}</span>
@@ -184,11 +184,11 @@ export const BotCard = memo(function BotCard({ botId }: Props) {
       }}
       className={clsx(
         "bot-card group relative cursor-pointer select-none",
-        "bg-[#0b1220] border border-white/5 rounded-xl p-3",
+        "bg-white border border-line rounded-xl p-3",
         "transition-all duration-200 ease-out",
-        "hover:-translate-y-0.5 hover:border-white/10",
+        "hover:-translate-y-0.5 hover:border-line",
         bot.status === "error" && "border-red-500/20",
-        bot.status === "online" && "hover:border-[#34d399]/20",
+        bot.status === "online" && "hover:border-ok/20",
       )}
       style={{ boxShadow: glowStyle }}
       role="button"
@@ -205,10 +205,10 @@ export const BotCard = memo(function BotCard({ botId }: Props) {
         </div>
 
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-white/80 truncate leading-tight">
+          <p className="text-sm font-medium text-ink truncate leading-tight">
             {bot.name}
           </p>
-          <p className="text-[10px] text-white/30 truncate mt-0.5">
+          <p className="text-[10px] text-ink-3 truncate mt-0.5">
             {bot.activeRoomId ? `Room: ${bot.activeRoomId.slice(0, 12)}…` : "No room"}
           </p>
         </div>
@@ -230,9 +230,9 @@ export const BotCard = memo(function BotCard({ botId }: Props) {
         {/* Runtime mode badge */}
         <span className={clsx(
           "text-[9px] font-mono px-1.5 py-0.5 rounded tracking-wider uppercase",
-          bot.runtimeMode === "ai"       && "bg-violet-500/15 text-violet-300",
-          bot.runtimeMode === "scripted" && "bg-amber-500/15 text-amber-300",
-          bot.runtimeMode === "hybrid"   && "bg-cyan-500/15 text-cyan-300",
+          bot.runtimeMode === "ai"       && "bg-violet-500/15 text-violet-700",
+          bot.runtimeMode === "scripted" && "bg-amber-500/15 text-amber-700",
+          bot.runtimeMode === "hybrid"   && "bg-cyan-500/15 text-cyan-700",
         )}>
           {bot.runtimeMode}
         </span>
@@ -240,7 +240,7 @@ export const BotCard = memo(function BotCard({ botId }: Props) {
 
       {/* Live activity pulse — shown only when bot is online */}
       {bot.status === "online" && (
-        <div className="absolute top-2 right-2 w-1 h-1 rounded-full bg-[#34d399] opacity-0 group-hover:opacity-100 animate-ping" />
+        <div className="absolute top-2 right-2 w-1 h-1 rounded-full bg-ok-dot opacity-0 group-hover:opacity-100 animate-ping" />
       )}
     </div>
     {/* FIX-22: render context menu portal when triggered by right-click */}
@@ -262,9 +262,9 @@ export const BotCard = memo(function BotCard({ botId }: Props) {
 
 function StatusDot({ status }: { status: BotStatus }) {
   const config: Record<BotStatus, { color: string; pulse: boolean }> = {
-    online:     { color: "bg-[#34d399]", pulse: true },
+    online:     { color: "bg-ok-dot", pulse: true },
     connecting: { color: "bg-indigo-400", pulse: true },
-    offline:    { color: "bg-white/20",   pulse: false },
+    offline:    { color: "bg-ink/[0.08]",   pulse: false },
     error:      { color: "bg-red-500",    pulse: false },
     suspended:  { color: "bg-amber-500",  pulse: false },
   };
@@ -286,8 +286,8 @@ export function HealthBar({ score }: { score: BotHealthScore }) {
   const segments = [1, 2, 3, 4, 5] as const;
 
   const segmentColor = (seg: number): string => {
-    if (seg > score) return "bg-white/5";
-    if (score >= 4)  return "bg-[#34d399]";
+    if (seg > score) return "bg-ink/[0.04]";
+    if (score >= 4)  return "bg-ok-dot";
     if (score === 3) return "bg-amber-400";
     if (score === 2) return "bg-orange-500";
     return "bg-red-500";
@@ -313,8 +313,8 @@ export function HealthBar({ score }: { score: BotHealthScore }) {
 function Stat({ label, value }: { label: string; value: number }) {
   return (
     <div className="flex flex-col">
-      <span className="text-[9px] font-mono text-white/20 leading-none">{label}</span>
-      <span className="text-xs font-medium text-white/50 tabular-nums leading-tight">
+      <span className="text-[9px] font-mono text-ink-3 leading-none">{label}</span>
+      <span className="text-xs font-medium text-ink-3 tabular-nums leading-tight">
         {formatCount(value)}
       </span>
     </div>
@@ -349,7 +349,7 @@ function getHealthGlow(score: BotHealthScore): string {
 function getBotAvatarGradient(id: string): string {
   const palettes = [
     "linear-gradient(135deg, #ef4444, #dc2626)", // Red
-    "linear-gradient(135deg, #49dcb5, #0077a3)", // Cyan/Blue
+    "linear-gradient(135deg, #3B5BFD, #0077a3)", // Cyan/Blue
     "linear-gradient(135deg, #22c55e, #16a34a)", // Green
     "linear-gradient(135deg, #f59e0b, #d97706)", // Yellow
     "linear-gradient(135deg, #8b5cf6, #5b21b6)", // Violet

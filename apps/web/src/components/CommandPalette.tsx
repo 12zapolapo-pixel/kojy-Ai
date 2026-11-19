@@ -113,47 +113,47 @@ export function CommandPalette({ onClose }: Props) {
   }, [selected]);
 
   const typeColors: Record<CommandItem["type"], string> = {
-    nav:        "text-[#49dcb5]/60",
-    bot:        "text-[#34d399]/60",
-    action:     "text-amber-400/60",
-    simulation: "text-violet-400/60",
-    setting:    "text-white/30",
+    nav:        "text-co-ink",
+    bot:        "text-ok",
+    action:     "text-amber-700",
+    simulation: "text-violet-700",
+    setting:    "text-ink-3",
   };
 
   return (
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+        className="fixed inset-0 bg-ink/40 backdrop-blur-sm"
         style={{ zIndex: 600 }}
         onClick={onClose}
       />
 
       {/* Palette */}
       <div
-        className="fixed top-[20%] left-1/2 -translate-x-1/2 w-full max-w-[640px] mx-4 bg-[#121b31] border border-white/10 rounded-2xl shadow-modal overflow-hidden animate-scale-in"
+        className="fixed top-[20%] left-1/2 -translate-x-1/2 w-full max-w-[640px] mx-4 bg-white border border-line rounded-2xl shadow-modal overflow-hidden animate-scale-in"
         style={{ zIndex: 601 }}
       >
         {/* Search input */}
-        <div className="flex items-center gap-3 px-4 py-3.5 border-b border-white/5">
-          <span className="text-white/30 text-sm flex-shrink-0">⌘</span>
+        <div className="flex items-center gap-3 px-4 py-3.5 border-b border-line">
+          <span className="text-ink-3 text-sm flex-shrink-0">⌘</span>
           <input
             ref={inputRef}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setSelected(0); }}
             placeholder="Search bots, pages, actions…"
-            className="flex-1 bg-transparent text-sm text-white/80 placeholder:text-white/25 outline-none"
+            className="flex-1 bg-transparent text-sm text-ink placeholder:text-ink-3 outline-none"
           />
           {query && (
-            <button onClick={() => setQuery("")} className="text-white/20 hover:text-white/50 text-xs">✕</button>
+            <button onClick={() => setQuery("")} className="text-ink-3 hover:text-ink-3 text-xs">✕</button>
           )}
-          <kbd className="hidden sm:flex items-center gap-1 px-1.5 py-0.5 bg-white/5 border border-white/10 rounded text-[10px] text-white/30">ESC</kbd>
+          <kbd className="hidden sm:flex items-center gap-1 px-1.5 py-0.5 bg-ink/[0.04] border border-line rounded text-[10px] text-ink-3">ESC</kbd>
         </div>
 
         {/* Results */}
         <div ref={listRef} className="max-h-[360px] overflow-y-auto scrollbar-thin py-2">
           {filtered.length === 0 ? (
-            <div className="text-center py-10 text-white/25 text-sm">No results for "{query}"</div>
+            <div className="text-center py-10 text-ink-3 text-sm">No results for "{query}"</div>
           ) : (
             filtered.map((item, idx) => (
               <button
@@ -162,19 +162,19 @@ export function CommandPalette({ onClose }: Props) {
                 onMouseEnter={() => setSelected(idx)}
                 className={clsx(
                   "w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors",
-                  idx === selected ? "bg-white/[0.06]" : "hover:bg-white/[0.03]",
+                  idx === selected ? "bg-ink/[0.05]" : "hover:bg-ink/[0.03]",
                 )}
               >
                 <span className={clsx("text-sm w-5 text-center flex-shrink-0", typeColors[item.type])}>
                   {item.icon}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-white/80 truncate">{item.label}</p>
+                  <p className="text-sm text-ink truncate">{item.label}</p>
                   {item.subtitle && (
-                    <p className="text-[11px] text-white/30 truncate">{item.subtitle}</p>
+                    <p className="text-[11px] text-ink-3 truncate">{item.subtitle}</p>
                   )}
                 </div>
-                <span className={clsx("text-[9px] font-mono px-1.5 py-0.5 rounded uppercase", typeColors[item.type], "bg-white/5")}>
+                <span className={clsx("text-[9px] font-mono px-1.5 py-0.5 rounded uppercase", typeColors[item.type], "bg-ink/[0.04]")}>
                   {item.type}
                 </span>
               </button>
@@ -183,7 +183,7 @@ export function CommandPalette({ onClose }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-4 px-4 py-2 border-t border-white/5">
+        <div className="flex items-center gap-4 px-4 py-2 border-t border-line">
           <FooterHint keys="↑↓" label="navigate" />
           <FooterHint keys="↵"  label="select" />
           <FooterHint keys="esc" label="close" />
@@ -196,8 +196,8 @@ export function CommandPalette({ onClose }: Props) {
 function FooterHint({ keys, label }: { keys: string; label: string }) {
   return (
     <div className="flex items-center gap-1.5">
-      <kbd className="px-1.5 py-0.5 bg-white/5 border border-white/10 rounded text-[10px] text-white/40 font-mono">{keys}</kbd>
-      <span className="text-[10px] text-white/25">{label}</span>
+      <kbd className="px-1.5 py-0.5 bg-ink/[0.04] border border-line rounded text-[10px] text-ink-3 font-mono">{keys}</kbd>
+      <span className="text-[10px] text-ink-3">{label}</span>
     </div>
   );
 }

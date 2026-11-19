@@ -37,17 +37,17 @@ export default function IntelligencePage() {
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex-shrink-0 px-6 py-4 border-b border-white/5 bg-[#07111f]">
-        <h1 className="text-lg font-semibold text-white/90">Intelligence</h1>
-        <p className="text-xs text-white/35 mt-0.5">AI cognitive systems, memory networks, and relationship graphs</p>
+      <div className="flex-shrink-0 px-6 py-4 border-b border-line bg-canvas">
+        <h1 className="text-lg font-semibold text-ink">Intelligence</h1>
+        <p className="text-xs text-ink-3 mt-0.5">AI cognitive systems, memory networks, and relationship graphs</p>
       </div>
 
       {/* Tabs */}
-      <div className="flex-shrink-0 flex items-center gap-0.5 px-6 border-b border-white/5 bg-[#07111f] overflow-x-auto scrollbar-hidden">
+      <div className="flex-shrink-0 flex items-center gap-0.5 px-6 border-b border-line bg-canvas overflow-x-auto scrollbar-hidden">
         {TABS.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)}
             className={clsx("flex items-center gap-1.5 px-3 py-3 text-xs font-medium whitespace-nowrap border-b-2 transition-colors",
-              tab === t.id ? "border-[#49dcb5] text-[#49dcb5]" : "border-transparent text-white/35 hover:text-white/60")}>
+              tab === t.id ? "border-co text-co-ink" : "border-transparent text-ink-3 hover:text-ink-2")}>
             <span>{t.icon}</span><span>{t.label}</span>
           </button>
         ))}
@@ -83,9 +83,9 @@ function IntelOverview({ data, navigate: _navigate }: { data: any; navigate: any
         {data?.topRelationships?.length > 0 ? (
           <div className="space-y-2">
             {data.topRelationships.slice(0, 6).map((r: any) => (
-              <div key={r.id} className="flex items-center gap-3 p-3 bg-[#0b1220] border border-white/5 rounded-xl">
-                <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: r.affinity > 0 ? "#34d399" : "#ef4444" }} />
-                <span className="text-xs text-white/60 flex-1 font-mono">Bot {r.botId} → {r.targetType} {r.targetId}</span>
+              <div key={r.id} className="flex items-center gap-3 p-3 bg-white border border-line rounded-xl">
+                <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: r.affinity > 0 ? "#1F9D57" : "#ef4444" }} />
+                <span className="text-xs text-ink-2 flex-1 font-mono">Bot {r.botId} → {r.targetType} {r.targetId}</span>
                 <div className="flex gap-4">
                   <Metric label="trust"    val={r.trust} />
                   <Metric label="loyalty"  val={r.loyalty} />
@@ -119,8 +119,8 @@ function MemorySystemPanel() {
   return (
     <div className="h-full overflow-y-auto scrollbar-thin p-6 space-y-6">
       <Section title="MEMORY COMPRESSION ENGINE">
-        <div className="bg-[#0b1220] border border-white/5 rounded-xl p-5 space-y-4">
-          <p className="text-xs text-white/50 leading-relaxed">
+        <div className="bg-white border border-line rounded-xl p-5 space-y-4">
+          <p className="text-xs text-ink-3 leading-relaxed">
             Memory compression converts raw episodic memories into dense semantic summaries using Claude Haiku.
             Runs automatically every 6 hours. Each batch compresses 3–20 memories into a single coherent summary,
             reducing token usage by ~10x while preserving essential context.
@@ -132,10 +132,10 @@ function MemorySystemPanel() {
           </div>
           <button onClick={() => compress.mutate()}
             disabled={compress.isPending}
-            className="px-4 py-2 bg-[#49dcb5]/10 border border-[#49dcb5]/30 text-[#49dcb5] text-xs font-medium rounded-lg hover:bg-[#49dcb5]/20 transition-colors disabled:opacity-50">
+            className="px-4 py-2 bg-co/10 border border-co/30 text-co-ink text-xs font-medium rounded-lg hover:bg-co/20 transition-colors disabled:opacity-50">
             {compress.isPending ? "Queuing…" : "Trigger Manual Compression"}
           </button>
-          {compress.isSuccess && <p className="text-xs text-[#34d399]">✓ Compression job queued</p>}
+          {compress.isSuccess && <p className="text-xs text-ok">✓ Compression job queued</p>}
         </div>
       </Section>
     </div>
@@ -146,27 +146,27 @@ function RelationshipGraphPanel({ data }: { data: any }) {
   return (
     <div className="h-full overflow-y-auto scrollbar-thin p-6 space-y-4">
       <Section title="RELATIONSHIP GRAPH — ORG WIDE">
-        <p className="text-xs text-white/40 mb-4">All bot↔user and bot↔bot relationships across your organization. Updated after every 10 interactions.</p>
+        <p className="text-xs text-ink-3 mb-4">All bot↔user and bot↔bot relationships across your organization. Updated after every 10 interactions.</p>
         {data?.topRelationships?.length > 0 ? (
-          <div className="bg-[#0b1220] border border-white/5 rounded-xl overflow-hidden">
+          <div className="bg-white border border-line rounded-xl overflow-hidden">
             <table className="w-full text-xs">
-              <thead><tr className="border-b border-white/5">
-                <th className="text-left px-4 py-3 text-white/30 font-mono font-normal">BOT</th>
-                <th className="text-left px-4 py-3 text-white/30 font-mono font-normal">TARGET</th>
-                <th className="text-left px-4 py-3 text-white/30 font-mono font-normal">TRUST</th>
-                <th className="text-left px-4 py-3 text-white/30 font-mono font-normal">LOYALTY</th>
-                <th className="text-left px-4 py-3 text-white/30 font-mono font-normal">AFFINITY</th>
-                <th className="text-left px-4 py-3 text-white/30 font-mono font-normal">INTERACTIONS</th>
+              <thead><tr className="border-b border-line">
+                <th className="text-left px-4 py-3 text-ink-3 font-mono font-normal">BOT</th>
+                <th className="text-left px-4 py-3 text-ink-3 font-mono font-normal">TARGET</th>
+                <th className="text-left px-4 py-3 text-ink-3 font-mono font-normal">TRUST</th>
+                <th className="text-left px-4 py-3 text-ink-3 font-mono font-normal">LOYALTY</th>
+                <th className="text-left px-4 py-3 text-ink-3 font-mono font-normal">AFFINITY</th>
+                <th className="text-left px-4 py-3 text-ink-3 font-mono font-normal">INTERACTIONS</th>
               </tr></thead>
-              <tbody className="divide-y divide-white/[0.04]">
+              <tbody className="divide-y divide-line">
                 {data.topRelationships.map((r: any) => (
-                  <tr key={r.id} className="hover:bg-white/[0.02]">
-                    <td className="px-4 py-2.5 text-white/50 font-mono">{r.botId}</td>
-                    <td className="px-4 py-2.5 text-white/50 font-mono">{r.targetId}</td>
+                  <tr key={r.id} className="hover:bg-ink/[0.02]">
+                    <td className="px-4 py-2.5 text-ink-3 font-mono">{r.botId}</td>
+                    <td className="px-4 py-2.5 text-ink-3 font-mono">{r.targetId}</td>
                     <td className="px-4 py-2.5"><SignedBar val={r.trust} /></td>
                     <td className="px-4 py-2.5"><SignedBar val={r.loyalty} min={0} /></td>
                     <td className="px-4 py-2.5"><SignedBar val={r.affinity} /></td>
-                    <td className="px-4 py-2.5 text-white/50 font-mono">{r.interactionCount}</td>
+                    <td className="px-4 py-2.5 text-ink-3 font-mono">{r.interactionCount}</td>
                   </tr>
                 ))}
               </tbody>
@@ -182,7 +182,7 @@ function ChurnRadarPanel() {
   return (
     <div className="h-full overflow-y-auto scrollbar-thin p-6 space-y-4">
       <Section title="CHURN PREDICTION RADAR">
-        <p className="text-xs text-white/40 mb-4">Daily prediction sweep identifies players at risk of churning within 7 days. Triggers automated retention workflows.</p>
+        <p className="text-xs text-ink-3 mb-4">Daily prediction sweep identifies players at risk of churning within 7 days. Triggers automated retention workflows.</p>
         <div className="grid grid-cols-3 gap-4 mb-4">
           <IntelCard label="High Risk"   value="—" icon="🔴" color="red" />
           <IntelCard label="Medium Risk" value="—" icon="🟡" color="amber" />
@@ -198,7 +198,7 @@ function CoachingPanel() {
   return (
     <div className="h-full overflow-y-auto scrollbar-thin p-6 space-y-4">
       <Section title="BOT COACHING MODE">
-        <p className="text-xs text-white/40 mb-4">Review bot responses, rate them, and provide feedback. Insights are periodically applied to update behavior rules.</p>
+        <p className="text-xs text-ink-3 mb-4">Review bot responses, rate them, and provide feedback. Insights are periodically applied to update behavior rules.</p>
         <EmptyCard label="Coaching reviews appear here as bots interact. Rate responses to improve bot behavior." />
       </Section>
     </div>
@@ -209,8 +209,8 @@ function HiveMindPanel() {
   return (
     <div className="h-full overflow-y-auto scrollbar-thin p-6 space-y-4">
       <Section title="HIVE MIND NETWORK">
-        <p className="text-xs text-white/40 mb-4">Bots in your org share knowledge via a Redis pub/sub channel. Shared knowledge expires after a configurable TTL.</p>
-        <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4 space-y-3">
+        <p className="text-xs text-ink-3 mb-4">Bots in your org share knowledge via a Redis pub/sub channel. Shared knowledge expires after a configurable TTL.</p>
+        <div className="bg-white border border-line rounded-xl p-4 space-y-3">
           <InfoBox label="Channel"       value="hive:{orgId}" />
           <InfoBox label="Shared Items"  value="0 active" />
           <InfoBox label="Transport"     value="Redis Pub/Sub" />
@@ -225,15 +225,15 @@ function HiveMindPanel() {
 /* ─── Shared primitives ────────────────────────────────────────────────────── */
 
 function IntelCard({ label, value, icon, color, sub }: { label: string; value: any; icon: string; color: string; sub?: string }) {
-  const c: Record<string, string> = { cyan: "text-[#49dcb5]", violet: "text-violet-400", amber: "text-amber-400", green: "text-[#34d399]", red: "text-red-400" };
+  const c: Record<string, string> = { cyan: "text-co-ink", violet: "text-violet-700", amber: "text-amber-700", green: "text-ok", red: "text-red-700" };
   return (
-    <div className="bg-[#0b1220] border border-white/5 rounded-xl p-4">
+    <div className="bg-white border border-line rounded-xl p-4">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs text-white/30">{label}</span>
-        <span className={clsx("text-sm", c[color] ?? "text-white/40")}>{icon}</span>
+        <span className="text-xs text-ink-3">{label}</span>
+        <span className={clsx("text-sm", c[color] ?? "text-ink-3")}>{icon}</span>
       </div>
-      <p className={clsx("text-2xl font-semibold tabular-nums", c[color] ?? "text-white/70")}>{typeof value === "number" ? value.toLocaleString() : value}</p>
-      {sub && <p className="text-[10px] text-white/25 mt-1">{sub}</p>}
+      <p className={clsx("text-2xl font-semibold tabular-nums", c[color] ?? "text-ink-2")}>{typeof value === "number" ? value.toLocaleString() : value}</p>
+      {sub && <p className="text-[10px] text-ink-3 mt-1">{sub}</p>}
     </div>
   );
 }
@@ -241,43 +241,43 @@ function IntelCard({ label, value, icon, color, sub }: { label: string; value: a
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-3">
-      <h3 className="text-[10px] font-mono tracking-widest text-white/25">{title}</h3>
+      <h3 className="text-[10px] font-mono tracking-widest text-ink-3">{title}</h3>
       {children}
     </div>
   );
 }
 
 function EmptyCard({ label }: { label: string }) {
-  return <div className="p-6 bg-[#0b1220] border border-white/5 rounded-xl text-center text-xs text-white/25">{label}</div>;
+  return <div className="p-6 bg-white border border-line rounded-xl text-center text-xs text-ink-3">{label}</div>;
 }
 
 function InfoBox({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex justify-between">
-      <span className="text-xs text-white/35">{label}</span>
-      <span className="text-xs font-mono text-white/60">{value}</span>
+      <span className="text-xs text-ink-3">{label}</span>
+      <span className="text-xs font-mono text-ink-2">{value}</span>
     </div>
   );
 }
 
 function Metric({ label, val }: { label: string; val: number }) {
-  const color = val > 0.3 ? "text-[#34d399]" : val < -0.3 ? "text-red-400" : "text-white/40";
-  return <div className="text-right"><p className="text-[9px] text-white/20">{label}</p><p className={clsx("text-xs font-mono", color)}>{val.toFixed(2)}</p></div>;
+  const color = val > 0.3 ? "text-ok" : val < -0.3 ? "text-red-700" : "text-ink-3";
+  return <div className="text-right"><p className="text-[9px] text-ink-3">{label}</p><p className={clsx("text-xs font-mono", color)}>{val.toFixed(2)}</p></div>;
 }
 
 function SignedBar({ val, min = -1 }: { val: number; min?: number }) {
   const pct = ((val - min) / (1 - min)) * 100;
-  const color = val > 0.2 ? "bg-[#34d399]" : val < -0.2 ? "bg-red-400" : "bg-white/20";
+  const color = val > 0.2 ? "bg-ok-dot" : val < -0.2 ? "bg-red-400" : "bg-ink/[0.08]";
   return (
     <div className="flex items-center gap-2">
-      <div className="w-14 h-1.5 bg-white/8 rounded-full overflow-hidden"><div className={clsx("h-full rounded-full", color)} style={{ width: `${pct}%` }} /></div>
-      <span className="text-[10px] font-mono text-white/40">{val.toFixed(2)}</span>
+      <div className="w-14 h-1.5 bg-ink/[0.05] rounded-full overflow-hidden"><div className={clsx("h-full rounded-full", color)} style={{ width: `${pct}%` }} /></div>
+      <span className="text-[10px] font-mono text-ink-3">{val.toFixed(2)}</span>
     </div>
   );
 }
 
 function ActionButton({ label, icon, color, onClick }: { label: string; icon: string; color: string; onClick: () => void }) {
-  const c: Record<string, string> = { cyan: "border-[#49dcb5]/30 text-[#49dcb5] hover:bg-[#49dcb5]/10", violet: "border-violet-500/30 text-violet-400 hover:bg-violet-500/10", amber: "border-amber-500/30 text-amber-400 hover:bg-amber-500/10" };
+  const c: Record<string, string> = { cyan: "border-co/30 text-co-ink hover:bg-co/10", violet: "border-violet-500/30 text-violet-700 hover:bg-violet-500/10", amber: "border-amber-500/30 text-amber-700 hover:bg-amber-500/10" };
   return (
     <button onClick={onClick} className={clsx("flex items-center gap-2 px-4 py-2 border rounded-lg text-xs font-medium transition-colors", c[color])}>
       <span>{icon}</span><span>{label}</span>

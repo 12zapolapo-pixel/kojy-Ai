@@ -1,0 +1,57 @@
+/* Sign-in page layout — "Open Room". Tokens: styles/open-room.css */
+
+.au { display: flex; flex-wrap: wrap; font-size: 15px; }
+.au-main {
+  flex: 1 1 520px; min-width: 0; min-height: 100dvh;
+  display: flex; flex-direction: column;
+  padding: 28px clamp(20px, 5vw, 64px) 32px;
+}
+:where(.or) .au-mark { align-self: flex-start; display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; }
+.au-mark span { font-family: var(--display); font-size: 23px; font-weight: 800; letter-spacing: -0.025em; }
+.au-center { flex: 1; display: flex; align-items: center; justify-content: center; padding: 40px 0; }
+.au-box { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 24px; }
+.au-legal { font-size: 13.5px; color: var(--ink-2); }
+
+.au-segs { display: flex; padding: 4px; background: #E9EBF0; border-radius: 12px; }
+.au-seg {
+  flex: 1; min-height: 40px; border: 0; border-radius: 9px; background: transparent;
+  color: var(--ink-2); font: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  transition: background-color 200ms, color 200ms, box-shadow 200ms;
+}
+.au-seg:hover { color: var(--ink); }
+.au-seg.is-on { background: #FFFFFF; color: var(--ink); box-shadow: 0 1px 2px rgba(15, 18, 34, 0.1), 0 2px 8px -4px rgba(15, 18, 34, 0.2); }
+
+.au-form { display: flex; flex-direction: column; gap: 18px; }
+.au-title { font-family: var(--display); font-size: 36px; font-weight: 800; line-height: 1.1; letter-spacing: -0.025em; }
+.au-sub { margin-top: 8px; color: var(--ink-2); }
+.au-sub b { color: var(--ink); }
+.au-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.or .au-small { font-size: 13.5px; }
+.au-pw { position: relative; }
+.au-pw .or-input { padding-right: 72px; }
+.au-pw-toggle {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  min-height: 36px; padding: 0 10px; border: 0; border-radius: 8px; background: none;
+  color: var(--co-ink); font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.au-pw-toggle:hover { background: var(--tint); }
+.au-foot { text-align: center; font-size: 14.5px; color: var(--ink-2); }
+.au-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 20px; }
+.au-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 56px; height: 56px; border-radius: 16px; background: var(--tint); color: var(--co-ink);
+}
+.au-badge .or-ic { width: 26px; height: 26px; }
+.au-code { min-height: 60px; font-family: var(--mono); font-size: 24px; letter-spacing: 0.6em; text-align: center; padding-left: 0.6em; }
+
+.au-side {
+  flex: 1 1 520px; min-width: 0;
+  display: flex; flex-direction: column; justify-content: center; gap: 28px;
+  padding: clamp(32px, 5vw, 72px);
+  background: var(--co); color: #FFFFFF;
+}
+.au-side .rs { margin: 0; max-width: 560px; }
+.au-side-title { font-family: var(--display); font-size: clamp(30px, 3.2vw, 44px); font-weight: 800; line-height: 1.08; letter-spacing: -0.02em; max-width: 15ch; }
+.au-side-text { margin-top: 14px; font-size: 17px; max-width: 44ch; }
+
+.or-motion .au-box { animation: or-pane-in 0.4s var(--ease) both; }
