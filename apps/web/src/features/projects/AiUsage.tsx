@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import clsx from "clsx";
 import { trpc, type RouterOutputs } from "../../lib/trpc";
 import { useAuthStore } from "../../state/authStore";
@@ -94,40 +95,88 @@ export function AiUsageList({ data }: { data: AiUsageData }) {
   );
 }
 
+/** Phone-sized screens, where the list opens as a card across the screen. */
+const NARROW = "(max-width: 767px)";
+
 export function AiUsageCircle() {
   const role = useAuthStore((s) => s.user?.role);
   const isAdmin = role === "admin" || role === "superadmin";
   const [open, setOpen] = useState(false);
+  /** On a phone: where the card starts (just under the circle), in px from the top. */
+  const [sheetTop, setSheetTop] = useState<number | null>(null);
   const box = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
   const usage = trpc.projects.aiUsage.useQuery(undefined, { enabled: isAdmin, refetchInterval: open ? 4000 : 30_000 });
 
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false); };
+    // pointerdown, not mousedown: iPhones don't send mousedown for taps on plain areas.
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (box.current?.contains(t) || panel.current?.contains(t)) return;
+      setOpen(false);
+    };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
-    document.addEventListener("mousedown", onDown);
+    const onResize = () => setOpen(false);
+    document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize);
+    };
   }, [open]);
 
   if (!isAdmin) return null;
   const h = health(usage.data?.models ?? []);
 
+  const toggle = () => {
+    if (open) { setOpen(false); return; }
+    // On a phone the circle isn't at the screen's edge, so a panel hanging from it ran off
+    // the left side: it opens as a card across the screen instead, under the circle.
+    const narrow = typeof window !== "undefined" && window.matchMedia(NARROW).matches;
+    setSheetTop(narrow && button.current ? Math.round(button.current.getBoundingClientRect().bottom + 8) : null);
+    setOpen(true);
+  };
+
+  const body = (
+    <>
+      <div className="flex justify-end -mb-1">
+        <button type="button" onClick={() => setOpen(false)} aria-label="Close"
+          className="w-7 h-7 -mt-1 -mr-1 inline-flex items-center justify-center rounded-md text-ink-3 hover:text-ink hover:bg-ink/[0.04] text-base leading-none">
+          ×
+        </button>
+      </div>
+      {usage.isLoading && <p className="text-ink-3">Loading…</p>}
+      {usage.isError && <p className="text-red-700">Couldn't load the AI usage: {usage.error.message}</p>}
+      {usage.data && <AiUsageList data={usage.data} />}
+    </>
+  );
+
   return (
     <div ref={box} className="relative">
-      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-label="AI models and usage"
+      <button ref={button} type="button" onClick={toggle} aria-expanded={open} aria-label="AI models and usage"
         title="AI models and usage"
         className={clsx("w-6 h-6 rounded-full border flex items-center justify-center transition-colors",
           open ? "border-co/60 bg-co/10" : "border-line-strong hover:border-[#B4BACB]")}>
         <span className={clsx("w-2.5 h-2.5 rounded-full", DOT[h])} />
       </button>
-      {open && (
-        <div role="dialog" aria-label="AI models and usage"
+      {open && sheetTop === null && (
+        <div ref={panel} role="dialog" aria-label="AI models and usage"
           className="absolute right-0 top-8 z-20 w-[min(26rem,calc(100vw-2rem))] max-h-[70vh] overflow-y-auto bg-white border border-line rounded-lg p-3 shadow-xl text-xs">
-          {usage.isLoading && <p className="text-ink-3">Loading…</p>}
-          {usage.isError && <p className="text-red-700">Couldn't load the AI usage: {usage.error.message}</p>}
-          {usage.data && <AiUsageList data={usage.data} />}
+          {body}
         </div>
+      )}
+      {open && sheetTop !== null && createPortal(
+        // On <body>, so no parent's transform or overflow can move or clip it.
+        <div ref={panel} role="dialog" aria-label="AI models and usage"
+          className="fixed left-3 right-3 z-[400] overflow-y-auto overscroll-contain bg-white border border-line rounded-xl p-3 shadow-xl text-[13px]"
+          style={{ top: sheetTop, maxHeight: `calc(100dvh - ${sheetTop}px - 5.5rem - env(safe-area-inset-bottom))` }}>
+          {body}
+        </div>,
+        document.body,
       )}
     </div>
   );

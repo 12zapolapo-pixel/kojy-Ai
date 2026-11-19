@@ -63,7 +63,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <div className={clsx("relative h-screen w-screen flex overflow-hidden bg-ground text-ink", motionOk && "or-motion")}>
+    // h-full of #root (100dvh, the height you can see), not h-screen (100vh): on iPhone
+    // Safari 100vh is the height without the toolbar, which pushed the tab bar under it.
+    <div className={clsx("relative h-full w-full flex overflow-hidden bg-ground text-ink", motionOk && "or-motion")}>
       <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} onSearch={() => setCommandOpen(true)} />
 
       <div className="relative flex-1 flex flex-col min-w-0 overflow-hidden">
@@ -291,7 +293,7 @@ function MobileBottomNav() {
     { path: "/settings",        icon: "gear",  label: "Settings" },
   ];
   return (
-    <nav className="hidden max-md:flex items-stretch h-16 px-2 border-t border-line bg-white flex-shrink-0" aria-label="Main">
+    <nav className="hidden max-md:flex items-stretch min-h-16 px-2 pb-[env(safe-area-inset-bottom)] border-t border-line bg-white flex-shrink-0" aria-label="Main">
       {items.map((item) => (
         <NavLink
           key={item.path}
