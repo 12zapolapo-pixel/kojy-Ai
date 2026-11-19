@@ -1,96 +1,101 @@
 /**
- * Settings Page
+ * Settings Page ("Open Room")
  * OWNERSHIP: apps/web/src/features/settings
+ *
+ * Only shows what the API can actually do today:
+ *   Account   — your details from auth.me (read-only; there is no update endpoint yet)
+ *   Plan      — billing, only when it's switched on (system.features.billing)
+ *   Security  — change password (signs out every device, by design) and sign out here
+ *   Your data — download everything (gdpr.exportMyData) or delete the account
+ *               (gdpr.eraseMyData, which requires a typed confirmation phrase)
+ *
+ * The old Organization / Notifications / Theme tabs were removed: their
+ * controls weren't connected to anything.
  */
-import { useState }  from "react";
+import { useId, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getQueryKey } from "@trpc/react-query";
-import { trpc, trpcClient }      from "../../lib/trpc";
+import { trpc, trpcClient } from "../../lib/trpc";
 import { useAuthStore } from "../../state/authStore";
-import clsx          from "clsx";
+import clsx from "clsx";
 
-type Tab = "profile" | "org" | "billing" | "security" | "notifications" | "theme";
+type Tab = "account" | "billing" | "security" | "data";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: "profile",       label: "Profile",        icon: "👤" },
-  { id: "org",           label: "Organization",   icon: "◎" },
-  { id: "billing",       label: "Billing",        icon: "💳" },
-  { id: "security",      label: "Security",       icon: "⛨" },
-  { id: "notifications", label: "Notifications",  icon: "🔔" },
-  { id: "theme",         label: "Theme",          icon: "🎨" },
+  { id: "account",  label: "Account",        icon: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 20c1.5-3.5 4.5-5 8-5s6.5 1.5 8 5" },
+  { id: "billing",  label: "Plan & billing", icon: "M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 10h18M7 15h4" },
+  { id: "security", label: "Security",       icon: "M5 11h14v9H5zM8 11V8a4 4 0 0 1 8 0v3" },
+  { id: "data",     label: "Your data",      icon: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" },
 ];
 
+const CONFIRM_PHRASE = "DELETE MY ACCOUNT";
+
 export default function SettingsPage() {
-  const [tab, setTab] = useState<Tab>("profile");
-  const user          = useAuthStore((s) => s.user);
-  // Billing is optional (Stripe off by default): hide the tab unless it's on.
-  const features      = trpc.system.features.useQuery(undefined, { staleTime: 5 * 60_000 });
-  const tabs          = TABS.filter((t) => t.id !== "billing" || features.data?.billing);
+  const [tab, setTab] = useState<Tab>("account");
+  const user = useAuthStore((s) => s.user);
+  // Billing is optional (Stripe off by default): hide the section unless it's on.
+  const features = trpc.system.features.useQuery(undefined, { staleTime: 5 * 60_000 });
+  const tabs = TABS.filter((t) => t.id !== "billing" || features.data?.billing);
 
   return (
-    <div className="h-full flex overflow-hidden">
-      {/* Sidebar */}
-      <div className="w-52 flex-shrink-0 border-r border-line bg-canvas py-4 px-2">
-        <p className="text-[9px] font-mono tracking-widest text-ink-3 px-3 mb-2">SETTINGS</p>
-        {tabs.map((t) => (
-          <button key={t.id} onClick={() => setTab(t.id)}
-            className={clsx("w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs transition-colors",
-              tab === t.id ? "bg-co/10 text-co-ink border border-co/20" : "text-ink-3 hover:text-ink-2 hover:bg-ink/[0.03]")}>
-            <span>{t.icon}</span><span>{t.label}</span>
-          </button>
-        ))}
+    <div className="h-full overflow-y-auto">
+      <div className="max-w-[1040px] mx-auto px-5 py-8 md:px-10">
+        <h1 className="font-display text-[32px] font-extrabold leading-tight tracking-[-0.025em] text-ink">Settings</h1>
+        <div className="mt-6 flex flex-wrap items-start gap-x-8 gap-y-5">
+          <nav aria-label="Settings sections" className="flex-[1_1_200px] max-md:flex-[1_1_100%] flex md:flex-col gap-1 max-md:overflow-x-auto">
+            {tabs.map((t) => (
+              <button key={t.id} onClick={() => setTab(t.id)} aria-pressed={tab === t.id}
+                className={clsx("flex items-center gap-2.5 h-11 px-3 rounded-[10px] text-[15px] font-semibold whitespace-nowrap transition-colors",
+                  tab === t.id ? "bg-white text-ink shadow-card ring-1 ring-line" : "text-ink-2 hover:bg-[#EBEDF2] hover:text-ink")}>
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={t.icon} /></svg>
+                {t.label}
+              </button>
+            ))}
+          </nav>
+
+          <div className="flex-[999_1_480px] min-w-0 space-y-5" key={tab}>
+            {tab === "account"  && <AccountSettings user={user} />}
+            {tab === "billing"  && features.data?.billing && <BillingSettings user={user} />}
+            {tab === "security" && <SecuritySettings />}
+            {tab === "data"     && <DataSettings />}
+          </div>
+        </div>
       </div>
-
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin p-8">
-        {tab === "profile"       && <ProfileSettings user={user} />}
-        {tab === "org"           && <OrgSettings />}
-        {tab === "billing"       && features.data?.billing && <BillingSettings user={user} />}
-        {tab === "security"      && <SecuritySettings />}
-        {tab === "notifications" && <NotificationSettings />}
-        {tab === "theme"         && <ThemeSettings />}
-      </div>
     </div>
   );
 }
 
-function ProfileSettings({ user }: { user: any }) {
-  const [displayName, setDisplayName] = useState(user?.displayName ?? "");
-  const [locale,      setLocale]      = useState(user?.locale ?? "en");
-  const [timezone,    setTimezone]    = useState(user?.timezone ?? "UTC");
+// ─── Account ──────────────────────────────────────────────────────────────────
+
+function AccountSettings({ user }: { user: any }) {
   return (
-    <div className="max-w-lg space-y-6">
-      <SectionHeader title="Profile" sub="Your personal account settings" />
-      <Card>
-        <Row label="Email"    value={user?.email ?? "—"} readonly />
-        <Row label="Username" value={user?.username ?? "—"} readonly />
-        <EditField label="Display Name" value={displayName} onChange={setDisplayName} />
-        <EditField label="Locale" value={locale} onChange={setLocale} />
-        <EditField label="Timezone" value={timezone} onChange={setTimezone} />
-        <SaveButton label="Save Profile" />
-      </Card>
-      <Card>
-        <SectionHeader title="Danger Zone" sub="Irreversible account actions" small />
-        <button className="px-4 py-2 border border-red-500/20 text-red-700 text-xs rounded-lg hover:bg-red-500/10 transition-colors">Request Account Deletion (GDPR)</button>
-      </Card>
+    <Card title="Account" sub="Your details in KojyAI.">
+      <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+        <Detail label="Email" value={user?.email} />
+        <Detail label="Username" value={user?.username} />
+        <Detail label="Display name" value={user?.displayName || "Not set"} muted={!user?.displayName} />
+        <Detail label="Plan" value={user?.tier ? String(user.tier).replace(/^\w/, (c: string) => c.toUpperCase()) : undefined} />
+        <Detail label="Language" value={user?.locale} />
+        <Detail label="Timezone" value={user?.timezone} />
+      </dl>
+      <p className="mt-5 pt-4 border-t border-line text-[13.5px] text-ink-2">
+        Changing these here isn’t available yet. Your password lives under Security.
+      </p>
+    </Card>
+  );
+}
+
+function Detail({ label, value, muted }: { label: string; value?: string | null | undefined; muted?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[13.5px] text-ink-2">{label}</dt>
+      <dd className={clsx("mt-0.5 text-[15.5px] font-medium truncate", muted ? "text-ink-3" : "text-ink")}>{value || "—"}</dd>
     </div>
   );
 }
 
-function OrgSettings() {
-  return (
-    <div className="max-w-lg space-y-6">
-      <SectionHeader title="Organization" sub="Your workspace settings" />
-      <Card>
-        <EditField label="Organization Name" value="" onChange={() => {}} />
-        <EditField label="Slug" value="" onChange={() => {}} readonly />
-        <Row label="Plan" value="Free" readonly />
-        <Row label="Bot Quota" value="1 / 1 used" readonly />
-        <SaveButton label="Save Organization" />
-      </Card>
-    </div>
-  );
-}
+// ─── Billing ──────────────────────────────────────────────────────────────────
 
 function BillingSettings({ user }: { user: any }) {
   const qc = useQueryClient();
@@ -99,168 +104,192 @@ function BillingSettings({ user }: { user: any }) {
   const portalMutation = useMutation({
     mutationFn: () => trpcClient.billing.getPortalUrl.mutate(),
     onSuccess: (d: any) => {
-      // FIX-AUDIT: added noopener,noreferrer — this opens an external Stripe
-      // URL; without it, the new tab holds a window.opener reference back to
-      // this app's tab (reverse-tabnabbing exposure).
+      // noopener,noreferrer: this opens an external Stripe URL; without it the
+      // new tab keeps a window.opener reference back to this app (tabnabbing).
       window.open(d.url, "_blank", "noopener,noreferrer");
-      // Subscription may change while the user is in the Stripe portal —
-      // refresh once they return to this tab.
+      // The subscription may change in the Stripe portal — refresh on return.
       void qc.invalidateQueries({ queryKey: subscriptionKey });
     },
   });
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
   const PLANS = [
-    { id: "starter",    label: "Starter",    price: "$9",   bots: 3,   badge: ""          },
-    { id: "pro",        label: "Pro",        price: "$29",  bots: 10,  badge: "POPULAR"   },
-    { id: "elite",      label: "Elite",      price: "$79",  bots: 50,  badge: ""          },
-    { id: "enterprise", label: "Enterprise", price: "Custom", bots: 999, badge: "CUSTOM"  },
+    { id: "starter",    label: "Starter",    price: "$9",     bots: 3   },
+    { id: "pro",        label: "Pro",        price: "$29",    bots: 10  },
+    { id: "elite",      label: "Elite",      price: "$79",    bots: 50  },
+    { id: "enterprise", label: "Enterprise", price: "Custom", bots: 999 },
   ];
+  const current = (sub as any)?.plan ?? user?.tier ?? "free";
+  const periodEnd = (sub as any)?.currentPeriodEnd ? new Date((sub as any).currentPeriodEnd).toLocaleDateString() : null;
 
   return (
-    <div className="max-w-2xl space-y-6">
-      <SectionHeader title="Billing" sub="Manage your subscription and usage" />
-      <Card>
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-medium text-ink-2">Current Plan: <span className="text-co-ink capitalize">{(sub as any)?.plan ?? user?.tier ?? "free"}</span></p>
-            <p className="text-xs text-ink-3 mt-0.5">Period ends: {(sub as any)?.currentPeriodEnd ? new Date((sub as any).currentPeriodEnd).toLocaleDateString() : "—"}</p>
-          </div>
-          {(sub as any)?.stripeSubscriptionId && (
-            <button onClick={() => portalMutation.mutate()} disabled={portalMutation.isPending}
-              className="px-4 py-2 border border-line text-ink-3 text-xs rounded-lg hover:bg-ink/[0.04] transition-colors">
-              {portalMutation.isPending ? "Opening…" : "Manage Billing"}
-            </button>
-          )}
-        </div>
-      </Card>
-      <div className="grid grid-cols-2 gap-4">
-        {PLANS.map((p) => (
-          <div key={p.id} className={clsx("p-5 rounded-xl border space-y-3", (sub as any)?.plan === p.id ? "border-co/30 bg-co/5" : "border-line bg-white")}>
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-sm font-semibold text-ink">{p.label}</p>
-                <p className="text-xl font-bold text-co-ink mt-1">{p.price}<span className="text-xs text-ink-3 font-normal">/mo</span></p>
+    <Card title="Plan & billing" sub={<>You’re on <b className="text-ink capitalize">{current}</b>{periodEnd ? <>. The current period ends {periodEnd}.</> : "."}</>}
+      action={(sub as any)?.stripeSubscriptionId ? (
+        <button onClick={() => portalMutation.mutate()} disabled={portalMutation.isPending} className={lineBtn}>
+          {portalMutation.isPending ? "Opening…" : "Manage billing"}
+        </button>
+      ) : null}>
+      {checkoutError && <p className={errorBox} role="alert">{checkoutError}</p>}
+      <div className="grid gap-3 grid-cols-[repeat(auto-fit,minmax(min(100%,180px),1fr))]">
+        {PLANS.map((p) => {
+          const isCurrent = current === p.id;
+          return (
+            <div key={p.id} className={clsx("flex flex-col gap-1.5 p-[18px] rounded-[14px] bg-white border",
+              isCurrent ? "border-co shadow-[0_0_0_1px_#3B5BFD]" : "border-line")}>
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-display text-lg font-bold text-ink">{p.label}</p>
+                {isCurrent && <span className="px-2 py-0.5 rounded-full bg-co-tint text-co-deep text-[12.5px] font-semibold">Current</span>}
               </div>
-              {p.badge && <span className="text-[9px] font-mono px-1.5 py-0.5 bg-co/15 text-co-ink rounded">{p.badge}</span>}
+              <p className="text-[22px] font-bold text-ink">{p.price}{p.price !== "Custom" && <span className="text-sm font-medium text-ink-2"> / month</span>}</p>
+              <p className="text-[13.5px] text-ink-2">Up to {p.bots === 999 ? "unlimited" : p.bots} bots</p>
+              {!isCurrent && (
+                <button
+                  onClick={() => {
+                    setCheckoutError(null);
+                    trpcClient.billing.createCheckout.mutate({ targetPlan: p.id as any })
+                      .then((d: any) => {
+                        if (d.checkoutUrl) window.open(d.checkoutUrl, "_blank", "noopener,noreferrer");
+                        void qc.invalidateQueries({ queryKey: subscriptionKey });
+                      })
+                      .catch((e: any) => setCheckoutError(e?.message ?? "Checkout didn’t open. Try again."));
+                  }}
+                  className={clsx("mt-2", p.id === "pro" ? primaryBtn : lineBtn)}>
+                  {p.id === "enterprise" ? "Contact sales" : "Upgrade"}
+                </button>
+              )}
             </div>
-            <p className="text-xs text-ink-3">Up to {p.bots === 999 ? "unlimited" : p.bots} bots</p>
-            {(sub as any)?.plan !== p.id && (
-              <button
-                onClick={() => trpcClient.billing.createCheckout.mutate({ targetPlan: p.id as any }).then((d: any) => {
-                  // FIX-AUDIT: same noopener,noreferrer fix as getPortalUrl above.
-                  if (d.checkoutUrl) window.open(d.checkoutUrl, "_blank", "noopener,noreferrer");
-                  void qc.invalidateQueries({ queryKey: subscriptionKey });
-                })}
-                className="w-full py-2 bg-co/10 border border-co/30 text-co-ink text-xs font-medium rounded-lg hover:bg-co/20 transition-colors">
-                {p.id === "enterprise" ? "Contact Sales" : "Upgrade"}
-              </button>
-            )}
-            {(sub as any)?.plan === p.id && <p className="text-xs text-center text-ok">✓ Current Plan</p>}
-          </div>
-        ))}
+          );
+        })}
       </div>
-    </div>
+    </Card>
   );
 }
+
+// ─── Security ─────────────────────────────────────────────────────────────────
 
 function SecuritySettings() {
   const [currentPw, setCurrentPw] = useState("");
-  const [newPw,     setNewPw]     = useState("");
-  const mutation = useMutation({ mutationFn: () => trpcClient.auth.changePassword.mutate({ currentPassword: currentPw, newPassword: newPw }), onSuccess: () => {
-    setCurrentPw(""); setNewPw("");
-    // L-10: the server just invalidated EVERY session, including this one — the
-    // token we hold is dead. Sign out locally and go to /login instead of
-    // leaving the user on a page whose next request fails with UNAUTHORIZED.
-    void useAuthStore.getState().logout();
-  } });
+  const [newPw, setNewPw] = useState("");
+  const logout = useAuthStore((s) => s.logout);
+  const mutation = useMutation({
+    mutationFn: () => trpcClient.auth.changePassword.mutate({ currentPassword: currentPw, newPassword: newPw }),
+    onSuccess: () => {
+      setCurrentPw(""); setNewPw("");
+      // The server just ended EVERY session, this one included — the token we
+      // hold is dead. Sign out locally instead of failing on the next request.
+      void useAuthStore.getState().logout();
+    },
+  });
   return (
-    <div className="max-w-lg space-y-6">
-      <SectionHeader title="Security" sub="Password and access settings" />
-      <Card>
-        <p className="text-xs font-mono tracking-widest text-ink-3 mb-3">CHANGE PASSWORD</p>
-        <EditField label="Current Password" value={currentPw} onChange={setCurrentPw} type="password" />
-        <EditField label="New Password"     value={newPw}     onChange={setNewPw}     type="password" />
-        {mutation.isError  && <p className="text-xs text-red-700">{(mutation.error as any)?.message}</p>}
-        {mutation.isSuccess && <p className="text-xs text-ok">✓ Password updated — signing you out…</p>}
-        <button onClick={() => mutation.mutate()} disabled={mutation.isPending || !currentPw || !newPw}
-          className="px-4 py-2 bg-co/10 border border-co/30 text-co-ink text-xs rounded-lg hover:bg-co/20 transition-colors disabled:opacity-40">
-          {mutation.isPending ? "Updating…" : "Update Password"}
-        </button>
+    <>
+      <Card title="Password" sub="Changing it signs you out on every device, this one too.">
+        <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (currentPw && newPw.length >= 8) mutation.mutate(); }}>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Current password" type="password" value={currentPw} onChange={setCurrentPw} autoComplete="current-password" />
+            <Field label="New password" type="password" value={newPw} onChange={setNewPw} autoComplete="new-password" help="At least 8 characters." />
+          </div>
+          {mutation.isError && <p className={errorBox} role="alert">{(mutation.error as any)?.message ?? "The password didn’t change. Try again."}</p>}
+          {mutation.isSuccess && <p className={noteBox} role="status">Password changed. Signing you out…</p>}
+          <button type="submit" disabled={mutation.isPending || !currentPw || newPw.length < 8} className={primaryBtn}>
+            {mutation.isPending ? "Updating…" : "Update password"}
+          </button>
+        </form>
       </Card>
-      <Card>
-        <p className="text-xs font-mono tracking-widest text-ink-3 mb-3">ACTIVE SESSIONS</p>
-        <p className="text-xs text-ink-3">Session management — sign out from all devices</p>
-        <button className="mt-2 px-4 py-2 border border-red-500/20 text-red-700 text-xs rounded-lg hover:bg-red-500/10 transition-colors">Sign Out All Sessions</button>
-      </Card>
-    </div>
+      <Card title="This device" sub="Sign out here. Your bots keep running." action={
+        <button onClick={() => void logout()} className={lineBtn}>Sign out</button>
+      } />
+    </>
   );
 }
 
-function NotificationSettings() {
-  const prefs = [
-    { key: "bot_offline",         label: "Bot goes offline",           enabled: true  },
-    { key: "bot_error",           label: "Bot error",                  enabled: true  },
-    { key: "simulation_complete", label: "Simulation completes",       enabled: true  },
-    { key: "billing_due",         label: "Billing due",                enabled: true  },
-    { key: "new_member",          label: "New team member joins",      enabled: false },
-    { key: "security_alert",      label: "Security alerts",            enabled: true  },
-  ];
-  const [prefs_, setPrefs_] = useState(prefs);
-  const toggle = (key: string) => setPrefs_((p) => p.map((pr) => pr.key === key ? { ...pr, enabled: !pr.enabled } : pr));
+// ─── Your data ────────────────────────────────────────────────────────────────
+
+function DataSettings() {
+  const [phrase, setPhrase] = useState("");
+  const exportData = useMutation({
+    mutationFn: () => trpcClient.gdpr.exportMyData.query(),
+    onSuccess: (data) => {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `kojyai-my-data-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
+  });
+  const erase = useMutation({
+    mutationFn: () => trpcClient.gdpr.eraseMyData.mutate({ confirm: CONFIRM_PHRASE }),
+    onSuccess: () => { void useAuthStore.getState().logout(); },
+  });
+  const confirmId = useId();
+
   return (
-    <div className="max-w-lg space-y-6">
-      <SectionHeader title="Notifications" sub="Control which events notify you" />
-      <Card>
-        {prefs_.map((p) => (
-          <label key={p.key} className="flex items-center justify-between py-2.5 border-b border-line last:border-0 cursor-pointer">
-            <span className="text-sm text-ink-2">{p.label}</span>
-            <div onClick={() => toggle(p.key)} className={clsx("w-9 h-5 rounded-full transition-colors relative", p.enabled ? "bg-co" : "bg-ink/[0.06]")}>
-              <span className={clsx("absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all", p.enabled ? "right-0.5" : "left-0.5")} />
-            </div>
+    <>
+      <Card title="Download your data" sub="Everything KojyAI keeps about your account, as one JSON file."
+        action={<button onClick={() => exportData.mutate()} disabled={exportData.isPending} className={lineBtn}>
+          {exportData.isPending ? "Preparing…" : "Download"}
+        </button>}>
+        {exportData.isError && <p className={errorBox} role="alert">{(exportData.error as any)?.message ?? "The download didn’t start. Try again."}</p>}
+      </Card>
+
+      <section className="p-6 bg-white border border-[#F3D3D3] rounded-[18px]" aria-labelledby={`${confirmId}-h`}>
+        <h2 id={`${confirmId}-h`} className="font-display text-xl font-bold text-[#B42323]">Delete account</h2>
+        <p className="mt-1 text-sm text-ink-2 max-w-[60ch]">
+          Removes your account and its data. This can’t be undone, so download your data first if you want a copy.
+        </p>
+        <form className="mt-5 space-y-3" onSubmit={(e) => { e.preventDefault(); if (phrase === CONFIRM_PHRASE) erase.mutate(); }}>
+          <label htmlFor={confirmId} className="block text-sm font-semibold text-ink">
+            Type <span className="font-mono text-[13px] px-1.5 py-0.5 rounded bg-[#FDECEC] text-[#B42323]">{CONFIRM_PHRASE}</span> to confirm
           </label>
-        ))}
-        <SaveButton label="Save Preferences" />
-      </Card>
-    </div>
+          <input id={confirmId} value={phrase} onChange={(e) => setPhrase(e.target.value)} autoComplete="off" spellCheck={false}
+            className={clsx(inputCls, "font-mono max-w-sm")} />
+          {erase.isError && <p className={errorBox} role="alert">{(erase.error as any)?.message ?? "The account wasn’t deleted. Try again."}</p>}
+          <button type="submit" disabled={phrase !== CONFIRM_PHRASE || erase.isPending}
+            className="inline-flex items-center h-11 px-[18px] rounded-[10px] bg-white border border-[#F0C7C7] text-[#B42323] text-[14.5px] font-semibold hover:bg-[#FDF3F3] disabled:opacity-45 transition-colors">
+            {erase.isPending ? "Deleting…" : "Delete my account"}
+          </button>
+        </form>
+      </section>
+    </>
   );
 }
 
-function ThemeSettings() {
+// ─── Shared ───────────────────────────────────────────────────────────────────
+
+const primaryBtn = "inline-flex items-center justify-center h-11 px-[18px] rounded-[10px] bg-co text-white text-[14.5px] font-semibold shadow-glow-primary hover:bg-co-press disabled:opacity-45 disabled:shadow-none transition-colors";
+const lineBtn = "inline-flex items-center justify-center h-11 px-[18px] rounded-[10px] bg-white border border-line-strong text-ink text-[14.5px] font-semibold hover:border-[#B4BACB] disabled:opacity-50 transition-colors";
+const inputCls = "w-full min-h-[46px] px-3.5 bg-white border border-line-strong rounded-[10px] text-[15.5px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-co focus:ring-[3px] focus:ring-[#E2E8FF] transition";
+const errorBox = "px-3.5 py-2.5 rounded-[10px] bg-[#FDF3F3] border border-[#F3D3D3] text-sm text-[#B42323]";
+const noteBox = "px-3.5 py-2.5 rounded-[10px] bg-[#F3F5FF] border border-[#DCE3FF] text-sm text-ink";
+
+function Card({ title, sub, action, children }: { title: string; sub?: ReactNode; action?: ReactNode; children?: ReactNode }) {
   return (
-    <div className="max-w-lg space-y-6">
-      <SectionHeader title="Theme" sub="Customize your platform appearance" />
-      <Card>
-        <p className="text-xs font-mono tracking-widest text-ink-3 mb-3">ACCENT COLOR</p>
-        <div className="flex gap-3">
-          {["#3B5BFD","#8b5cf6","#1F9D57","#f59e0b","#ef4444","#ec4899"].map((c) => (
-            <button key={c} className="w-8 h-8 rounded-full border-2 border-transparent hover:border-[#B4BACB] transition-all" style={{ background: c }} />
-          ))}
+    <section className="p-6 bg-white border border-line rounded-[18px]">
+      <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="font-display text-xl font-bold tracking-[-0.01em] text-ink">{title}</h2>
+          {sub && <p className="mt-0.5 text-sm text-ink-2">{sub}</p>}
         </div>
-        <p className="text-[10px] text-ink-3 mt-3">Theme customization coming in the next release.</p>
-      </Card>
-    </div>
+        {action}
+      </div>
+      {children && <div className="mt-5 space-y-4">{children}</div>}
+    </section>
   );
 }
 
-/* ─── Shared ──────────────────────────────────────────────────────────────── */
-function SectionHeader({ title, sub, small }: { title: string; sub: string; small?: boolean }) {
-  return <div className={small ? "mb-3" : "mb-6"}><h2 className={clsx("font-semibold text-ink", small ? "text-sm" : "text-base")}>{title}</h2><p className="text-xs text-ink-3 mt-0.5">{sub}</p></div>;
-}
-function Card({ children }: { children: React.ReactNode }) {
-  return <div className="bg-white border border-line rounded-xl p-5 space-y-3">{children}</div>;
-}
-function Row({ label, value, readonly: _readonly }: { label: string; value: string; readonly?: boolean }) {
-  return <div className="flex justify-between items-center py-1"><span className="text-xs text-ink-3">{label}</span><span className="text-xs text-ink-2 font-mono">{value}</span></div>;
-}
-function EditField({ label, value, onChange, type = "text", readonly }: { label: string; value: string; onChange: (v: string) => void; type?: string; readonly?: boolean }) {
+function Field({ label, type = "text", value, onChange, help, autoComplete }: {
+  label: string; type?: string; value: string; onChange: (v: string) => void; help?: string; autoComplete?: string;
+}) {
+  const id = useId();
   return (
     <div>
-      <label className="text-xs text-ink-3 block mb-1">{label}</label>
-      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} readOnly={readonly}
-        className="w-full bg-ink/[0.04] border border-line rounded-lg px-3 py-2 text-sm text-ink-2 outline-none focus:border-co/40 transition-colors read-only:opacity-50" />
+      <label htmlFor={id} className="block mb-1.5 text-sm font-semibold text-ink">{label}</label>
+      <input id={id} type={type} value={value} onChange={(e) => onChange(e.target.value)} autoComplete={autoComplete}
+        aria-describedby={help ? `${id}-help` : undefined} className={inputCls} />
+      {help && <p id={`${id}-help`} className="mt-1.5 text-[13.5px] text-ink-2">{help}</p>}
     </div>
   );
-}
-function SaveButton({ label }: { label: string }) {
-  return <button className="px-4 py-2 bg-co/10 border border-co/30 text-co-ink text-xs font-medium rounded-lg hover:bg-co/20 transition-colors mt-1">{label}</button>;
 }
