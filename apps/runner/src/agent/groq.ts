@@ -54,8 +54,9 @@ const GEMINI_KEYS = [...new Set([process.env.AGENT_API_KEY, ...(process.env.AGEN
   .map((k) => k?.trim()).filter(usable))];
 
 const MISTRAL_BASE = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai/v1").replace(/\/$/, "");
-// Large 3 (mistral-large-2512) is refused on the free plan ("not available in your subscription tier").
-const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-large-4,codestral-latest").split(",").map((s) => s.trim()).filter(Boolean);
+// Mistral Large (3, 4, "latest") is refused on the free plan ("not available in your
+// subscription tier"); Medium is the strongest model it includes.
+const MISTRAL_MODELS = (process.env.MISTRAL_MODELS ?? "mistral-medium-latest,codestral-latest").split(",").map((s) => s.trim()).filter(Boolean);
 const MISTRAL_KEY = usable(process.env.MISTRAL_API_KEY) ? process.env.MISTRAL_API_KEY.trim() : "";
 
 /** Mistral's free plan: about one request per second… */
@@ -264,6 +265,33 @@ const cool = (lane: Lane, ms: number, why: string, kind: CoolKind = "error") => 
 };
 const isCooling = (lane: Lane) => (coolUntil.get(lane.id) ?? 0) > Date.now();
 const DAILY = /per day|TPD|RPD|quota|RESOURCE_EXHAUSTED|daily/i;
+const MINUTE = 60_000, HOUR = 60 * MINUTE, DAY = 24 * HOUR;
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+
+/**
+ * What a Gemini 429 really says. Google's message always mentions "quota" and
+ * RESOURCE_EXHAUSTED — for the per-minute limit too — so the words alone made
+ * a short burst look like a used-up day and benched the key for an hour. The
+ * details say which limit it was (quotaId …PerMinute… or …PerDay…), how big
+ * it is (quotaValue; "0" = no free use of this model at all) and when it
+ * resets (RetryInfo.retryDelay, e.g. "11051s"). null: no such details.
+ */
+export function googleQuota(text: string): { daily: boolean; noFreeTier: boolean; retrySeconds: number | null } | null {
+  let body: unknown;
+  try { body = JSON.parse(text); } catch { return null; }
+  const err = ((Array.isArray(body) ? body[0] : body) as { error?: { message?: unknown; details?: unknown } } | undefined)?.error;
+  const details = Array.isArray(err?.details) ? (err.details as Record<string, unknown>[]) : [];
+  const violations = details.flatMap((d) => (Array.isArray(d.violations) ? (d.violations as Record<string, unknown>[]) : []));
+  const delay = details.map((d) => d.retryDelay).find((v): v is string => typeof v === "string");
+  const inMessage = typeof err?.message === "string" ? /retry in ([\d.]+)\s*s/i.exec(err.message) : null;
+  const seconds = delay ? parseFloat(delay) : inMessage ? parseFloat(inMessage[1]!) : NaN;
+  if (!violations.length && Number.isNaN(seconds)) return null;
+  return {
+    daily: violations.some((v) => /PerDay/i.test(String(v.quotaId ?? ""))),
+    noFreeTier: violations.some((v) => String(v.quotaValue ?? "") === "0"),
+    retrySeconds: Number.isNaN(seconds) ? null : Math.ceil(seconds),
+  };
+}
 
 export interface ChatOptions {
   messages: ChatMessage[];
@@ -417,7 +445,12 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       continue;
     }
     if (res.status === 429) {
-      if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`, "out_of_quota");
+      const google = lane.provider === "gemini" ? googleQuota(text) : null;
+      if (google?.noFreeTier) cool(lane, DAY, `${lane.label} has no free use on this plan`, "unavailable");
+      // Rest until the day's quota comes back (Google says when), not an hour at a time.
+      else if (google?.daily) cool(lane, clamp((google.retrySeconds ?? 3600) * 1000, 5 * MINUTE, DAY), `${lane.label} used its free requests for today`, "out_of_quota");
+      else if (google) cool(lane, clamp((google.retrySeconds ?? 30) * 1000, 5_000, 2 * MINUTE), `${lane.label} is rate limited`, "rate_limited");
+      else if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`, "out_of_quota");
       // Mistral's limits are per minute: a 429 means its minute is used up.
       else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || (lane.provider === "mistral" ? 60 : 30)) * 1000, `${lane.label} is rate limited`, "rate_limited");
       continue;
@@ -427,6 +460,8 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       log.warn("Malformed tool call from the model — retrying");
       continue;
     }
+    // A model the plan doesn't include won't start working in an hour: rest it for a day.
+    if (res.status === 403 && /tier_not_allowed|not available in your subscription tier/i.test(text)) { cool(lane, DAY, `${lane.label} isn't included in this plan`, "refused"); continue; }
     if (res.status === 401 || res.status === 403) { cool(lane, 60 * 60_000, `${lane.label} was refused (check the key or plan)`, "refused"); continue; }
     if (res.status === 404) { cool(lane, 24 * 60 * 60_000, `${lane.label} isn't available`, "unavailable"); continue; }
     if (res.status >= 500) { cool(lane, 30_000, `${lane.label} had a server error (${res.status})`, "unavailable"); continue; }
