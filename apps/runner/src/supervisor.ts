@@ -1087,7 +1087,6 @@ export class Supervisor {
   /** Appends one line to the project's console log (rotated at 2 MB). */
   console(uuid: string, stream: "stdout" | "stderr" | "stdin" | "system", line: string): void {
     if (stream === "stdout" || stream === "stderr") {
-      this.presence.output(uuid);
       const t = this.tails.get(uuid);
       if (t) { t.push(line.slice(0, 500)); if (t.length > 80) t.shift(); }
       // Here and on a bot host alike (its lines come through here too).

@@ -235,7 +235,20 @@ export class HostRunner {
       }
       this.watch(s);
       const { state, uptimeMs } = await s.client.resources(s.ref.server);
-      if (state === "running" || state === "starting") {
+      if ((state === "running" || state === "starting") && this.launcherOutdated(row, s)) {
+        // KojyAI was updated while the bot kept running there: its old launcher would go on without
+        // the new checks (whether it's really in its room) until it happened to stop. Restart it with the new one.
+        this.hooks.console(uuid, "system", "KojyAI was updated — restarting the bot on its host so it runs with KojyAI's new launcher and its checks");
+        s.state = state;
+        s.expectOffline = true;
+        await s.client.power(s.ref.server, "stop");
+        if (!(await this.offlineWithin(s, STOP_WAIT_MS))) {
+          await s.client.power(s.ref.server, "kill");
+          await this.offlineWithin(s, 10_000);
+        }
+        s.expectOffline = false;
+        s.state = "offline";
+      } else if (state === "running" || state === "starting") {
         s.state = state;
         s.startedAt = Date.now() - uptimeMs;
         s.fillOnReady = true;
@@ -389,6 +402,18 @@ export class HostRunner {
   }
 
   // ── files ──────────────────────────────────────────────────────────────────
+
+  /** Whether what runs on the host is an older KojyAI launcher or starter than this one (or unknown). */
+  private launcherOutdated(row: ProjectRow, s: Session): boolean {
+    const sync = row.hostSync && row.hostSync.server === s.ref.server ? row.hostSync : null;
+    if (!sync) return true;
+    try {
+      return sync.files[LAUNCHER_FILE] !== sha256(readFileSync(this.opts.launcherPath))
+        || sync.files[START_FILE] !== sha256(readFileSync(this.opts.starterPath));
+    } catch {
+      return false; // can't read our own files: leave the bot as it is
+    }
+  }
 
   /** Uploads what changed since the last start; returns how many files went up (settings not counted). */
   private async upload(s: Session, row: ProjectRow, fresh = false): Promise<number> {
