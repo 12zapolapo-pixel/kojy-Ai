@@ -30,11 +30,13 @@ export const QUIET_NOTE_MS = Number(process.env.PRESENCE_QUIET_NOTE_MS ?? 4 * 60
 /** No room check for this long (after the first one): restarted. */
 export const SILENT_MS = Number(process.env.PRESENCE_SILENT_MS ?? 10 * 60_000);
 /**
- * Before a run's first check (installing packages on a bot host, the bot's
- * code loading) it may be quiet longer: the host's install gives up at 20
- * minutes and the launcher's startup watch at 5.
+ * A run's first check may take longer (installing packages on a bot host,
+ * the bot's code loading): the host's install gives up at 20 minutes and the
+ * launcher's startup watch at 5. Counted from the start whatever the bot
+ * prints meanwhile — an old launcher stuck reconnecting prints all the time
+ * and never checks the room.
  */
-export const STARTUP_SILENT_MS = Number(process.env.PRESENCE_STARTUP_SILENT_MS ?? 25 * 60_000);
+export const STARTUP_SILENT_MS = Number(process.env.PRESENCE_STARTUP_SILENT_MS ?? 30 * 60_000);
 /** An unchanged state is written again this often, so presence_at shows the checks still come. */
 const REFRESH_MS = 5 * 60_000;
 
@@ -74,7 +76,7 @@ type Save = (uuid: string, set: Partial<typeof botProjects.$inferInsert>) => Pro
 export class PresenceTracker {
   private current = new Map<string, Current>();
   /** Bots whose room is checked (launcher bots only), with the project and when this run started. */
-  private runs = new Map<string, { projectId: number; since: number; lastOutput: number; inRoomOnce: boolean; quietNoted: boolean; silenced: boolean }>();
+  private runs = new Map<string, { projectId: number; since: number; inRoomOnce: boolean; quietNoted: boolean; silenced: boolean }>();
   private saved = new Map<string, { key: string; at: number }>();
   private learned = new Set<string>();
   private silences = new Map<string, number>();
@@ -99,7 +101,7 @@ export class PresenceTracker {
       return;
     }
     const now = Date.now();
-    this.runs.set(uuid, { projectId, since: now, lastOutput: now, inRoomOnce: false, quietNoted: false, silenced: false });
+    this.runs.set(uuid, { projectId, since: now, inRoomOnce: false, quietNoted: false, silenced: false });
     void this.save(uuid, { inRoom: null, presenceNote: "Getting into the room…", presenceAt: new Date(now) });
   }
 
@@ -114,12 +116,6 @@ export class PresenceTracker {
   exited(uuid: string): void {
     this.forget(uuid);
     void this.save(uuid, { inRoom: false, presenceNote: "Not running — starting again", presenceAt: new Date() });
-  }
-
-  /** Any output from the bot: before its first room check, that's how KojyAI knows it's still busy starting. */
-  output(uuid: string): void {
-    const run = this.runs.get(uuid);
-    if (run) run.lastOutput = Date.now();
   }
 
   /** Whether this run has been in its room at least once. */
@@ -181,8 +177,8 @@ export class PresenceTracker {
     for (const [uuid, run] of this.runs) {
       if (!this.hooks.isRunning(uuid) || run.silenced) continue;
       const c = this.current.get(uuid);
-      // Before the first check of this run, any output means it's still busy starting.
-      const lastSign = c ? c.at : Math.max(run.since, run.lastOutput);
+      // Before the first check, the time since the start counts — not the time since its last output.
+      const lastSign = c ? c.at : run.since;
       const quiet = now - lastSign;
       const limit = c ? SILENT_MS : STARTUP_SILENT_MS;
       if (c && quiet >= QUIET_NOTE_MS && !run.quietNoted) {

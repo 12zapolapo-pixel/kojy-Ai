@@ -281,6 +281,23 @@ describe("a bot on a bot host", () => {
     sup = sup2;
   });
 
+  it("after a KojyAI update, a bot still running there with the old launcher is restarted with the new one", async () => {
+    // What KojyAI last sent there was an older launcher.
+    project.hostSync = { ...project.hostSync!, files: { ...project.hostSync!.files, "kojy_launcher.py": "an-older-launcher" } };
+    await sup.shutdown();
+    const sup3 = new Supervisor(db as never, testing);
+    const mark = fake.calls.length;
+    await sup3.handle(UUID, "start"); // what restoreAll does on boot
+    await until(() => project.status === "running" && fake.calls.slice(mark).includes("power start"));
+    const calls = fake.calls.slice(mark);
+    expect(calls[0]).toBe("power stop");
+    expect(calls).toEqual(expect.arrayContaining(["write kojy_launcher.py", "write .kojy/env.json", "power start"]));
+    expect(calls.indexOf("write kojy_launcher.py")).toBeGreaterThan(calls.indexOf("power stop"));
+    expect(consoleLines()).toContain("KojyAI was updated — restarting the bot on its host so it runs with KojyAI's new launcher and its checks");
+    expect(consoleLines().filter((l) => l.startsWith("✖ Bot exited")).length).toBe(1); // not counted as a crash
+    sup = sup3;
+  });
+
   it("a fresh start sends every file again (not the data: it's newer on the host) and has the packages installed again", async () => {
     const mark = fake.calls.length;
     sup.startFresh(UUID);

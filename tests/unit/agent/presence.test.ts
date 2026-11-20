@@ -86,17 +86,15 @@ describe("checks that stop coming", () => {
     expect(hooks.silent).toHaveBeenLastCalledWith("u1", expect.stringMatching(/its launcher never reported/), 2);
   });
 
-  it("before its first check, the bot's output counts as busy starting (a long package install on a bot host)", () => {
+  it("before its first check it gets longer (a package install on a bot host) — counted from the start, however much it prints", () => {
     const { t, hooks } = tracker();
     t.started("u1", 1, true);
     const at = Date.now();
     t.tick(at + SILENT_MS + 1000);
     expect(hooks.silent).not.toHaveBeenCalled(); // the startup allowance is longer
-    vi.useFakeTimers({ now: at + STARTUP_SILENT_MS - 60_000, toFake: ["Date"] });
-    t.output("u1");
-    vi.useRealTimers();
+    // An old launcher stuck reconnecting prints all the time and never checks the room: that's no sign of life.
     t.tick(at + STARTUP_SILENT_MS + 1000);
-    expect(hooks.silent).not.toHaveBeenCalled();
+    expect(hooks.silent).toHaveBeenCalledWith("u1", expect.stringMatching(/its launcher never reported/), 1);
   });
 
   it("a stopped bot, or one that exited, isn't watched", () => {
