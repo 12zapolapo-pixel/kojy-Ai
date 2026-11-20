@@ -10,6 +10,7 @@
  * the API container's own files.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { unzip, unzipSync, zip, zipSync, strFromU8, type Unzipped } from "fflate";
@@ -19,6 +20,8 @@ import { lineDiff, type FileDiff } from "./diff.js";
 export const PROJECTS_DIR = path.resolve(process.env.PROJECTS_DIR ?? "./data/projects");
 export const LOG_DIR = path.join(PROJECTS_DIR, ".logs");
 const SNAPSHOT_DIR = path.join(PROJECTS_DIR, ".snapshots");
+/** The code each bot last ran fine with (see saveKnownGood) — apart from Undo's snapshots. */
+const KNOWN_GOOD_DIR = path.join(PROJECTS_DIR, ".known-good");
 const MAX_SNAPSHOTS = 30;
 
 /** Never shown, uploaded or zipped. */
@@ -237,7 +240,10 @@ export function snapshotProject(uuid: string, reason: string): Snapshot {
   }
   const dir = path.join(SNAPSHOT_DIR, uuid);
   mkdirSync(dir, { recursive: true });
-  const createdAt = Date.now();
+  // The id is the time in ms; two snapshots in the same millisecond (an undo
+  // point, then the next fix's) must not overwrite each other.
+  let createdAt = Date.now();
+  while (existsSync(path.join(dir, `${createdAt}.zip`))) createdAt++;
   const id = String(createdAt);
   entries[".kojy-snapshot.json"] = new TextEncoder().encode(JSON.stringify({ reason, createdAt }));
   writeFileSync(path.join(dir, `${id}.zip`), zipSync(entries, { level: 6 }));
@@ -330,4 +336,122 @@ export function compareSnapshot(uuid: string, id: string, maxFiles = 30): { file
 
 export function removeSnapshots(uuid: string): void {
   rmSync(path.join(SNAPSHOT_DIR, uuid), { recursive: true, force: true });
+  rmSync(path.join(KNOWN_GOOD_DIR, `${uuid}.zip`), { force: true });
+}
+
+// ── the last code the bot ran fine with ─────────────────────────────────────
+
+/**
+ * Keeps the bot's code as "the last version that ran fine" (one per bot,
+ * not in Undo). Called after a run went well for a while; does nothing when
+ * that code is already the one kept. Returns whether it saved.
+ */
+export function saveKnownGood(uuid: string): boolean {
+  const fingerprint = codeFingerprint(uuid);
+  if (!Object.keys(fingerprint).length) return false;
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  const kept = knownGood(uuid);
+  if (kept && JSON.stringify(kept.fingerprint) === JSON.stringify(fingerprint)) return false;
+  const root = projectDir(uuid);
+  const entries: Record<string, Uint8Array> = {};
+  for (const rel of Object.keys(fingerprint)) entries[rel] = readFileSync(path.join(root, rel));
+  entries[".kojy-known-good.json"] = new TextEncoder().encode(JSON.stringify({ savedAt: Date.now(), fingerprint }));
+  mkdirSync(KNOWN_GOOD_DIR, { recursive: true });
+  writeFileSync(file, zipSync(entries, { level: 6 }));
+  return true;
+}
+
+/** When the last version that ran fine was kept, and its fingerprint; null when there's none. */
+export function knownGood(uuid: string): { savedAt: number; fingerprint: Record<string, string> } | null {
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  if (!existsSync(file)) return null;
+  try {
+    const meta = unzipSync(readFileSync(file), { filter: (f) => f.name === ".kojy-known-good.json" })[".kojy-known-good.json"];
+    return meta ? JSON.parse(strFromU8(meta)) as { savedAt: number; fingerprint: Record<string, string> } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What changed in the code since the last version that ran fine, file by
+ * file ("modified" with the diff from then to now, "added" = new since,
+ * "removed" = gone since). null when no such version was kept.
+ */
+export function changesSinceKnownGood(uuid: string, maxFiles = 30): { savedAt: number; files: FileDiff[]; more: number } | null {
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  if (!existsSync(file)) return null;
+  const then = unzipSync(readFileSync(file));
+  const meta = then[".kojy-known-good.json"];
+  delete then[".kojy-known-good.json"];
+  const savedAt = meta ? (JSON.parse(strFromU8(meta)) as { savedAt: number }).savedAt : 0;
+  const root = projectDir(uuid);
+  const now = codeFingerprint(uuid);
+  const text = (b: Uint8Array): string | null => (b.length > MAX_EDIT_BYTES || b.includes(0) ? null : strFromU8(b));
+  const out: FileDiff[] = [];
+  for (const rel of [...new Set([...Object.keys(now), ...Object.keys(then)])].sort()) {
+    const old = then[rel];
+    if (!(rel in now)) { out.push({ path: rel, change: "removed", added: 0, removed: old ? (text(old) ?? "").split("\n").length : 0, diff: null }); continue; }
+    const current = readFileSync(path.join(root, rel));
+    if (!old) { out.push({ path: rel, change: "added", added: (text(current) ?? "").split("\n").length, removed: 0, diff: null }); continue; }
+    if (Buffer.from(current).equals(Buffer.from(old))) continue;
+    const a = text(old), b = text(current);
+    const d = a !== null && b !== null ? lineDiff(a, b, 2, 4000) : null;
+    out.push({ path: rel, change: "modified", added: d?.added ?? 0, removed: d?.removed ?? 0, diff: d?.text ?? null });
+  }
+  return { savedAt, files: out.slice(0, maxFiles), more: Math.max(0, out.length - maxFiles) };
+}
+
+/**
+ * Writes a snapshot's code into `dest` (an empty folder), plus the bot's
+ * current data/ and database files (snapshots don't keep those) — the code
+ * as it was, with the data as it is, e.g. to run the old code in a test room.
+ */
+export function extractSnapshot(uuid: string, id: string, dest: string): void {
+  if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
+  const file = path.join(SNAPSHOT_DIR, uuid, `${id}.zip`);
+  if (!existsSync(file)) throw new ProjectFileError("That snapshot no longer exists");
+  const files = unzipSync(readFileSync(file));
+  delete files[".kojy-snapshot.json"];
+  const root = path.resolve(dest);
+  for (const [rel, data] of Object.entries(files)) {
+    const target = path.resolve(root, rel);
+    if (!target.startsWith(root + path.sep)) continue; // never outside dest
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, data);
+  }
+  const live = projectDir(uuid);
+  for (const f of listFiles(uuid)) {
+    if (f.isDir || !isPersistentData(f.path)) continue;
+    const target = path.join(root, f.path);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, readFileSync(path.join(live, f.path)));
+  }
+}
+
+/** Removes one snapshot (e.g. one taken before a change that never happened). */
+export function deleteSnapshot(uuid: string, id: string): void {
+  if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
+  rmSync(path.join(SNAPSHOT_DIR, uuid, `${id}.zip`), { force: true });
+}
+
+/**
+ * path → sha256 of each code file (what a snapshot keeps: not data/ or
+ * databases, nothing over 5 MB). Two fingerprints differ when anyone changed,
+ * added or removed code in between.
+ */
+export function codeFingerprint(uuid: string): Record<string, string> {
+  const root = projectDir(uuid);
+  const out: Record<string, string> = {};
+  if (!existsSync(root)) return out;
+  for (const f of listFiles(uuid)) {
+    if (f.isDir || isPersistentData(f.path) || f.size > 5 * 1024 * 1024) continue;
+    try { out[f.path] = createHash("sha256").update(readFileSync(path.join(root, f.path))).digest("hex"); } catch { /* gone meanwhile */ }
+  }
+  return out;
+}
+
+/** Files that were added, removed or changed between two fingerprints. */
+export function fingerprintChanges(before: Record<string, string>, after: Record<string, string>): string[] {
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((p) => before[p] !== after[p]).sort();
 }

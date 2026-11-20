@@ -24,6 +24,8 @@ import { runRoomTest, normalizeEvents, chatToEvents, ROOM_EVENT_TYPES, type Room
 import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
 import { connectionReport, duration, formatConsole, stamp } from "./botHealth.js";
+import { IncidentLedger, describeIncidents } from "../incidents.js";
+import { untrusted } from "./prompt.js";
 import { queryData, roomActivity } from "./dataTools.js";
 import type { GitService } from "../git.js";
 import { VENVS_DIR } from "../supervisor.js";
@@ -700,10 +702,13 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         const now = Date.now();
         const up = p?.status === "running" && p.lastStartedAt ? `, up ${duration((now - p.lastStartedAt.getTime()) / 1000)} (process started ${stamp(p.lastStartedAt.getTime())})` : "";
         const host = ctx.supervisor.hostNote(uuid);
+        // The problems KojyAI recorded for this bot, and what's being done about them.
+        const problems = describeIncidents(await new IncidentLedger(ctx.db).list(ctx.project.id, 20).catch(() => []), now);
         const output = [
           `Now: ${stamp(now)} UTC. Status: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}${up}. Restarts so far: ${p?.restartCount}.`,
           ...(host ? [host] : []),
           connectionReport(lines, now),
+          ...(problems ? [`Problems KojyAI recorded (newest first; [state] ×times summary — what's happening):\n${untrusted(problems)}`] : []),
           "Console, newest line last (times in UTC):",
           lines.length ? formatConsole(lines.slice(-600), { maxLines: n, maxChars: 6000 }) : "(no output yet)",
         ].join("\n");

@@ -1,17 +1,15 @@
 /**
- * What Kojy may do in a run it started by itself.
+ * What Kojy may do in a run it started by itself — a crash (or an error the
+ * bot survived) or the daily check-up. Both fix the bot right away with no
+ * approval step: the owner wants every problem fixed automatically.
  *
- * Crash (the owner's choice: fix right away, no approval): read, test, edit
- * code and restart the bot. A crash's output can carry text a room visitor
- * typed (V-03), so even then a crash run can't delete files, touch the bot's
- * saved data or dependencies, change secrets or the entrypoint, stop the bot,
- * save long-term notes, or ADD code that reaches the internet, reads secrets,
- * runs programs, deletes files or builds code at runtime — a fix that really
- * needs one of those goes through propose_plan and the owner. Only the traceback reaches
- * the AI, with long quoted text (likely chat) left out.
- *
- * Daily check-up (nothing is broken): investigate and propose; changes wait
- * for the owner's approval.
+ * The bot's output can carry text a room visitor typed (V-03), so such a run
+ * still can't delete files, touch the bot's saved data or dependencies,
+ * change secrets or the entrypoint, stop the bot, save long-term notes, run
+ * shell commands or git, or ADD code that reaches the internet, reads secrets,
+ * runs programs, deletes files or builds code at runtime. None of that waits
+ * for the owner: Kojy is told to fix the problem another way. Only the
+ * traceback reaches the AI, with long quoted text (likely chat) left out.
  * OWNERSHIP: apps/runner/src/agent
  */
 
@@ -20,14 +18,8 @@ import { cleanRelPath, isPersistentData } from "@kojyai/shared/projects";
 export type AutomatedKind = "crash" | "checkup";
 export const AUTOMATED_KINDS = new Set<string>(["crash", "checkup"]);
 
-/** A check-up run can't use these until the owner approves a plan. */
-export const NEEDS_OWNER = new Set(["write_file", "edit_file", "delete_file", "bot_control", "set_entrypoint", "request_secrets", "remember", "save_test", "run_command", "git"]);
-export const OWNER_APPROVAL_NEEDED =
-  "Not allowed yet: this run was started by the daily check-up, not by the owner. " +
-  "Investigate and test as much as you like, then explain the cause and call propose_plan with the fix. Once the owner approves, you can change files and restart the bot.";
-
-/** Never in a crash run. */
-const CRASH_RUN_LOCKED: Record<string, string> = {
+/** Never in an automatic run. */
+export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
   delete_file: "deleting files",
   set_entrypoint: "changing the entrypoint",
   request_secrets: "asking for secrets",
@@ -37,7 +29,23 @@ const CRASH_RUN_LOCKED: Record<string, string> = {
   git: "using git (pushing or pulling)",
 };
 
-/** Kinds of code a crash fix may not add (counted before and after the change). */
+/**
+ * The tools an automatic run is given: what finding and fixing a bug in the
+ * code takes. The rest are refused in such a run anyway (or don't help fix
+ * code), and every tool's description goes with every AI request — fewer
+ * tools, smaller requests, more AI keys that can take them.
+ */
+export const AUTOMATIC_RUN_TOOLS = new Set([
+  "list_files", "read_file", "search_code", "edit_file", "write_file", "check_code", "test_in_room", "run_saved_tests",
+  "get_logs", "bot_control", "find_env_vars", "find_emotes", "discord_check", "work_log", "search_chat",
+]);
+
+/** The tool specs an automatic run gets. */
+export function automaticTools<T extends { function: { name: string } }>(specs: T[]): T[] {
+  return specs.filter((t) => AUTOMATIC_RUN_TOOLS.has(t.function.name));
+}
+
+/** Kinds of code an automatic fix may not add (counted before and after the change). */
 const RISKS: { label: string; re: RegExp }[] = [
   { label: "internet access", re: /\b(?:requests|urllib3?|httpx|aiohttp|http\.client|socket|websockets?|ftplib|smtplib|telnetlib|paramiko|open_connection|create_connection|start_server|sock_connect)\b/g },
   { label: "running programs", re: /\b(?:subprocess|os\.system|os\.popen|os\.exec\w*|os\.spawn\w*|pty|multiprocessing)\b/g },
@@ -57,14 +65,18 @@ export function addedRisks(before: string, after: string): string[] {
 }
 
 /**
- * Why `tool` can't run in this automatic run, or null if it can.
- * `currentText(rel)` returns a file's current content ("" if it doesn't exist).
+ * Why `tool` can't run in this automatic run, or null if it can. The same
+ * rules for crashes and check-ups. `currentText(rel)` returns a file's current
+ * content ("" if it doesn't exist).
  */
-export function automaticRefusal(kind: AutomatedKind, tool: string, args: Record<string, unknown>, currentText: (rel: string) => string): string | null {
-  if (kind === "checkup") return NEEDS_OWNER.has(tool) ? OWNER_APPROVAL_NEEDED : null;
+export function automaticRefusal(_kind: AutomatedKind, tool: string, args: Record<string, unknown>, currentText: (rel: string) => string): string | null {
   const no = (what: string) =>
-    `Not allowed in an automatic crash fix: ${what}. Fix the crash without it; if the fix really needs it, explain why and call propose_plan so the owner can approve it.`;
-  const locked = CRASH_RUN_LOCKED[tool];
+    `Not allowed in an automatic fix: ${what}. Don't wait for the owner — fix the problem another way within these limits ` +
+    "(handle the bad value, add a guard or a default, catch the error where it happens, change the logic).";
+  if (tool === "propose_plan") {
+    return "Don't stop for the owner's approval in an automatic fix: the owner wants every problem fixed automatically. Make the fix yourself (within the limits), check it, restart the bot and confirm it's back.";
+  }
+  const locked = AUTOMATIC_RUN_LOCKED[tool];
   if (locked) return no(locked);
   if (tool === "bot_control" && String(args.action ?? "") === "stop") return no("stopping the bot (restart it instead)");
   if (tool !== "write_file" && tool !== "edit_file") return null;
@@ -75,7 +87,7 @@ export function automaticRefusal(kind: AutomatedKind, tool: string, args: Record
     return null; // the tool itself reports the bad path
   }
   if (isPersistentData(rel)) return no(`changing the bot's saved data (${rel})`);
-  if (DEPENDENCY_FILE.test(rel)) return no(`changing the bot's dependencies (${rel})`);
+  if (DEPENDENCY_FILE.test(rel)) return no(`changing the bot's dependencies (${rel}); a missing well-known package is added by KojyAI itself`);
   const before = tool === "edit_file" ? String(args.old_text ?? "") : currentText(rel);
   const after = tool === "edit_file" ? String(args.new_text ?? "") : String(args.content ?? "");
   const risks = addedRisks(before, after);
@@ -134,6 +146,39 @@ export function crashLocation(lines: string[]): string {
 export function crashSignature(tail: string[]): string {
   const ex = lastException(tail);
   return ex ? `${normalizeError(ex)} @ ${crashLocation(tail).replace(/:\d+ in /, " in ")}` : "";
+}
+
+/**
+ * The signature of every traceback in some console lines (e.g. a test room
+ * run), in order. An exception group's traceback is one, up to its last
+ * decorated line; its real error inside decides the signature.
+ */
+export function tracebackSignatures(lines: string[]): string[] {
+  const out: string[] = [];
+  let block: string[] | null = null;
+  let group = false;
+  const flush = () => {
+    if (block) { const sig = crashSignature(block); if (sig) out.push(sig); }
+    block = null;
+    group = false;
+  };
+  const begin = (line: string, text: string) => { block = [line]; group = text.startsWith("Exception Group"); };
+  for (const line of lines) {
+    const text = undecorate(line).trim();
+    const starts = /^(?:Exception Group )?Traceback \(most recent call last\)/.test(text);
+    if (!block) { if (starts) begin(line, text); continue; }
+    if (group) {
+      if (/^[\s|+]/.test(line)) { (block as string[]).push(line); continue; }
+      flush();
+      if (starts) begin(line, text);
+      continue;
+    }
+    if (starts && !/^\s*[|+]/.test(line)) { flush(); begin(line, text); continue; }
+    (block as string[]).push(line);
+    if (EXCEPTION_LINE.test(text)) flush();
+  }
+  flush();
+  return out;
 }
 
 /** The network or Highrise being away (DNS, refused, reset, timeout) — not a bug in the bot's code. */

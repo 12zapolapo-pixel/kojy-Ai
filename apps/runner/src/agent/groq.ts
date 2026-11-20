@@ -489,6 +489,18 @@ export function _resetAiStateForTests(): void {
   recent.clear();
 }
 
+/**
+ * When some AI could take a request of about `size` tokens (ms timestamp; a
+ * time in the past means now), from the lanes' cooldowns and minute budgets.
+ * null when no AI is configured. Used to retry automatic fixes when every key
+ * was at its limit.
+ */
+export function aiReadyAt(size = 6000): number | null {
+  if (!LANES.length) return null;
+  const fit = LANES.filter((l) => size <= l.maxRequestTokens);
+  return Math.min(...(fit.length ? fit : LANES).map((l) => readyAt(l, size)));
+}
+
 /** Which lanes are configured (for the health check and tests). */
 export function configuredLanes(): string[] {
   return LANES.map((l) => l.label);
