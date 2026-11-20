@@ -75,7 +75,11 @@ const finished: RunResult = { outcome: "done", ended: null, aiUnavailable: false
 
 function setup(project: Record<string, unknown> = {}) {
   rows = { bot_projects: [{ id: 1, uuid: "u1", name: "Japalo", ownerId: 7, autoFix: true, desiredState: "running", ...project }], project_messages: [], agent_work_log: [] };
-  const supervisor: { onCrash?: (uuid: string, streak: number, tail: string[], incident: unknown) => void; isRunning?: () => boolean } = { isRunning: () => true };
+  const supervisor: {
+    onCrash?: (uuid: string, streak: number, tail: string[], incident: unknown) => void;
+    onBotError?: (uuid: string, tail: string[], incident: unknown, report: { event?: { handler?: string; command?: string } }) => void;
+    isRunning?: () => boolean;
+  } = { isRunning: () => true };
   const agent = new Agent(db as never, supervisor as never, null);
   const active = (agent as unknown as { active: Map<string, AbortController> }).active;
   /** Each run stays "working" until release() is called (or finishes at once when not held). */
@@ -94,8 +98,12 @@ function setup(project: Record<string, unknown> = {}) {
     supervisor.onCrash!("u1", streak, tail, incident);
     await new Promise((r) => setTimeout(r, 20));
   };
+  const survive = async (tail: string[], event: { handler?: string; command?: string }) => {
+    supervisor.onBotError!("u1", tail, { id: 4, category: "code" }, { event });
+    await new Promise((r) => setTimeout(r, 20));
+  };
   return {
-    run, crashMessages, events, fire,
+    run, crashMessages, events, fire, survive,
     holdRuns: () => { hold = true; },
     release: async () => { hold = false; for (const r of waiting.splice(0)) r(); await new Promise((r) => setTimeout(r, 30)); },
     nextResult: (r: RunResult) => { result = r; },
@@ -194,6 +202,19 @@ describe("automatic crash fix", () => {
     expect(run).not.toHaveBeenCalled();
     await fire(crash, 1, { id: 9, category: "code" });
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("an error the bot survived (it kept running) is fixed right away too, and the bot restarted so the fix runs", async () => {
+    const { run, crashMessages, survive } = setup();
+    await survive(crash, { handler: "on_user_join" });
+    await survive(crash, { handler: "on_chat", command: "!coins" }); // same bug again while the fix runs: left to it
+    expect(run).toHaveBeenCalledTimes(2); // the first fix had finished: no limit, so it's looked at again
+    const [msg] = crashMessages();
+    expect(msg).toMatch(/^The bot hit an error in on_user_join — it kept running, but that part of it failed\. /);
+    expect(msg).toMatch(/the owner wants every error fixed without waiting for them/);
+    expect(msg).toMatch(/restart the bot with bot_control so the fixed code runs/);
+    expect(crashMessages()[1]).toMatch(/^The bot hit an error in on_chat \(the !coins command\) — it kept running, but that command failed\. /);
+    expect(rows.notifications?.[0]).toMatchObject({ title: "Kojy looked into an error in Japalo" });
   });
 
   it("does nothing when auto-fix is switched off for the bot", async () => {

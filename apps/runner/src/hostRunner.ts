@@ -82,6 +82,8 @@ export interface HostHooks {
   later(uuid: string, seconds: number): void;
   activity(project: RunProject, kind: string, actorId: string | null, actorName: string | null, extra?: { amount?: number | null; detail?: string | null }): void;
   roomRights(uuid: string, project: RunProject, line: string): void;
+  /** A crash report or an error the bot survived, from the launcher (see launcher.py). */
+  report(uuid: string, project: RunProject, raw: unknown): void;
 }
 
 export interface HostRunnerOptions {
@@ -493,6 +495,7 @@ export class HostRunner {
       try {
         const e = JSON.parse(text.slice(ACTIVITY_PREFIX.length)) as { k?: string; id?: string | null; n?: string | null; a?: number; d?: string };
         if (e.k && ACTIVITY_KINDS.has(e.k)) this.hooks.activity(s.project, e.k, e.id ?? null, e.n ?? null, { amount: e.a ?? null, detail: e.d ?? null });
+        else if (e.k === "crash" || e.k === "error") this.hooks.report(s.uuid, s.project, e);
       } catch { /* not ours */ }
       return;
     }

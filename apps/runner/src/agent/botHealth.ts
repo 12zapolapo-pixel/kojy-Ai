@@ -48,6 +48,7 @@ function classify(l: LogLine): Kind {
   if (t.startsWith(CONNECTED_PREFIX)) return "connected";
   if (t.startsWith("[kojy] Starting")) return "launching";
   if (t.startsWith("[kojy] Watchdog:")) return "error_output"; // why the watchdog is about to restart it
+  if (t.startsWith("[kojy] Highrise ended the session") || t.startsWith("[kojy] Errors keep flooding in")) return "error_output"; // why the bot is about to stop
   if (t.startsWith("[kojy] ")) return "system"; // the launcher's other notes (room rights, checks on)
   if (/closed by server, reconnecting/.test(t)) return "hr_closed";
   if (t === "ERROR: reconnecting...") return "hr_reconnecting";

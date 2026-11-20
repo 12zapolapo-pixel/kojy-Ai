@@ -201,6 +201,18 @@ describe("a bot on a bot host", () => {
     expect(project.statusMessage).toMatch(/^Not a moderator in its room/);
   });
 
+  it("an error the bot survived there goes to Kojy, and the report is kept out of the saved console", async () => {
+    const c = consoles.at(-1)!;
+    const seen: { tail: string[]; report: unknown }[] = [];
+    sup.onBotError = (_uuid, tail, _incident, report) => { seen.push({ tail, report }); };
+    c.line(`[kojy:activity] ${JSON.stringify({ k: "error", fatal: false, phase: "in_room", type: "KeyError", line: "KeyError: 'amy'", frames: [{ file: "bot.py", line: 3, func: "on_chat", code: "x = coins[name]" }], event: { handler: "on_chat", command: "!coins" } })}`);
+    await until(() => seen.length > 0);
+    expect(seen[0]!.report).toMatchObject({ k: "error", fatal: false, line: "KeyError: 'amy'", event: { handler: "on_chat", command: "!coins" } });
+    expect(seen[0]!.tail.at(-1)).toBe("KeyError: 'amy'");
+    expect(logLines().some((l) => l.line.includes('"k":"error"'))).toBe(false);
+    sup.onBotError = undefined;
+  });
+
   it("a crash there is counted with the host's exit code, Kojy gets the traceback, and the bot starts again", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const c = consoles.at(-1)!;

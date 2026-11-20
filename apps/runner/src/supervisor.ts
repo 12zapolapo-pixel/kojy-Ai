@@ -31,7 +31,8 @@ import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./s
 import { NOT_MODERATOR_MARK, PLATFORM_RESTART_LINE, ROOM_RIGHTS_PREFIX } from "./agent/botHealth.js";
 import { DISCORD_CONNECTED } from "./agent/discord.js";
 import { HostRunner, type HostRef, type HostRunnerOptions, type RunProject } from "./hostRunner.js";
-import { IncidentLedger, classifyExit, type Incident } from "./incidents.js";
+import { IncidentLedger, classifyExit, parseReport, reportToTail, type CrashReport, type Incident } from "./incidents.js";
+import { lastException } from "./agent/autoFix.js";
 import { isStartCommand, startCommand } from "@kojyai/shared/projects";
 
 const log = createLogger("supervisor");
@@ -110,8 +111,12 @@ export class Supervisor {
   private tails = new Map<string, string[]>();
   /** Set by the coder AI: called when a bot crashes on its own (not stopped), with the incident it was recorded as. */
   onCrash?: (uuid: string, streak: number, tail: string[], incident: Incident | null) => void;
+  /** Set by the coder AI: an error the bot survived (it kept running), with its incident. */
+  onBotError?: (uuid: string, tail: string[], incident: Incident | null, report: CrashReport) => void;
   /** Every problem the bots had (bot_incidents). */
   readonly incidents: IncidentLedger;
+  /** The launcher's crash report from each bot's current run (see launcher.py). */
+  private reports = new Map<string, CrashReport>();
   /** A Discord bot connected to Discord (once per start; see agent/discord.ts). */
   onDiscordConnected?: (uuid: string) => void;
 
@@ -146,6 +151,7 @@ export class Supervisor {
       later: (uuid, seconds) => this.startLater(uuid, seconds),
       activity: (project, kind, actorId, actorName, extra) => this.record(project, kind, actorId, actorName, extra),
       roomRights: (uuid, project, line) => this.onRoomRights(uuid, project, line),
+      report: (uuid, project, raw) => this.onReport(uuid, project, raw),
     }, {
       launcherPath: LAUNCHER, starterPath: HOSTSTART, baseRequirements: BASE_REQUIREMENTS,
       secrets: (row) => this.secrets(row), ...hostTesting,
@@ -206,6 +212,7 @@ export class Supervisor {
         // A fresh run's output only: an old traceback left here would be taken
         // for the cause of the next exit (one without a traceback of its own).
         this.tails.set(uuid, []);
+        this.reports.delete(uuid);
         this.busy.delete(uuid);
         return await this.hosts.start(project, reason);
       }
@@ -228,7 +235,8 @@ export class Supervisor {
         ? spawnAs(uid, "/bin/bash", ["-c", startCommand(project.entrypoint)], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] })
         : spawnAs(uid, python, [LAUNCHER], { cwd: dir, env, stdio: ["pipe", "pipe", "pipe", "pipe"] });
       const run: Running = { child, signal, startedAt: Date.now(), stopping: false, project: { id: project.id, orgId: project.orgId, ownerId: project.ownerId, name: project.name } };
-      this.readActivity(run);
+      this.reports.delete(uuid);
+      this.readActivity(uuid, run);
       this.tails.set(uuid, []);
       this.procs.set(uuid, run);
       this.pipe(uuid, child);
@@ -246,7 +254,15 @@ export class Supervisor {
         void this.setStatus(uuid, "running", null);
         void this.db.update(botProjects).set({ lastStartedAt: new Date() }).where(eq(botProjects.uuid, uuid));
       });
-      child.once("exit", (code, signal) => void this.onExit(uuid, run, code, signal));
+      // The crash report (fd 3) and the traceback (stderr) are the last things a
+      // crashing bot writes: wait for its pipes to be read out before judging
+      // the exit — but not forever (a program it started can hold them open).
+      child.once("exit", (code, signal) => {
+        let done = false;
+        const go = () => { if (!done) { done = true; void this.onExit(uuid, run, code, signal); } };
+        child.once("close", go);
+        setTimeout(go, 2000).unref();
+      });
     } catch (err) {
       await this.startFailed(uuid, err instanceof Error ? err.message : String(err));
     } finally {
@@ -315,7 +331,7 @@ export class Supervisor {
     });
   }
 
-  private readActivity(run: Running): void {
+  private readActivity(uuid: string, run: Running): void {
     const stream = run.child.stdio[3] as NodeJS.ReadableStream | undefined;
     if (!stream) return;
     let partial = "";
@@ -327,6 +343,7 @@ export class Supervisor {
         try {
           const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null; a?: number; d?: string };
           if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run.project, e.k, e.id, e.n, { amount: e.a ?? null, detail: e.d ?? null });
+          else if (e.k === "crash" || e.k === "error") this.onReport(uuid, run.project, e);
         } catch { /* not ours */ }
       }
     });
@@ -489,7 +506,12 @@ export class Supervisor {
   private async crashed(uuid: string, project: RunProject, ranFor: number, how: string): Promise<number | null> {
     this.record(project, "crash");
     // Every exit is recorded, whatever happens next (a pause, the owner having stopped it).
-    const incident = await this.incidents.record(project.id, classifyExit({ tail: this.tail(uuid), how, ranForMs: ranFor }), how);
+    const report = this.reports.get(uuid) ?? null;
+    this.reports.delete(uuid);
+    const incident = await this.incidents.record(project.id, classifyExit({ tail: this.tail(uuid), how, ranForMs: ranFor, report }), how, report);
+    // What Kojy is shown: the console's own traceback when it's there (it has every step), else the report's.
+    const console = this.tail(uuid);
+    const tail = report?.line && lastException(console) !== report.line ? reportToTail(report) : console;
     const streak = ranFor >= HEALTHY_RUN_MS ? 1 : (this.crashStreak.get(uuid) ?? 0) + 1;
     if (streak === 1) this.alerted.delete(uuid);
     this.crashStreak.set(uuid, streak);
@@ -507,7 +529,7 @@ export class Supervisor {
     }
     await this.db.update(botProjects).set({ restartCount: p.restartCount + 1 }).where(eq(botProjects.uuid, uuid));
     await this.setStatus(uuid, "crashed", `Exited with ${how}${incident?.summary ? ` (${incident.summary})` : ""}; restarting in ${delay}s`.slice(0, 500));
-    this.onCrash?.(uuid, streak, this.tail(uuid), incident);
+    this.onCrash?.(uuid, streak, tail, incident);
     if (streak >= 3 && this.alerted.get(uuid) !== streak && !this.alerted.has(uuid)) {
       this.alerted.set(uuid, streak);
       const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";
@@ -530,6 +552,24 @@ export class Supervisor {
     const body = `${project.name} crashed ${streak} times in a row, so it was paused instead of restarting forever. Last output: ${last.slice(0, 200)}. Open its chat and ask Kojy to fix it, then press Start.`;
     void notifyUser(this.db, project.ownerId, "bot_error", `${project.name} was paused (crash loop)`, body, `/studio/p/${uuid}`);
     void sendAlert(`⏸ ${body}`);
+  }
+
+  /** A report from the launcher: a crash (kept for when the exit comes) or an error the bot survived. */
+  private onReport(uuid: string, project: RunProject, raw: unknown): void {
+    const report = parseReport(raw);
+    if (!report) return;
+    if (report.fatal) { this.reports.set(uuid, report); return; }
+    void this.botError(uuid, project, report).catch((err: unknown) => log.warn({ err, uuid }, "Could not handle an error the bot survived"));
+  }
+
+  /** The bot survived an error (in one of its handlers): recorded, and Kojy fixes it — the bot keeps running. */
+  private async botError(uuid: string, project: RunProject, report: CrashReport): Promise<void> {
+    const incident = await this.incidents.record(project.id, classifyExit({ tail: this.tail(uuid), how: "kept running", ranForMs: 0, report }), "kept running", report, report.times ?? 1);
+    // Shown on the bot's page until it next (re)starts.
+    const where = `${report.event?.handler ?? "a handler"}${report.event?.command ? ` (the ${report.event.command} command)` : ""}`;
+    void this.db.update(botProjects).set({ statusMessage: `Running, but it hit an error in ${where}; it kept running` })
+      .where(and(eq(botProjects.uuid, uuid), eq(botProjects.status, "running"))).catch(() => undefined);
+    this.onBotError?.(uuid, reportToTail(report), incident, report);
   }
 
   private clearRestart(uuid: string): void {

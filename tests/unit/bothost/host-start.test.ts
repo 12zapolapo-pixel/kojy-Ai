@@ -115,7 +115,9 @@ describe("the launcher on a bot host", () => {
       PYTHONPATH: path.join(root, "sdk"), KOJY_ENTRY: "chatbot:ChatBot", HIGHRISE_ROOM_ID: "r", HIGHRISE_BOT_TOKEN: "t",
       KOJY_ACTIVITY: "stdout", KOJY_WATCHDOG: "off",
     });
-    const activity = r.out.split("\n").filter((l) => l.startsWith("[kojy:activity] ")).map((l) => JSON.parse(l.slice(16)) as { k: string; n: string | null });
-    expect(activity).toEqual([{ k: "chat", id: "u1", n: "Kojy_" }, { k: "reply", id: null, n: null }]);
+    const marked = r.out.split("\n").filter((l) => l.startsWith("[kojy:activity] ")).map((l) => JSON.parse(l.slice(16)) as { k: string; n: string | null; type?: string });
+    expect(marked.filter((e) => e.k !== "crash")).toEqual([{ k: "chat", id: "u1", n: "Kojy_" }, { k: "reply", id: null, n: null }]);
+    // The stand-in SDK returns after its chat: the launcher reports Highrise ending the session the same way.
+    expect(marked.filter((e) => e.k === "crash")).toEqual([expect.objectContaining({ k: "crash", type: "SessionEnded" })]);
   });
 });

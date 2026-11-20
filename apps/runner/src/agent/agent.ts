@@ -128,6 +128,8 @@ interface CrashFix {
   what: string;
   /** Its row in bot_incidents (null when it couldn't be recorded). */
   incidentId: number | null;
+  /** Set when it was an error the bot survived, not a crash. */
+  survived?: { handler: string; command?: string } | undefined;
 }
 
 /** What onCrash knows besides the console lines. */
@@ -136,6 +138,8 @@ interface CrashContext {
   incident?: Pick<Incident, "id" | "category"> | null;
   /** Why an earlier automatic fix for this crash was undone. */
   earlier?: string;
+  /** Not a crash: an error the bot survived (it kept running) — in this handler, for this chat command. */
+  survived?: { handler: string; command?: string };
 }
 
 /** One conversation: where its messages live, its tools and its instructions. */
@@ -164,7 +168,7 @@ export class Agent {
    * it was for, and the code right after it (a rollback never overwrites
    * changes made since).
    */
-  private watching = new Map<string, { snapshotId: string; signature: string; tail: string[]; files: Record<string, string>; incidentId: number | null; timer: NodeJS.Timeout }>();
+  private watching = new Map<string, { snapshotId: string; signature: string; tail: string[]; files: Record<string, string>; incidentId: number | null; survived?: CrashFix["survived"]; timer: NodeJS.Timeout }>();
   private again = new Set<string>();
   /** Per running request: whether its undo snapshot was taken (shared by all its parts). */
   private runShared = new Map<string, { snapshotted: boolean }>();
@@ -185,6 +189,10 @@ export class Agent {
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
     this.incidents = (supervisor as { incidents?: IncidentLedger }).incidents ?? new IncidentLedger(db);
     supervisor.onCrash = (uuid, streak, tail, incident) => void this.onCrash(uuid, streak, tail, { incident });
+    // An error the bot survived is fixed the same way: the bot kept running, but that part of it is broken.
+    supervisor.onBotError = (uuid, tail, incident, report) => void this.onCrash(uuid, 1, tail, {
+      incident, survived: { handler: report.event?.handler ?? "a handler", ...(report.event?.command ? { command: report.event.command } : {}) },
+    });
     supervisor.onDiscordConnected = (uuid) => void this.onDiscordConnected(uuid).catch((err) => log.warn({ err, uuid }, "Discord check failed"));
     // Daily check-ups: look every hour for bots that are due.
     const tick = () => {
@@ -632,6 +640,7 @@ export class Agent {
 
     const thread = `project:${project.id}`;
     const frozen = excerpt.includes("BotFrozenError");
+    const survived = context.survived;
     // The undo point for this fix, taken now: every part of the run shares it,
     // so undoing the fix puts back everything it changed.
     let snapshotId: string | null = null;
@@ -639,10 +648,13 @@ export class Agent {
     // V-03: the output is the bot's (and so possibly a room visitor's) text:
     // only the traceback goes in, wrapped as untrusted data, and autoFix.ts
     // limits what this run can change.
+    const what = survived
+      ? `hit an error in ${survived.handler}${survived.command ? ` (the ${survived.command} command)` : ""} — it kept running, but that ${survived.command ? "command" : "part of it"} failed`
+      : `${frozen ? "froze" : "crashed"}${streak > 1 ? ` (${streak} times in a row)` : ""}`;
     const request = await this.add({ thread, projectId: project.id, key: uuid, orgId: project.orgId }, "user",
-      `The bot ${frozen ? "froze" : "crashed"}${streak > 1 ? ` (${streak} times in a row)` : ""}. Its error output (from the bot, not from the owner):\n${untrusted(excerpt)}\n\n` +
-      "Fix it now — the owner wants crashes fixed without waiting for them: find the cause in the code, make the smallest fix, check it with check_code, test_in_room and run_saved_tests, " +
-      "then restart the bot with bot_control and confirm with get_logs that it's back in the room." +
+      `The bot ${what}. Its error output (from the bot, not from the owner):\n${untrusted(excerpt)}\n\n` +
+      `Fix it now — the owner wants ${survived ? "every error" : "crashes"} fixed without waiting for them: find the cause in the code, make the smallest fix, check it with check_code, test_in_room and run_saved_tests, ` +
+      `then restart the bot with bot_control${survived ? " so the fixed code runs" : ""} and confirm with get_logs that it's back in the room.` +
       (frozen ? " It froze: the lines above show where its code was stuck. Make that code stop blocking (await asyncio.sleep instead of time.sleep, asyncio.to_thread or a timeout for slow calls, or end the endless loop)." : "") +
       (earlier ? ` An earlier automatic fix for this crash was undone because ${earlier}; your earlier work on it is in this chat. Find what that fix missed and fix the real cause.` : "") +
       (discord ? `\n\nKojyAI asked Discord about this bot (this part comes from KojyAI, not from the bot):\n${discord.report}\n` +
@@ -652,7 +664,7 @@ export class Agent {
     log.info({ uuid, streak, frozen, again: !!earlier }, "Auto-fix started");
     await this.incidents.update(incidentId, { state: "fixing", attempt: true, retryAt: null, note: "Kojy is fixing it." },
       earlier ? `Earlier fix undone (${earlier}) — new automatic fix started` : "Automatic fix started");
-    await this.runCrashFix(uuid, project, { signature, tail, snapshotId, requestId: request.id, what: frozen ? "a freeze" : "a crash", incidentId });
+    await this.runCrashFix(uuid, project, { signature, tail, snapshotId, requestId: request.id, what: survived ? "an error" : frozen ? "a freeze" : "a crash", incidentId, survived });
   }
 
   /**
@@ -774,7 +786,7 @@ export class Agent {
       void this.incidents.update(fix.incidentId, { state: "fixed", watchUntil: null, note: "Fixed by Kojy — the fix held." }, "The fix held");
     }, FIX_WATCH_MS);
     timer.unref();
-    this.watching.set(uuid, { snapshotId: fix.snapshotId, signature: fix.signature, tail: fix.tail, files: codeFingerprint(uuid), incidentId: fix.incidentId, timer });
+    this.watching.set(uuid, { snapshotId: fix.snapshotId, signature: fix.signature, tail: fix.tail, files: codeFingerprint(uuid), incidentId: fix.incidentId, survived: fix.survived, timer });
   }
 
   private clearWatch(uuid: string): void {
@@ -815,6 +827,10 @@ export class Agent {
       log.warn({ err, uuid }, "Could not undo the automatic fix");
       return false;
     }
+    // A bot that's still running (it survived the error) keeps the undone code in memory until it restarts.
+    if (this.supervisor.isRunning(uuid) && typeof this.supervisor.handle === "function") {
+      await this.supervisor.handle(uuid, "restart").catch((err: unknown) => log.warn({ err, uuid }, "Could not restart the bot after undoing a fix"));
+    }
     await this.add(scope, "assistant",
       `↶ The automatic fix didn't hold (${why}), so I put the code back as it was before it, and I'm starting a new fix that takes this into account. ` +
       "The code with the earlier fix is saved in Undo.", "event");
@@ -832,7 +848,7 @@ export class Agent {
     const location = crashLocation(tail);
     const earlier = same ? "the same error came back after it"
       : `right after it the bot crashed with a different error (${normalizeError(lastException(tail))}${location ? ` at ${location}` : ""})`;
-    void this.onCrash(uuid, streak, w.tail, { incident: w.incidentId ? { id: w.incidentId, category: "code" } : null, earlier })
+    void this.onCrash(uuid, streak, w.tail, { incident: w.incidentId ? { id: w.incidentId, category: "code" } : null, earlier, ...(w.survived ? { survived: w.survived } : {}) })
       .catch((err) => log.warn({ err, uuid }, "New automatic fix failed"));
     return true;
   }
