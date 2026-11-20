@@ -75,9 +75,32 @@ describe("classifyExit", () => {
     expect(exit(["[kojy] Add HIGHRISE_ROOM_ID and HIGHRISE_BOT_TOKEN in the project's Secrets."], "code 2", 200)).toMatchObject({ category: "missing_secret", state: "needs_owner", signature: "config:room-and-token" });
   });
 
-  it("the watchdog restarting a bot that wasn't really in the room isn't a bug", () => {
-    expect(exit(["[kojy] Watchdog: Highrise didn't answer 3 room checks in a row, so the bot isn't really in the room — restarting the bot."], "code 4", 400_000))
-      .toMatchObject({ category: "not_in_room", state: "ignored", signature: "watchdog:not_in_room" });
+  it("the watchdog finding the bot wasn't in its room is a problem to see, never \"not a bug\" — one kind per reason", () => {
+    const offline = exit(["[kojy] Watchdog: the bot hasn't been connected to Highrise for 301s — restarting the bot."], "code 4", 400_000);
+    expect(offline).toMatchObject({ category: "not_in_room", state: "open", signature: "watchdog:offline" });
+    expect(offline.note).toMatch(/^It wasn't in its room \(the bot hasn't been connected to Highrise for 301s\), so it was started again\.$/);
+    expect(exit(["[kojy] Watchdog: Highrise didn't list the bot among the room's users 3 checks in a row, so it isn't really in the room — restarting the bot."], "code 4", 400_000).signature).toBe("watchdog:missing-from-list");
+    expect(exit(["[kojy] Watchdog: Highrise didn't answer 3 room checks in a row, so the bot isn't really in the room — restarting the bot."], "code 4", 400_000).signature).toBe("watchdog:no-answer");
+    expect(exit(["[kojy] Watchdog: the bot didn't get into its room within 300s of starting — restarting the bot."], "code 4", 300_000)).toMatchObject({ category: "cannot_connect", signature: "never-connected" });
+  });
+
+  it("Highrise refusing the connection (the launcher stops at once) is the owner's to check, with Highrise's answer", () => {
+    const c = classifyExit({ tail: [], how: "code 5", ranForMs: 1500, report: { k: "crash", fatal: true, type: "ConnectRefused", line: "Highrise answered HTTP 403 (Invalid response status)", frames: [], connected: false } });
+    expect(c).toMatchObject({ category: "highrise_refused", state: "needs_owner" });
+    expect(c.note).toMatch(/HTTP 403.*Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets, and that the bot is still added to that room/);
+  });
+
+  it("never getting into the room: the network, a refusal, or the bot's own code hanging (a freeze Kojy fixes)", () => {
+    const report = (extra: Record<string, unknown>) => ({ k: "crash" as const, fatal: true, type: "NeverConnected", line: "[kojy] Watchdog: the bot didn't get into its room within 300s of starting", frames: [], connected: false, uptime: 300, ...extra });
+    expect(classifyExit({ tail: [], how: "code 4", ranForMs: 300_000, report: report({ connect_error: "couldn't reach Highrise: ClientConnectorError: Cannot connect" }) }))
+      .toMatchObject({ category: "cannot_connect", state: "open", signature: "never-connected" });
+    expect(classifyExit({ tail: [], how: "code 4", ranForMs: 300_000, report: report({ connect_error: "Highrise answered HTTP 401 (Unauthorized)" }) }))
+      .toMatchObject({ category: "highrise_refused", state: "needs_owner" });
+    const hang = classifyExit({ tail: [], how: "code 4", ranForMs: 300_000, report: report({
+      line: "BotFrozenError: the bot didn't get into its room within 300s of starting", frames: [{ file: "bot.py", line: 9, func: "load_shop", code: "time.sleep(3600)" }],
+    }) });
+    expect(hang.category).toBe("frozen");
+    expect(FIXABLE.has(hang.category)).toBe(true);
   });
 
   it("killed for memory (a host's note, or an unexpected SIGKILL here)", () => {

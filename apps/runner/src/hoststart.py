@@ -20,6 +20,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 KOJY = os.path.join(HERE, ".kojy")
 PACKAGES = os.path.join(KOJY, "packages")
+INSTALL_TIMEOUT_S = int(os.environ.get("KOJY_INSTALL_TIMEOUT_S", "1200"))
 
 
 def say(message: str) -> None:
@@ -52,11 +53,18 @@ def install_packages() -> None:
     except FileNotFoundError:
         pass
     say("Installing packages (first run or requirements.txt changed)…")
-    done = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
-         "--no-cache-dir", "--upgrade", "--target", PACKAGES, "-r", requirements],
-        cwd=HERE,
-    )
+    try:
+        # A stuck install (the host's network) would leave the server "running"
+        # with no bot in it and nothing checking: give up after a while instead.
+        done = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+             "--no-cache-dir", "--upgrade", "--target", PACKAGES, "-r", requirements],
+            cwd=HERE, timeout=INSTALL_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        limit = f"{INSTALL_TIMEOUT_S // 60} minutes" if INSTALL_TIMEOUT_S >= 120 else f"{INSTALL_TIMEOUT_S} seconds"
+        say(f"Installing packages took more than {limit} — stopped.")
+        raise SystemExit(2)
     if done.returncode != 0:
         say(f"Installing packages failed (pip exit {done.returncode}).")
         raise SystemExit(2)
