@@ -84,6 +84,21 @@ describe("start commands", () => {
     await sup.handle(UUID, "stop");
     expect(sup.isRunning(UUID)).toBe(false);
   }, 30_000);
+
+  it("a program that leaves a child holding its console still counts as stopped the moment it exits, and restarts", async () => {
+    // `sleep 4 &` keeps the bot's output pipes open after the program itself is gone.
+    project.entrypoint = "run: sleep 4 & exec python3 main.py";
+    const { Supervisor } = await import("../../../apps/runner/src/supervisor.js");
+    const sup = new Supervisor(db as never);
+    await sup.handle(UUID, "start");
+    for (let i = 0; i < 50 && !sup.isRunning(UUID); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(sup.isRunning(UUID)).toBe(true);
+    await sup.handle(UUID, "restart");
+    expect(sup.isRunning(UUID)).toBe(true); // the new run started; the old one was let go at once
+    await sup.handle(UUID, "stop");
+    expect(sup.isRunning(UUID)).toBe(false);
+    project.entrypoint = "run: python3 main.py";
+  }, 30_000);
 });
 
 describe("Kojy's run_command", () => {

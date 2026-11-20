@@ -277,6 +277,9 @@ export class Supervisor {
       // crashing bot writes: wait for its pipes to be read out before judging
       // the exit — but not forever (a program it started can hold them open).
       child.once("exit", (code, signal) => {
+        // Gone now: a stop or restart mustn't see it as running while its pipes drain
+        // (a program it started can hold them open long after it exited).
+        if (this.procs.get(uuid) === run) this.procs.delete(uuid);
         let done = false;
         const go = () => { if (!done) { done = true; void this.onExit(uuid, run, code, signal); } };
         child.once("close", go);
