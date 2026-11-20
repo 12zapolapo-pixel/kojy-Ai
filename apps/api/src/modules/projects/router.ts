@@ -19,6 +19,7 @@ import { readAiUsage } from "./aiUsage.js";
 import { schema } from "../../db/client.js";
 import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { getRedis, getRedisPublisher } from "../../utils/redis.js";
+import { roomState, runnerAlive } from "./room.js";
 import { checkRateLimit, RATE_LIMITS } from "@kojyai/security";
 import { emitAuditLog } from "../../events/audit.js";
 import { encryptApiKey, signBotControlMessage } from "@kojyai/shared/crypto";
@@ -98,6 +99,8 @@ async function zipThrottle(userId: number): Promise<void> {
 
 const publicProject = (p: typeof botProjects.$inferSelect) => ({
   id: p.uuid, name: p.name, entrypoint: p.entrypoint, desiredState: p.desiredState, status: p.status,
+  // Whether it's really in its room (not just running), from the runner's latest room check.
+  room: roomState(p), roomName: p.roomName, presenceNote: p.presenceNote, presenceAt: p.presenceAt,
   statusMessage: p.statusMessage, lastExitCode: p.lastExitCode, restartCount: p.restartCount,
   lastStartedAt: p.lastStartedAt, agentState: p.agentState, autoFix: p.autoFix, dailyCheckup: p.dailyCheckup, lastCheckupAt: p.lastCheckupAt, createdAt: p.createdAt, updatedAt: p.updatedAt,
   // Where it runs: no hostId = KojyAI's server; a hostId without a server = waiting for a free one.
@@ -133,7 +136,9 @@ export const projectsRouter = router({
         .where(and(eq(botHosts.id, project.hostId), eq(botHosts.orgId, project.orgId))).limit(1);
       if (h) host = { ...h, label: botHostProvider(h.provider)?.label ?? h.provider, server: project.hostServer };
     }
-    return { ...publicProject(project), secrets, host };
+    // When the runner isn't alive, what the page shows may be out of date: the page says so.
+    const heartbeat = await getRedis()?.get("runner:heartbeat").catch(() => null);
+    return { ...publicProject(project), secrets, host, runnerOnline: runnerAlive(heartbeat) };
   }),
 
   /** Starter bots for the Studio's "New bot" page. */
@@ -303,12 +308,15 @@ export const projectsRouter = router({
       await saveSecret(ctx.db, project.id, input.key, input.value);
       // Key only — never the value.
       await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { key: input.key } });
+      // A bot waiting on this (refused by Highrise, a missing secret) starts again with it now.
+      await control(project.uuid, "secrets_changed").catch(() => undefined);
       return { success: true };
     }),
 
   deleteSecret: permittedProc("bots:update").input(projectId.extend({ key: z.string().max(100) })).mutation(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
     await ctx.db.delete(projectSecrets).where(and(eq(projectSecrets.projectId, project.id), eq(projectSecrets.key, input.key)));
+    await control(project.uuid, "secrets_changed").catch(() => undefined);
     return { success: true };
   }),
 
@@ -354,6 +362,7 @@ export const projectsRouter = router({
         content: `The owner saved these secrets: ${saved.join(", ")}. Test them (test_secrets), then carry on with the task you were doing (for example start the bot with bot_control and check get_logs). Secrets that can't be tested automatically are fine: continue anyway.`,
       });
       await emitAuditLog(ctx.db, { orgId: project.orgId, actorId: ctx.user.id, actorType: "user", action: "project.secret_set", resourceType: "project", resourceId: project.uuid, afterState: { keys: saved } });
+      await control(project.uuid, "secrets_changed").catch(() => undefined);
       await control(project.uuid, "agent");
       return { success: true, saved };
     }),

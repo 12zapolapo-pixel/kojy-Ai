@@ -403,6 +403,34 @@ export function changesSinceKnownGood(uuid: string, maxFiles = 30): { savedAt: n
 }
 
 /**
+ * Puts the code back as it was the last time the bot ran fine (see
+ * saveKnownGood); data/ and database files stay as they are. The current
+ * code is kept as an Undo snapshot first (`label`). Returns when that code
+ * was kept and the Undo snapshot's id — or null when there's nothing to go
+ * back to (none kept, or the code is already that code).
+ */
+export function restoreKnownGood(uuid: string, label: string): { savedAt: number; snapshotId: string } | null {
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  if (!existsSync(file)) return null;
+  const then = unzipSync(readFileSync(file));
+  const metaBytes = then[".kojy-known-good.json"];
+  delete then[".kojy-known-good.json"];
+  if (!metaBytes || !Object.keys(then).length) return null;
+  const meta = JSON.parse(strFromU8(metaBytes)) as { savedAt: number; fingerprint: Record<string, string> };
+  const now = codeFingerprint(uuid);
+  if (fingerprintChanges(now, meta.fingerprint).length === 0) return null;
+  const snapshot = snapshotProject(uuid, label);
+  const root = projectDir(uuid);
+  for (const rel of Object.keys(now)) if (!(rel in then)) rmSync(path.join(root, rel), { force: true });
+  for (const [rel, data] of Object.entries(then)) {
+    const target = resolveInside(uuid, rel);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, data);
+  }
+  return { savedAt: meta.savedAt, snapshotId: snapshot.id };
+}
+
+/**
  * Writes a snapshot's code into `dest` (an empty folder), plus the bot's
  * current data/ and database files (snapshots don't keep those) — the code
  * as it was, with the data as it is, e.g. to run the old code in a test room.

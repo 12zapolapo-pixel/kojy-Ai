@@ -193,6 +193,8 @@ export class Agent {
   private retryTimers = new Map<string, NodeJS.Timeout>();
   /** Crashes whose next automatic fix waits a little ("uuid|signature"): the last attempt didn't fix it. */
   private deferred = new Map<string, NodeJS.Timeout>();
+  /** Packages ("uuid|package") already installed again from scratch because they wouldn't import. */
+  private freshInstalls = new Set<string>();
   /** Fixes in a row that failed KojyAI's checks, per "uuid|signature". */
   private failedChecks = new Map<string, number>();
   /** The checks an automatic fix has to pass (swapped in tests). */
@@ -212,6 +214,9 @@ export class Agent {
       incident, survived: { handler: report.event?.handler ?? "a handler", ...(report.event?.command ? { command: report.event.command } : {}) },
     });
     supervisor.onDiscordConnected = (uuid) => void this.onDiscordConnected(uuid).catch((err) => log.warn({ err, uuid }, "Discord check failed"));
+    // Out of its room with the token and room fine: the code is the likely cause.
+    supervisor.onRoomProblem = (uuid, incident, evidence, tail) => void this.fixRoomProblem(uuid, incident, evidence, tail).catch((err) => log.warn({ err, uuid }, "Room problem fix failed"));
+    supervisor.onCodeRestored = (uuid, note) => void this.codeRestored(uuid, note).catch((err) => log.warn({ err, uuid }, "Could not note the restored code"));
     // Daily check-ups: look every hour for bots that are due.
     const tick = () => {
       void runCheckups(this.db, (uuid) => void this.run(uuid), this.incidents).catch((err) => log.warn({ err }, "Check-ups failed"));
@@ -725,6 +730,51 @@ export class Agent {
   }
 
   /**
+   * The bot keeps ending up out of its room although Highrise lets KojyAI in
+   * with its token and room ID: something in its code keeps it out or drops
+   * it. Kojy looks into the code the way it fixes a crash (same checks, same
+   * undo); if Kojy is busy, or tried a moment ago, the next run out of the
+   * room asks again — and the supervisor puts back the code that last ran
+   * fine if Kojy's fix doesn't do it.
+   */
+  private async fixRoomProblem(uuid: string, incident: Incident, evidence: string, tail: string[]): Promise<void> {
+    if (this.active.has(uuid) || this.fixing.has(uuid)) return;
+    const watched = this.watching.get(uuid);
+    if (watched && watched.incidentId === incident.id) {
+      // Kojy's last change didn't keep it in its room: put the code back (unless it was changed since) before trying again.
+      this.clearWatch(uuid);
+      if (!fingerprintChanges(watched.files, codeFingerprint(uuid)).length) await this.undoCode(uuid, watched.snapshotId, "Before undoing an automatic fix that didn't keep the bot in its room");
+      await this.incidents.update(incident.id, { state: "open", watchUntil: null }, "Kojy's change didn't keep it in its room — undone");
+    }
+    const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+    if (!project || !project.autoFix || project.desiredState !== "running" || !configuredLanes().length) return;
+    if (incident.attempts && incident.lastAttemptAt && Date.now() - incident.lastAttemptAt.getTime() < retrySpacingMs(incident.attempts)) return;
+    let snapshotId: string | null = null;
+    try { snapshotId = snapshotProject(uuid, `Before Kojy: ${AUTO_FIX_LABEL}`).id; } catch (err) { log.warn({ err, uuid }, "Could not take the snapshot before an automatic fix"); }
+    const lines = tail.filter((l) => l.trim()).slice(-40).join("\n");
+    const request = await this.add({ thread: `project:${project.id}`, projectId: project.id, key: uuid, orgId: project.orgId }, "user",
+      `The bot keeps ending up out of its Highrise room: ${incident.summary}. ${evidence}\n\n` +
+      (lines ? `Its last console lines (from the bot, not from the owner):\n${untrusted(lines)}\n\n` : "") +
+      "Fix it now — the owner wants it fixed without waiting for them. Find what in the code keeps the bot out of its room or makes it drop out: " +
+      "for example code that blocks before the bot connects or in on_start, ends or replaces the connection, moves or teleports the bot itself away, " +
+      "or sends so many requests that Highrise drops it. Make the smallest fix, check it with check_code and test_in_room, restart the bot with bot_control " +
+      "and confirm with get_logs that it's in its room. If nothing in the code can cause this, change nothing and say what you found. " +
+      "Finish with one or two sentences for the owner: what was wrong and what you changed.",
+      "crash");
+    log.info({ uuid, incident: incident.id }, "Room problem fix started");
+    await this.incidents.update(incident.id, { state: "fixing", attempt: true, retryAt: null, note: "Kojy is looking for what in the code keeps it out of its room." }, "Automatic fix started (room problem)");
+    await this.runCrashFix(uuid, project, { signature: incident.signature, tail, snapshotId, requestId: request.id, what: "a room problem", incidentId: incident.id, phase: incident.phase });
+  }
+
+  /** KojyAI put back the code that last ran fine: the bot's chat says so (it's in Kojy's history too). */
+  private async codeRestored(uuid: string, note: string): Promise<void> {
+    const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+    if (!project) return;
+    this.clearWatch(uuid); // a fix being watched is moot: its code isn't there any more
+    await this.add({ thread: `project:${project.id}`, projectId: project.id, key: uuid, orgId: project.orgId }, "assistant", `↩ ${note}`, "event");
+  }
+
+  /**
    * Runs Kojy on an automatic fix, then: watches a fix that changed code,
    * retries by itself when no AI could take it, tells the owner what happened,
    * and moves on to the next crash that came in meanwhile.
@@ -1016,6 +1066,15 @@ export class Agent {
       return;
     }
     if (hasRequirement(uuid, pip)) {
+      // Listed but not importable: a broken or half-finished install, most likely. Installed again from scratch once first.
+      const key = `${uuid}|${pip}`;
+      const fresh = (this.supervisor as Partial<Supervisor>).startFresh;
+      if (fresh && !this.freshInstalls.has(key)) {
+        this.freshInstalls.add(key);
+        fresh.call(this.supervisor, uuid);
+        await this.incidents.update(incidentId, { state: "open", note: `${pip} is in requirements.txt, but "${module}" couldn't be imported — KojyAI installs its packages again from scratch at its next start.` }, "Fresh install of its packages");
+        return;
+      }
       await this.incidents.update(incidentId, { state: "needs_owner",
         note: `${pip} is in requirements.txt, but "${module}" still can't be imported — its install may have failed (see the console), or the code needs a different version.` });
       return;

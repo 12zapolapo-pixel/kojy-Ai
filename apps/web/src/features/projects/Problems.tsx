@@ -26,11 +26,14 @@ const CATEGORY: Record<string, string> = {
   code: "Bug in the code",
   frozen: "Code froze",
   not_in_room: "Dropped out of the room",
+  cannot_connect: "Can't get into the room",
+  silent: "No sign of life",
   network: "Network or Highrise away",
   highrise_refused: "Highrise refused the bot",
   missing_secret: "Missing secret",
   missing_package: "Missing package",
   out_of_memory: "Out of memory",
+  host_problem: "Bot host problem",
   unknown: "Stopped",
 };
 

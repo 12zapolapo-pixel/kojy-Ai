@@ -110,7 +110,7 @@ describe("bot watchdog", () => {
   test("never connected for too long: restarted", async () => {
     const r = await launch("testbot:FineBot", { ROOM_MODE: "never-connects", KOJY_ROOM_CHECK_SECONDS: "1", KOJY_OFFLINE_SECONDS: "2" }, 15_000);
     expect(r.code).toBe(4);
-    expect(r.out).toMatch(/\[kojy\] Watchdog: the bot hasn't been connected to Highrise for \d+s/);
+    expect(r.out).toMatch(/\[kojy\] Watchdog: the bot didn't get into its room within \d+s of starting — restarting the bot\./);
   }, 20_000);
 
   test("a healthy bot is left alone", async () => {

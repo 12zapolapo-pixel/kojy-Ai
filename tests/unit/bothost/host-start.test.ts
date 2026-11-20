@@ -6,7 +6,7 @@
  * lines when there's no fd 3 (KOJY_ACTIVITY=stdout).
  */
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -109,6 +109,33 @@ describe("the starter on the bot host", () => {
   }, 70_000);
 });
 
+describe("a fresh start asked by KojyAI", () => {
+  test("installs the packages again from scratch — once per request, even if the host restarts the server by itself", async () => {
+    const dir = server("fresh", { KOJY_ENTRY: "bot:MyBot", HIGHRISE_BOT_TOKEN: "x" }, "\n");
+    const installs = async (settings: Record<string, string>) => {
+      writeFileSync(path.join(dir, ".kojy", "env.json"), JSON.stringify({ KOJY_ENTRY: "bot:MyBot", HIGHRISE_BOT_TOKEN: "x", ...settings }));
+      const r = await run(dir, "kojy_start.py", {}, 60_000);
+      expect(r.code).toBe(0);
+      return r.out.includes("[kojy] Installing packages");
+    };
+    expect(await installs({})).toBe(true); // first run
+    expect(await installs({})).toBe(false); // nothing changed
+    writeFileSync(path.join(dir, ".kojy", "packages", "half-installed.txt"), "left over");
+    expect(await installs({ KOJY_FRESH_INSTALL: "1700000000000" })).toBe(true);
+    expect(existsSync(path.join(dir, ".kojy", "packages", "half-installed.txt"))).toBe(false);
+    expect(await installs({ KOJY_FRESH_INSTALL: "1700000000000" })).toBe(false); // the same request again: already done
+  }, 120_000);
+});
+
+describe("a package install that hangs", () => {
+  test("is stopped after its time limit, so the server isn't left \"running\" with no bot in it", async () => {
+    const dir = server("slow-packages", { KOJY_ENTRY: "bot:MyBot", HIGHRISE_BOT_TOKEN: "x" }, "./no-such-package-folder\n");
+    const r = await run(dir, "kojy_start.py", { KOJY_INSTALL_TIMEOUT_S: "0" }, 60_000);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("[kojy] Installing packages took more than 0 seconds — stopped.");
+  }, 70_000);
+});
+
 describe("the launcher on a bot host", () => {
   test("reports room activity as marked console lines (no fd 3 there)", async () => {
     const r = await run(path.join(root, "sdk"), LAUNCHER, {
@@ -116,7 +143,9 @@ describe("the launcher on a bot host", () => {
       KOJY_ACTIVITY: "stdout", KOJY_WATCHDOG: "off",
     });
     const marked = r.out.split("\n").filter((l) => l.startsWith("[kojy:activity] ")).map((l) => JSON.parse(l.slice(16)) as { k: string; n: string | null; type?: string });
-    expect(marked.filter((e) => e.k !== "crash")).toEqual([{ k: "chat", id: "u1", n: "Kojy_" }, { k: "reply", id: null, n: null }]);
+    expect(marked.filter((e) => e.k !== "crash" && e.k !== "presence")).toEqual([{ k: "chat", id: "u1", n: "Kojy_" }, { k: "reply", id: null, n: null }]);
+    // Whether it's in its room goes the same way.
+    expect(marked.some((e) => e.k === "presence")).toBe(true);
     // The stand-in SDK returns after its chat: the launcher reports Highrise ending the session the same way.
     expect(marked.filter((e) => e.k === "crash")).toEqual([expect.objectContaining({ k: "crash", type: "SessionEnded" })]);
   });

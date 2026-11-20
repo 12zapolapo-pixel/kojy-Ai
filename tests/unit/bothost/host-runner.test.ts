@@ -281,6 +281,41 @@ describe("a bot on a bot host", () => {
     sup = sup2;
   });
 
+  it("a fresh start sends every file again (not the data: it's newer on the host) and has the packages installed again", async () => {
+    const mark = fake.calls.length;
+    sup.startFresh(UUID);
+    await sup.handle(UUID, "restart");
+    await until(() => project.status === "running");
+    const calls = fake.calls.slice(mark);
+    expect(calls).toEqual(expect.arrayContaining(["write bot.py", "write kojy_launcher.py", "write kojy_start.py", "write .kojy/requirements.txt", "power start"]));
+    expect(calls).not.toContain("write data/players.json");
+    expect(calls.filter((c) => c.startsWith("delete"))).toEqual([]);
+    expect(JSON.parse(fake.files.get(".kojy/env.json")!.toString()).KOJY_FRESH_INSTALL).toMatch(/^\d+$/);
+    // The next start is an ordinary one again.
+    const mark2 = fake.calls.length;
+    await sup.handle(UUID, "restart");
+    await until(() => project.status === "running");
+    expect(fake.calls.slice(mark2)).not.toContain("write kojy_launcher.py");
+    expect(JSON.parse(fake.files.get(".kojy/env.json")!.toString()).KOJY_FRESH_INSTALL).toBeUndefined();
+  });
+
+  it("a server the host suspended is the owner's to sort out: kept as a problem, told once, and tried again every 30 min", async () => {
+    const problems: unknown[][] = [];
+    const s = sup as unknown as { ownerProblem(...a: unknown[]): Promise<void>; restartTimers: Map<string, NodeJS.Timeout> };
+    vi.spyOn(s, "ownerProblem").mockImplementation(async (...a: unknown[]) => { problems.push(a); });
+    await sup.handle(UUID, "stop");
+    const getServer = fake.getServer.bind(fake);
+    fake.getServer = async () => ({ ...(await getServer()), suspended: true });
+    await sup.handle(UUID, "start");
+    expect(problems[0]).toEqual([UUID, expect.objectContaining({ name: "Japalo" }), "The bot host suspended its server",
+      expect.stringMatching(/only you can sort that out with the host.*KojyAI starts it by itself once the server is back/)]);
+    expect(project.status).toBe("error");
+    expect(s.restartTimers.has(UUID)).toBe(true);
+    clearTimeout(s.restartTimers.get(UUID));
+    s.restartTimers.delete(UUID);
+    fake.getServer = getServer;
+  });
+
   it("moving off the host copies its data back and removes the settings (with the secrets) there", async () => {
     fake.files.set("data/players.json", Buffer.from('{"kojy_": 99}')); // the bot saved this on the host
     Object.assign(project, { hostId: null, hostServer: null, hostSync: null, desiredState: "stopped" });

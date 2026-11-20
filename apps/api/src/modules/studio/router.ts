@@ -17,6 +17,7 @@ import { resolveOrgId } from "../../utils/resolveOrgId.js";
 import { getRedis, getRedisPublisher } from "../../utils/redis.js";
 import { signBotControlMessage } from "@kojyai/shared/crypto";
 import { listThread, addToThread, agentProgress } from "../projects/chat.js";
+import { roomState, type RoomState } from "../projects/room.js";
 import { pickMemories } from "@kojyai/shared/projects";
 
 const { botProjects, bots, projectMessages, agentMemories } = schema;
@@ -52,14 +53,17 @@ export const studioRouter = router({
     const orgId = await resolveOrgId(ctx);
     const [py, js] = await Promise.all([
       ctx.db.select({ uuid: botProjects.uuid, name: botProjects.name, status: botProjects.status, agentState: botProjects.agentState,
-        desiredState: botProjects.desiredState, updatedAt: botProjects.updatedAt }).from(botProjects).where(eq(botProjects.orgId, orgId)),
+        desiredState: botProjects.desiredState, updatedAt: botProjects.updatedAt, entrypoint: botProjects.entrypoint,
+        inRoom: botProjects.inRoom, presenceAt: botProjects.presenceAt, presenceNote: botProjects.presenceNote }).from(botProjects).where(eq(botProjects.orgId, orgId)),
       ctx.db.select({ uuid: bots.uuid, name: bots.name, status: bots.status, updatedAt: bots.updatedAt }).from(bots)
         .where(and(eq(bots.orgId, orgId), isNull(bots.deletedAt))),
     ]);
     const live = (s: string) => s === "running" || s === "online";
     return [
-      ...py.map((p) => ({ kind: "python" as const, id: p.uuid, name: p.name, status: p.status, live: live(p.status), working: p.agentState === "working", updatedAt: p.updatedAt })),
-      ...js.map((b) => ({ kind: "javascript" as const, id: b.uuid, name: b.name, status: b.status, live: live(b.status), working: false, updatedAt: b.updatedAt })),
+      ...py.map((p) => ({ kind: "python" as const, id: p.uuid, name: p.name, status: p.status, live: live(p.status), working: p.agentState === "working", updatedAt: p.updatedAt,
+        room: roomState(p), roomNote: p.presenceNote })),
+      ...js.map((b) => ({ kind: "javascript" as const, id: b.uuid, name: b.name, status: b.status, live: live(b.status), working: false, updatedAt: b.updatedAt,
+        room: null as RoomState, roomNote: null as string | null })),
     ].sort((a, b) => a.name.localeCompare(b.name));
   }),
 

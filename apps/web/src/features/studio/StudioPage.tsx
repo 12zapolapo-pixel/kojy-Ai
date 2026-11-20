@@ -211,7 +211,8 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
   const [tab, setTab] = useState<"overview" | "memory">("overview");
   const status = trpc.system.status.useQuery(undefined, { refetchInterval: 30_000, retry: false });
   const live = bots.filter((b) => b.live).length;
-  const broken = bots.filter((b) => b.status === "crashed" || b.status === "error");
+  // A bot that runs but isn't in its room needs attention as much as a crashed one.
+  const broken = bots.filter((b) => b.status === "crashed" || b.status === "error" || b.room === "out" || b.room === "unconfirmed");
   const s = status.data;
   const allOk = !!s && s.database.ok && s.redis.ok && s.runner.ok && s.worker.ok;
   const open = (b: BotItem) => navigate(`/studio/${b.kind === "python" ? "p" : "j"}/${b.id}`);
@@ -261,7 +262,10 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
                 {broken.map((b) => (
                   <div key={`x-${b.kind}-${b.id}`} className="flex items-center gap-3 p-3.5 bg-[#FDF3F3] border border-[#F3D3D3] rounded-[10px]">
                     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#B42323" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3 2 20h20zM12 10v4M12 17h.01" /></svg>
-                    <p className="flex-1 min-w-0 font-semibold text-ink truncate">{b.name} {b.status === "crashed" ? "crashed" : "has an error"}</p>
+                    <p className="flex-1 min-w-0 font-semibold text-ink truncate">
+                      {b.name} {b.status === "crashed" ? "crashed" : b.status === "error" ? "has an error" : b.room === "out" ? "isn't in its room" : "isn't confirmed in its room"}
+                      {(b.room === "out" || b.room === "unconfirmed") && b.roomNote && <span className="block text-[13px] font-normal text-ink-2 truncate">{b.roomNote}</span>}
+                    </p>
                     <button onClick={() => open(b)} className="h-9 px-3 rounded-[10px] bg-white border border-line-strong text-sm font-semibold text-ink hover:border-[#B4BACB]">Open</button>
                   </div>
                 ))}
@@ -274,7 +278,12 @@ function StudioHome({ bots }: { bots: BotItem[] }) {
                           className="w-full flex items-center gap-3 min-h-[56px] px-3 py-2 text-left bg-white border border-line rounded-[10px] hover:border-[#B9C5FF] hover:shadow-card transition">
                           <span className="flex-1 min-w-0">
                             <span className="block font-semibold text-ink truncate">{b.name}</span>
-                            <span className="block text-[13px] text-ink-2">{b.kind === "python" ? "Python bot" : "JavaScript bot"}</span>
+                            <span className="block text-[13px] text-ink-2">
+                              {b.kind === "python" ? "Python bot" : "JavaScript bot"}
+                              {b.room === "in" && <span className="text-emerald-700"> · in its room</span>}
+                              {b.room === "out" && <span className="text-red-700"> · not in its room</span>}
+                              {b.room === "unconfirmed" && <span className="text-amber-700"> · not confirmed in its room</span>}
+                            </span>
                           </span>
                           <StatusBadge status={b.status} />
                         </button>

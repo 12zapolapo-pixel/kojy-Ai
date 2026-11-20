@@ -862,6 +862,17 @@ export const botProjects = pgTable("bot_projects", {
   hostServer:    varchar("host_server", { length: 64 }),
   // What was last uploaded to that server, so only changed files are sent.
   hostSync:      jsonb("host_sync").$type<HostSync>(),
+  // Whether the bot is really in its Highrise room, from the launcher's checks
+  // (null: not known — not running, starting, or no check yet), the room's
+  // name, what the latest check said, and when. "Running" only says the
+  // process is up; this says the bot is where it should be.
+  inRoom:        boolean("in_room"),
+  roomName:      varchar("room_name", { length: 120 }),
+  presenceNote:  varchar("presence_note", { length: 300 }),
+  presenceAt:    ts("presence_at"),
+  // Highrise was seen listing this bot among its room's users, so from now on
+  // the bot missing from that list means it isn't in the room.
+  roomListsBot:  boolean("room_lists_bot").default(false).notNull(),
   createdAt:     createdAt(),
   updatedAt:     updatedAt(),
 }, (t) => ({
@@ -1092,6 +1103,8 @@ export interface IncidentData {
   report?: Record<string, unknown>;
   /** How the bot stopped the latest time ("code 1", "SIGKILL", "out of memory"). */
   exit?: string;
+  /** When the owner was told about it (cleared once it's resolved, so they're told again if it comes back). */
+  alertedAt?: number;
   /**
    * What an automatic fix needs to pick the work up again after a KojyAI
    * restart: the crash (signature, its traceback lines), the chat request and

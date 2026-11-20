@@ -13,6 +13,7 @@ import Editor from "@monaco-editor/react";
 import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
 import { StatusBadge } from "./StatusBadge";
 import { ProblemsButton } from "./Problems";
+import { RoomChip } from "./RoomChip";
 import { languageFor } from "./monaco";
 import { DataTab } from "./DataTab";
 import { ChatTab } from "./ChatTab";
@@ -92,6 +93,8 @@ export function Header({ project }: { project: Project }) {
       </button>
       <h1 className="font-display text-[21px] font-extrabold tracking-[-0.02em] text-ink truncate">{project.name}</h1>
       <StatusBadge status={project.status} />
+      {/* "Running" only says the process is up: whether the bot is really in its room is said next to it. */}
+      <RoomChip room={project.room} roomName={project.roomName} note={project.presenceNote} checkedAt={project.presenceAt} />
       {project.statusMessage && <span className="text-[13.5px] text-ink-2 truncate max-w-xs">{project.statusMessage}</span>}
       {project.restartCount > 0 && <span className="text-[13.5px] text-amber-700">Restarted {project.restartCount}×</span>}
       <ProblemsButton projectId={project.id} />
@@ -102,6 +105,11 @@ export function Header({ project }: { project: Project }) {
         <button className={ghostBtn} disabled={busy} onClick={() => restart.mutate({ id: project.id })}><RunIcon d="M20 12a8 8 0 1 1-2.3-5.7M20 4v4h-4" />Restart</button>
       </div>
       {error && <p className="basis-full text-xs text-red-700">{error.message}</p>}
+      {!project.runnerOnline && (
+        <p role="status" className="basis-full text-[13px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5">
+          KojyAI's bot runner isn't responding right now, so what this page shows may be out of date. Bots on a bot host keep running.
+        </p>
+      )}
     </div>
   );
 }

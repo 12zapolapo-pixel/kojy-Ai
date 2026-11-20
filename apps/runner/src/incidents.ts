@@ -15,18 +15,19 @@
  * only the owner has.
  */
 
-import { and, desc, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, notInArray, or, sql } from "drizzle-orm";
 import type { Database } from "@kojyai/db";
 import { botIncidents, type IncidentData } from "@kojyai/db/schema";
 import { createLogger } from "./logger.js";
 import { crashExcerpt, crashLocation, crashSignature, isNetworkFailure, lastException, normalizeError } from "./agent/autoFix.js";
 import { CONNECTED_PREFIX } from "./agent/botHealth.js";
+import { highriseMessage, ownersRefusal, refusalAdvice, refusalKind } from "./roomDoctor.js";
 
 const log = createLogger("incidents");
 
 export type IncidentCategory =
-  | "code" | "frozen" | "not_in_room" | "network" | "highrise_refused"
-  | "missing_secret" | "missing_package" | "out_of_memory" | "unknown";
+  | "code" | "frozen" | "not_in_room" | "cannot_connect" | "silent" | "network" | "highrise_refused"
+  | "missing_secret" | "missing_package" | "out_of_memory" | "host_problem" | "unknown";
 export type IncidentPhase = "import" | "startup" | "in_room" | "unknown";
 export type IncidentState = "open" | "queued" | "fixing" | "waiting_for_ai" | "watching" | "fixed" | "ignored" | "needs_owner";
 export type Incident = typeof botIncidents.$inferSelect;
@@ -35,6 +36,15 @@ export type Incident = typeof botIncidents.$inferSelect;
 export const WORKING_STATES: IncidentState[] = ["queued", "fixing", "waiting_for_ai", "watching"];
 /** Bugs in the bot's own code — what Kojy fixes. */
 export const FIXABLE = new Set<IncidentCategory>(["code", "frozen"]);
+/** The bot not being in its room (whatever the reason): closed by itself once it's back in. */
+export const ROOM_TROUBLE: IncidentCategory[] = ["not_in_room", "cannot_connect", "silent", "network", "highrise_refused"];
+/**
+ * Problems a good run settles: the bot ran fine for a while after them, so
+ * the secret, package, host or room problem was sorted out (by the owner, a
+ * fresh start, or Highrise coming back). A bug in the code isn't: a rare
+ * input can still hit it.
+ */
+export const SETTLED_BY_RUNNING: IncidentCategory[] = [...ROOM_TROUBLE, "missing_secret", "missing_package", "host_problem", "out_of_memory", "unknown"];
 
 export interface ExitInfo {
   /** The bot's last console lines (stdout and stderr). */
@@ -74,6 +84,8 @@ export interface CrashReport {
   uptime?: number;
   /** How many occurrences this report stands for (repeats are reported in batches). */
   times?: number;
+  /** Why the last attempt to connect to Highrise failed (NeverConnected). */
+  connect_error?: string;
 }
 
 const str = (v: unknown, n: number) => (typeof v === "string" ? clip(v.replace(/[\r\n]+/g, " "), n) : undefined);
@@ -122,6 +134,8 @@ export function parseReport(raw: unknown): CrashReport | null {
   }
   if (typeof r.uptime === "number") out.uptime = r.uptime;
   if (typeof r.times === "number" && r.times > 1) out.times = Math.min(Math.floor(r.times), 10_000);
+  const connectError = str(r.connect_error, 200);
+  if (connectError) out.connect_error = connectError;
   return out;
 }
 
@@ -169,6 +183,24 @@ function where(location: string): string {
 }
 
 /**
+ * Highrise refused the bot. Its own words say whether only the owner can sort
+ * it out (the token, the room, the bot's access to it: "needs you" right
+ * away) or not — then the supervisor finds out (roomDoctor) before anyone is
+ * asked for anything.
+ */
+function refusal(line: string, base: { phase: IncidentPhase; fatal: boolean }): Classified {
+  const said = highriseMessage(line) || "no reason given";
+  const kind = refusalKind(said);
+  return {
+    ...base, signature: `refused:${normalizeError(said)}`, category: "highrise_refused", example: clip(line, 240),
+    summary: clip(`Highrise refused the bot: ${said}`, 300),
+    ...(ownersRefusal(kind)
+      ? { state: "needs_owner" as const, note: refusalAdvice(kind, said) }
+      : { state: "open" as const, note: kind === "busy" ? `Highrise asked the bot to wait (“${said}”) — it's started again a little later.` : `Highrise refused the bot (“${said}”); KojyAI is finding out why and keeps starting it again.` }),
+  };
+}
+
+/**
  * What kind of problem an exit was (or an error the bot survived): from the
  * launcher's report when there is one, else from the console lines it left.
  */
@@ -181,9 +213,16 @@ export function classifyExit(info: ExitInfo): Classified {
         summary: clip(`Highrise ended the session${said ? ` (${said})` : ""}`, 300),
         state: "ignored", note: "Highrise closed the bot's session (it does that now and then) — not a bug in the code. The bot was started again." };
     }
-    return { signature: `refused:${said || "no reason given"}`, category: "highrise_refused", phase: "startup", fatal: true, example: clip(r.line ?? "", 240),
-      summary: clip(`Highrise refused the bot${said ? `: ${said}` : ""}`, 300),
-      state: "needs_owner", note: "Highrise refused the bot. Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets." };
+    return refusal(r.line ?? "", { phase: "startup", fatal: true });
+  }
+  if (r?.type === "ConnectRefused") return refusal(r.line || "no answer given", { phase: "startup", fatal: true });
+  if (r?.type === "NeverConnected" && !r.frames?.length) {
+    // Not stuck in the bot's own code (that would be a freeze, below): it couldn't connect.
+    const err = r.connect_error ?? "";
+    if (/HTTP 4(?!29)\d\d/.test(err)) return classifyExit({ ...info, report: { ...r, type: "ConnectRefused", line: err } });
+    return { signature: "never-connected", category: "cannot_connect", phase: "startup", fatal: true, example: clip(r.line ?? "", 240),
+      summary: clip(`Didn't get into its room${err ? ` (${err})` : ""}`, 300),
+      state: "open", note: `It didn't get into its room within ${Math.round((r.uptime ?? 300) / 60) || 1} min of starting${err ? ` (${err})` : ""}, so it was started again.` };
   }
   if (r?.type === "NotInRoom") return classifyExit({ ...info, report: null, tail: [...info.tail, r.line ?? WATCHDOG] });
   if (r?.line) {
@@ -233,19 +272,22 @@ export function classifyExit(info: ExitInfo): Classified {
     return { ...base, signature: crashSignature(tail), category: frozen ? "frozen" : "code", summary, state: "open", note: "" };
   }
   if (text(WATCHDOG)) {
-    return { ...base, signature: "watchdog:not_in_room", category: "not_in_room", summary: "Wasn't really in the room (Highrise didn't answer)", example: clip(text(WATCHDOG)!, 240),
-      state: "ignored", note: "It wasn't really in the room any more, so the watchdog restarted it — not a bug in the code." };
+    // The watchdog found the bot wasn't really in its room: worth seeing, never "not a bug" — and when
+    // it keeps happening the supervisor tells the owner what to check.
+    const line = text(WATCHDOG)!;
+    const why = line.trim().slice(WATCHDOG.length).replace(/ — restarting the bot\.?$/, "").trim();
+    const kind = /didn't list the bot/.test(why) ? "missing-from-list" : /hasn't been connected/.test(why) ? "offline"
+      : /didn't answer/.test(why) ? "no-answer" : /didn't get into its room/.test(why) ? "never-connected" : "other";
+    return { ...base, signature: kind === "never-connected" ? "never-connected" : `watchdog:${kind}`, category: kind === "never-connected" ? "cannot_connect" : "not_in_room",
+      summary: clip(`Wasn't in its room: ${normalizeError(why)}`, 300), example: clip(line, 240),
+      state: "open", note: clip(`It wasn't in its room (${why}), so it was started again.`, 400) };
   }
   if (/out of memory|SIGKILL/i.test(info.how)) {
     return { ...base, signature: "exit:out_of_memory", category: "out_of_memory", summary: "Killed for using too much memory", example: info.how,
       state: "open", note: "It was killed for using too much memory." };
   }
   const refused = [...tail].reverse().find((l) => l.startsWith("ERROR: ") && l !== "ERROR: reconnecting...");
-  if (refused && !connected) {
-    return { ...base, signature: `refused:${normalizeError(refused.replace(/ closing connection with ID: .*$/, ""))}`, category: "highrise_refused",
-      summary: clip(normalizeError(refused), 300), example: clip(refused, 240),
-      state: "needs_owner", note: "Highrise refused the bot. Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets." };
-  }
+  if (refused && !connected) return refusal(refused, base);
   const how = info.how.replace(/\d+/g, "N");
   return { ...base, signature: `exit:${how}`, category: "unknown", summary: `Stopped without an error message (${info.how})`, example: info.how,
     state: "open", note: `It stopped without printing an error (${info.how}), so there's nothing in the code to go on yet. It was started again.` };
@@ -262,6 +304,8 @@ export interface IncidentPatch {
   watchUntil?: Date | null;
   /** What's needed to pick an automatic fix up again after a restart (null clears it). */
   fix?: IncidentData["fix"] | null;
+  /** The owner was told about it (so they aren't told again until it's resolved). */
+  alerted?: boolean;
 }
 
 const MAX_TIMELINE = 20;
@@ -308,6 +352,50 @@ export class IncidentLedger {
     }
   }
 
+  /**
+   * The bot is back in its room: problems about it not being there are
+   * closed (they'd otherwise keep saying "needs you" after it's fine).
+   */
+  async resolveRoomTrouble(projectId: number, at = new Date()): Promise<void> {
+    try {
+      // HIGHRISE_ROOM_ID and HIGHRISE_BOT_TOKEN missing is settled too: it couldn't have got in without them.
+      const rows = await this.db.select({ id: botIncidents.id, data: botIncidents.data }).from(botIncidents)
+        .where(and(eq(botIncidents.projectId, projectId), inArray(botIncidents.state, ["open", "needs_owner"]),
+          or(inArray(botIncidents.category, ROOM_TROUBLE), eq(botIncidents.signature, "config:room-and-token"))));
+      for (const row of rows) {
+        const data: IncidentData = { ...(row.data ?? {}) };
+        delete data.alertedAt;
+        pushTimeline(data, "Back in its room");
+        await this.db.update(botIncidents).set({ state: "fixed", note: `Back in its room since ${at.toISOString().slice(11, 16)} UTC.`, data }).where(eq(botIncidents.id, row.id));
+      }
+    } catch (err) {
+      log.warn({ err, projectId }, "Could not close the room problems");
+    }
+  }
+  /**
+   * The bot has run fine since `since`: its problems that a good run settles
+   * (SETTLED_BY_RUNNING, ones that stopped it and haven't happened since)
+   * are closed, so "needs you" never stays up after it was sorted out.
+   */
+  async resolveAfterGoodRun(projectId: number, since: Date): Promise<number> {
+    try {
+      const rows = await this.db.select({ id: botIncidents.id, data: botIncidents.data }).from(botIncidents)
+        .where(and(eq(botIncidents.projectId, projectId), inArray(botIncidents.category, SETTLED_BY_RUNNING), inArray(botIncidents.state, ["open", "needs_owner"]),
+          eq(botIncidents.fatal, true), lt(botIncidents.lastSeenAt, since)));
+      for (const row of rows) {
+        const data: IncidentData = { ...(row.data ?? {}) };
+        delete data.alertedAt;
+        pushTimeline(data, "Ran fine again");
+        await this.db.update(botIncidents).set({ state: "fixed", note: `Sorted out — the bot has run fine since ${since.toISOString().slice(11, 16)} UTC.`, data }).where(eq(botIncidents.id, row.id));
+      }
+      return rows.length;
+    } catch (err) {
+      log.warn({ err, projectId }, "Could not close the problems a good run settled");
+      return 0;
+    }
+  }
+
+
   /** Moves an incident along; `what` goes on its timeline. No-op without an id. */
   async update(id: number | null | undefined, patch: IncidentPatch, what?: string): Promise<void> {
     if (!id) return;
@@ -320,12 +408,14 @@ export class IncidentLedger {
       if (patch.fixFiles !== undefined) set.fixFiles = patch.fixFiles;
       if (patch.watchUntil !== undefined) set.watchUntil = patch.watchUntil;
       if (patch.attempt) { set.attempts = sql`${botIncidents.attempts} + 1`; set.lastAttemptAt = new Date(); }
-      if (what || patch.fix !== undefined) {
+      if (what || patch.fix !== undefined || patch.alerted !== undefined) {
         const [row] = await this.db.select({ data: botIncidents.data }).from(botIncidents).where(eq(botIncidents.id, id)).limit(1);
         const data: IncidentData = { ...(row?.data ?? {}) };
         if (what) pushTimeline(data, what);
         if (patch.fix === null) delete data.fix;
         else if (patch.fix) data.fix = { ...patch.fix, tail: patch.fix.tail.slice(-60).map((l) => clip(l, 300)) };
+        if (patch.alerted === true) data.alertedAt = Date.now();
+        else if (patch.alerted === false) delete data.alertedAt;
         set.data = data;
       }
       if (Object.keys(set).length) await this.db.update(botIncidents).set(set).where(eq(botIncidents.id, id));

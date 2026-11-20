@@ -697,16 +697,25 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         const n = Math.min(Math.max(Number(args.lines) || 40, 5), 120);
         // A day of output for the connection summary; only the newest lines are shown.
         const lines = readLogs(uuid, undefined, 512 * 1024).lines;
-        const [p] = await ctx.db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage, restartCount: botProjects.restartCount, lastStartedAt: botProjects.lastStartedAt })
-          .from(botProjects).where(eq(botProjects.id, ctx.project.id));
+        const [p] = await ctx.db.select({
+          status: botProjects.status, statusMessage: botProjects.statusMessage, restartCount: botProjects.restartCount, lastStartedAt: botProjects.lastStartedAt,
+          inRoom: botProjects.inRoom, roomName: botProjects.roomName, presenceNote: botProjects.presenceNote, presenceAt: botProjects.presenceAt,
+        }).from(botProjects).where(eq(botProjects.id, ctx.project.id));
         const now = Date.now();
         const up = p?.status === "running" && p.lastStartedAt ? `, up ${duration((now - p.lastStartedAt.getTime()) / 1000)} (process started ${stamp(p.lastStartedAt.getTime())})` : "";
         const host = ctx.supervisor.hostNote(uuid);
+        // Whether it's really in its room (the launcher's checks), not just running.
+        const checked = p?.presenceAt ? ` (checked ${duration((now - p.presenceAt.getTime()) / 1000)} ago)` : "";
+        const room = p?.status !== "running" ? null
+          : p.inRoom === true ? `Room (KojyAI's checks): in its room${p.roomName ? ` "${p.roomName}"` : ""}${checked}.`
+          : p.inRoom === false ? `Room (KojyAI's checks): NOT in its room — ${p.presenceNote ?? "no reason given"}${checked}.`
+          : `Room (KojyAI's checks): not confirmed${p.presenceNote ? ` — ${p.presenceNote}` : ""}${checked}.`;
         // The problems KojyAI recorded for this bot, and what's being done about them.
         const problems = describeIncidents(await new IncidentLedger(ctx.db).list(ctx.project.id, 20).catch(() => []), now);
         const output = [
           `Now: ${stamp(now)} UTC. Status: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}${up}. Restarts so far: ${p?.restartCount}.`,
           ...(host ? [host] : []),
+          ...(room ? [room] : []),
           connectionReport(lines, now),
           ...(problems ? [`Problems KojyAI recorded (newest first; [state] ×times summary — what's happening):\n${untrusted(problems)}`] : []),
           "Console, newest line last (times in UTC):",
