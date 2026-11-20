@@ -238,7 +238,10 @@ export function snapshotProject(uuid: string, reason: string): Snapshot {
   }
   const dir = path.join(SNAPSHOT_DIR, uuid);
   mkdirSync(dir, { recursive: true });
-  const createdAt = Date.now();
+  // The id is the time in ms; two snapshots in the same millisecond (an undo
+  // point, then the next fix's) must not overwrite each other.
+  let createdAt = Date.now();
+  while (existsSync(path.join(dir, `${createdAt}.zip`))) createdAt++;
   const id = String(createdAt);
   entries[".kojy-snapshot.json"] = new TextEncoder().encode(JSON.stringify({ reason, createdAt }));
   writeFileSync(path.join(dir, `${id}.zip`), zipSync(entries, { level: 6 }));

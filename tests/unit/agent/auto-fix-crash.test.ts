@@ -75,7 +75,7 @@ const finished: RunResult = { outcome: "done", ended: null, aiUnavailable: false
 
 function setup(project: Record<string, unknown> = {}) {
   rows = { bot_projects: [{ id: 1, uuid: "u1", name: "Japalo", ownerId: 7, autoFix: true, desiredState: "running", ...project }], project_messages: [], agent_work_log: [] };
-  const supervisor: { onCrash?: (uuid: string, streak: number, tail: string[]) => void; isRunning?: () => boolean } = { isRunning: () => true };
+  const supervisor: { onCrash?: (uuid: string, streak: number, tail: string[], incident: unknown) => void; isRunning?: () => boolean } = { isRunning: () => true };
   const agent = new Agent(db as never, supervisor as never, null);
   const active = (agent as unknown as { active: Map<string, AbortController> }).active;
   /** Each run stays "working" until release() is called (or finishes at once when not held). */
@@ -90,7 +90,10 @@ function setup(project: Record<string, unknown> = {}) {
   });
   const crashMessages = () => (rows.project_messages ?? []).filter((m) => m.kind === "crash").map((m) => String(m.content));
   const events = () => (rows.project_messages ?? []).filter((m) => m.kind === "event").map((m) => String(m.content));
-  const fire = async (tail: string[], streak = 1) => { supervisor.onCrash!("u1", streak, tail); await new Promise((r) => setTimeout(r, 20)); };
+  const fire = async (tail: string[], streak = 1, incident: { id: number; category: string } | null = null) => {
+    supervisor.onCrash!("u1", streak, tail, incident);
+    await new Promise((r) => setTimeout(r, 20));
+  };
   return {
     run, crashMessages, events, fire,
     holdRuns: () => { hold = true; },
@@ -181,6 +184,16 @@ describe("automatic crash fix", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("only bugs in the code go to Kojy: what the supervisor recorded as the network or a missing secret doesn't", async () => {
+    const { run, fire } = setup();
+    await fire(crash, 1, { id: 9, category: "network" });
+    await fire(crash, 1, { id: 9, category: "missing_secret" });
+    await fire(crash, 1, { id: 9, category: "not_in_room" });
+    expect(run).not.toHaveBeenCalled();
+    await fire(crash, 1, { id: 9, category: "code" });
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it("does nothing when auto-fix is switched off for the bot", async () => {

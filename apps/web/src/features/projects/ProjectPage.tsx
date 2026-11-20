@@ -12,6 +12,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 import { trpc, trpcClient, type RouterOutputs } from "../../lib/trpc";
 import { StatusBadge } from "./StatusBadge";
+import { ProblemsButton } from "./Problems";
 import { languageFor } from "./monaco";
 import { DataTab } from "./DataTab";
 import { ChatTab } from "./ChatTab";
@@ -93,6 +94,7 @@ export function Header({ project }: { project: Project }) {
       <StatusBadge status={project.status} />
       {project.statusMessage && <span className="text-[13.5px] text-ink-2 truncate max-w-xs">{project.statusMessage}</span>}
       {project.restartCount > 0 && <span className="text-[13.5px] text-amber-700">Restarted {project.restartCount}×</span>}
+      <ProblemsButton projectId={project.id} />
       <div className="ml-auto flex gap-2">
         {!wantsRunning
           ? <button className={primaryBtn} disabled={busy} onClick={() => start.mutate({ id: project.id })}><RunIcon d="M7 5l12 7-12 7z" />Run</button>

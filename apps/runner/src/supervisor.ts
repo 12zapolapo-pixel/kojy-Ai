@@ -31,6 +31,7 @@ import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./s
 import { NOT_MODERATOR_MARK, PLATFORM_RESTART_LINE, ROOM_RIGHTS_PREFIX } from "./agent/botHealth.js";
 import { DISCORD_CONNECTED } from "./agent/discord.js";
 import { HostRunner, type HostRef, type HostRunnerOptions, type RunProject } from "./hostRunner.js";
+import { IncidentLedger, classifyExit, type Incident } from "./incidents.js";
 import { isStartCommand, startCommand } from "@kojyai/shared/projects";
 
 const log = createLogger("supervisor");
@@ -107,8 +108,10 @@ export class Supervisor {
   private startFailures = new Map<string, number>();
   private busy = new Set<string>();
   private tails = new Map<string, string[]>();
-  /** Set by the coder AI: called when a bot crashes on its own (not stopped). */
-  onCrash?: (uuid: string, streak: number, tail: string[]) => void;
+  /** Set by the coder AI: called when a bot crashes on its own (not stopped), with the incident it was recorded as. */
+  onCrash?: (uuid: string, streak: number, tail: string[], incident: Incident | null) => void;
+  /** Every problem the bots had (bot_incidents). */
+  readonly incidents: IncidentLedger;
   /** A Discord bot connected to Discord (once per start; see agent/discord.ts). */
   onDiscordConnected?: (uuid: string) => void;
 
@@ -125,6 +128,7 @@ export class Supervisor {
 
   constructor(private db: Database, hostTesting?: Pick<HostRunnerOptions, "makeClient" | "makeConsole">) {
     this.activity = new ActivityRecorder(db, 5000, (err) => log.warn({ err }, "Could not save bot activity"));
+    this.incidents = new IncidentLedger(db);
     mkdirSync(LOG_DIR, { recursive: true });
     mkdirSync(VENVS_DIR, { recursive: true });
     this.hosts = new HostRunner(db, {
@@ -484,6 +488,8 @@ export class Supervisor {
    */
   private async crashed(uuid: string, project: RunProject, ranFor: number, how: string): Promise<number | null> {
     this.record(project, "crash");
+    // Every exit is recorded, whatever happens next (a pause, the owner having stopped it).
+    const incident = await this.incidents.record(project.id, classifyExit({ tail: this.tail(uuid), how, ranForMs: ranFor }), how);
     const streak = ranFor >= HEALTHY_RUN_MS ? 1 : (this.crashStreak.get(uuid) ?? 0) + 1;
     if (streak === 1) this.alerted.delete(uuid);
     this.crashStreak.set(uuid, streak);
@@ -494,10 +500,14 @@ export class Supervisor {
       .from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (p?.desiredState !== "running") { await this.setStatus(uuid, "stopped", null); return null; }
 
-    if (streak >= CRASH_LOOP_LIMIT) { await this.pauseCrashLoop(uuid, project, streak); return null; }
+    if (streak >= CRASH_LOOP_LIMIT) {
+      await this.pauseCrashLoop(uuid, project, streak);
+      await this.incidents.update(incident?.id, {}, `Paused after ${streak} crashes in a row`);
+      return null;
+    }
     await this.db.update(botProjects).set({ restartCount: p.restartCount + 1 }).where(eq(botProjects.uuid, uuid));
-    await this.setStatus(uuid, "crashed", `Exited with ${how}; restarting in ${delay}s`);
-    this.onCrash?.(uuid, streak, this.tail(uuid));
+    await this.setStatus(uuid, "crashed", `Exited with ${how}${incident?.summary ? ` (${incident.summary})` : ""}; restarting in ${delay}s`.slice(0, 500));
+    this.onCrash?.(uuid, streak, this.tail(uuid), incident);
     if (streak >= 3 && this.alerted.get(uuid) !== streak && !this.alerted.has(uuid)) {
       this.alerted.set(uuid, streak);
       const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";

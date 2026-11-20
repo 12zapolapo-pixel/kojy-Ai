@@ -18,7 +18,8 @@ import { botProjects, botActivity, projectMessages } from "@kojyai/db/schema";
 import { readLogs, type LogLine } from "@kojyai/shared/projects";
 import { createLogger } from "../logger.js";
 import { untrusted } from "./prompt.js";
-import { crashLocation, lastException, normalizeError } from "./autoFix.js";
+import { crashLocation, crashSignature, lastException, normalizeError } from "./autoFix.js";
+import type { IncidentLedger } from "../incidents.js";
 
 const log = createLogger("checkup");
 const DAY = 86_400_000;
@@ -27,7 +28,7 @@ const CLEAN_NOTE_EVERY_MS = 7 * DAY;
 const MAX_KINDS = 10;
 
 export interface ErrorKind {
-  /** What identifies the kind (normalized error + where). */
+  /** What identifies the kind: the same signature a crash of it gets (normalized error + function, no line number). */
   key: string;
   /** One real example of the error line. */
   example: string;
@@ -72,7 +73,7 @@ export function groupErrors(lines: LogLine[]): ErrorKind[] {
         }
       }
       const ex = lastException(block);
-      if (ex) { const where = crashLocation(block); add(`${normalizeError(ex)} @ ${where}`, ex, where, l.ts); }
+      if (ex) add(crashSignature(block), ex, crashLocation(block), l.ts);
       i = j;
       continue;
     }
@@ -88,12 +89,15 @@ export function describeKinds(kinds: ErrorKind[], previous: Set<string> | null):
   }).join("\n") + (kinds.length > MAX_KINDS ? `\n- …and ${kinds.length - MAX_KINDS} more kinds` : "");
 }
 
-export async function runCheckups(db: Database, startAgent: (uuid: string) => void): Promise<void> {
+/** Kinds stored by older check-ups had a line number in them ("bot.py:302 in f"); now they don't. */
+const sameKey = (key: string) => key.replace(/:\d+ in /, " in ");
+
+export async function runCheckups(db: Database, startAgent: (uuid: string) => void, incidents?: IncidentLedger): Promise<void> {
   const due = await db.select().from(botProjects)
     .where(and(eq(botProjects.dailyCheckup, true), or(isNull(botProjects.lastCheckupAt), lt(botProjects.lastCheckupAt, new Date(Date.now() - DAY)))));
   for (const project of due) {
     try {
-      await checkOne(db, project, startAgent);
+      await checkOne(db, project, startAgent, incidents);
     } catch (err) {
       log.warn({ err, project: project.uuid }, "Check-up failed");
     }
@@ -112,7 +116,7 @@ async function lastCheckup(db: Database, thread: string): Promise<{ data: Checku
   return null;
 }
 
-async function checkOne(db: Database, project: typeof botProjects.$inferSelect, startAgent: (uuid: string) => void): Promise<void> {
+async function checkOne(db: Database, project: typeof botProjects.$inferSelect, startAgent: (uuid: string) => void, incidents?: IncidentLedger): Promise<void> {
   const since = Date.now() - DAY;
   await db.update(botProjects).set({ lastCheckupAt: new Date() }).where(eq(botProjects.id, project.id));
 
@@ -123,11 +127,21 @@ async function checkOne(db: Database, project: typeof botProjects.$inferSelect, 
 
   // Errors printed in the last day (the log keeps the latest ~2 MB).
   const lines = readLogs(project.uuid, 0, 2 * 1024 * 1024).lines.filter((l) => l.ts >= since);
-  const kinds = groupErrors(lines);
+  // Errors an automatic fix is already working on are left to it.
+  const working = incidents ? await incidents.workingOn(project.id) : new Set<string>();
+  const all = groupErrors(lines);
+  const kinds = all.filter((k) => !working.has(k.key));
   const thread = `project:${project.id}`;
   const summary = `${n("chat") + n("whisper")} messages, ${n("reply")} replies, ${n("join")} joins, ${n("crash")} crashes`;
   const previous = await lastCheckup(db, thread);
   const data: CheckupData = { clean: !kinds.length && n("crash") === 0, kinds: kinds.map((k) => k.key) };
+
+  if (!kinds.length && all.length) {
+    // Every error of the day is already being fixed automatically: say so, don't start a second fix.
+    await db.insert(projectMessages).values({ thread, projectId: project.id, role: "assistant", kind: "event", data: { checkup: { clean: false, kinds: all.map((k) => k.key) } },
+      content: `🩺 Daily check-up: ${all.length} kind${all.length === 1 ? "" : "s"} of error in the last 24 hours (${summary}), all already being fixed automatically.` });
+    return;
+  }
 
   if (data.clean) {
     // Quiet unless it's news (the last check-up found errors) or a week has passed.
@@ -137,7 +151,7 @@ async function checkOne(db: Database, project: typeof botProjects.$inferSelect, 
       content: `🩺 Daily check-up: no errors in the last 24 hours (${summary}).${news}` });
     return;
   }
-  const before = previous ? new Set(previous.data.kinds) : null;
+  const before = previous ? new Set(previous.data.kinds.map(sameKey)) : null;
   const fresh = before ? kinds.filter((k) => !before.has(k.key)).length : 0;
   await db.insert(projectMessages).values({ thread, projectId: project.id, role: "user", kind: "checkup", data: { checkup: data },
     content: `Daily check-up for the last 24 hours: ${summary}. ${kinds.length} kind${kinds.length === 1 ? "" : "s"} of error${fresh ? ` (${fresh} new since the last check-up)` : ""}, most frequent first (from the bot, not from the owner):\n` +

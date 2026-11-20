@@ -409,6 +409,23 @@ export const projectsRouter = router({
     }));
   }),
 
+  /**
+   * The bot's problems, most recently seen first: every crash and error kept
+   * by kind, what Kojy is doing about it (state) and why (note). Written by
+   * the runner (see apps/runner/src/incidents.ts).
+   */
+  incidents: permittedProc("bots:read").input(projectId).query(async ({ ctx, input }) => {
+    const project = await loadProject(ctx, input.id);
+    const rows = await ctx.db.select().from(schema.botIncidents)
+      .where(eq(schema.botIncidents.projectId, project.id))
+      .orderBy(desc(schema.botIncidents.lastSeenAt)).limit(50);
+    return rows.map((r) => ({
+      id: r.id, category: r.category, phase: r.phase, fatal: r.fatal, state: r.state, note: r.note, summary: r.summary, example: r.example,
+      count: r.count, firstSeenAt: r.firstSeenAt, lastSeenAt: r.lastSeenAt, attempts: r.attempts, retryAt: r.retryAt, watchUntil: r.watchUntil,
+      timeline: (r.data?.timeline ?? []).slice(-8),
+    }));
+  }),
+
   chatStop: permittedProc("bots:update").input(projectId).mutation(async ({ ctx, input }) => {
     const project = await loadProject(ctx, input.id);
     await control(project.uuid, "agent_stop");

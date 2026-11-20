@@ -336,11 +336,11 @@ function ChatToolbar({ project, working, onCleared, onIdeas }: { project: Projec
 
   return (
     <div className="px-4 py-2 border-b border-line flex flex-wrap items-center gap-3 text-xs relative">
-      <label className="flex items-center gap-1.5 text-ink-2 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — no approval needed (up to 3 times a day). A fix that would delete files, touch the bot's data, packages or secrets, or add internet or secret access asks you first. If the bot crashes again within 15 minutes of a fix, Kojy puts the code back as it was and tells you.">
+      <label className="flex items-center gap-1.5 text-ink-2 cursor-pointer" title="When the bot crashes with an error or freezes, Kojy fixes the code right away, tests it and restarts the bot — every time, no approval needed. To stay safe from anything a room visitor typed, an automatic fix never deletes files, touches the bot's data, packages or secrets, or adds internet or secret access; it finds another way. If the bot crashes again within 15 minutes of a fix, Kojy puts the code back and starts a new fix.">
         <input type="checkbox" checked={autoFixOn} onChange={(e) => autoFix.mutate({ id: project.id, autoFix: e.target.checked })} />
         Auto-fix crashes
       </label>
-      <label className="flex items-center gap-1.5 text-ink-2 cursor-pointer" title="Once a day Kojy looks at the bot's errors and tells you what it found. It only uses the AI when there are errors, and asks before changing anything.">
+      <label className="flex items-center gap-1.5 text-ink-2 cursor-pointer" title="Once a day Kojy looks at the bot's errors and fixes them right away. It only uses the AI when there are errors.">
         <input type="checkbox" checked={checkupOn} onChange={(e) => checkup.mutate({ id: project.id, dailyCheckup: e.target.checked })} />
         Daily check-up
       </label>

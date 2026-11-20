@@ -41,6 +41,7 @@ import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, rec
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
+import { FIXABLE, IncidentLedger, type Incident, type IncidentCategory } from "../incidents.js";
 import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, crashLocation, crashSignature, isNetworkFailure, lastException, normalizeError, type AutomatedKind } from "./autoFix.js";
 
 const log = createLogger("agent");
@@ -125,6 +126,16 @@ interface CrashFix {
   requestId: number;
   /** "a crash" / "a freeze", for messages. */
   what: string;
+  /** Its row in bot_incidents (null when it couldn't be recorded). */
+  incidentId: number | null;
+}
+
+/** What onCrash knows besides the console lines. */
+interface CrashContext {
+  /** The incident the supervisor recorded it as. */
+  incident?: Pick<Incident, "id" | "category"> | null;
+  /** Why an earlier automatic fix for this crash was undone. */
+  earlier?: string;
 }
 
 /** One conversation: where its messages live, its tools and its instructions. */
@@ -153,12 +164,14 @@ export class Agent {
    * it was for, and the code right after it (a rollback never overwrites
    * changes made since).
    */
-  private watching = new Map<string, { snapshotId: string; signature: string; tail: string[]; files: Record<string, string>; timer: NodeJS.Timeout }>();
+  private watching = new Map<string, { snapshotId: string; signature: string; tail: string[]; files: Record<string, string>; incidentId: number | null; timer: NodeJS.Timeout }>();
   private again = new Set<string>();
   /** Per running request: whether its undo snapshot was taken (shared by all its parts). */
   private runShared = new Map<string, { snapshotted: boolean }>();
   /** Crashes that came in while Kojy was busy with the bot, by signature; fixed as soon as it's free. */
-  private queuedCrash = new Map<string, Map<string, { streak: number; tail: string[]; earlier?: string }>>();
+  private queuedCrash = new Map<string, Map<string, { streak: number; tail: string[]; context: CrashContext }>>();
+  /** Every problem the bots had (shared with the supervisor). */
+  private incidents: IncidentLedger;
   /** The signature of the crash an automatic fix is working on right now. */
   private fixing = new Map<string, string>();
   /** Automatic fixes waiting for an AI to be free again. */
@@ -170,10 +183,14 @@ export class Agent {
   git?: GitService;
 
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
-    supervisor.onCrash = (uuid, streak, tail) => void this.onCrash(uuid, streak, tail);
+    this.incidents = (supervisor as { incidents?: IncidentLedger }).incidents ?? new IncidentLedger(db);
+    supervisor.onCrash = (uuid, streak, tail, incident) => void this.onCrash(uuid, streak, tail, { incident });
     supervisor.onDiscordConnected = (uuid) => void this.onDiscordConnected(uuid).catch((err) => log.warn({ err, uuid }, "Discord check failed"));
     // Daily check-ups: look every hour for bots that are due.
-    const tick = () => void runCheckups(this.db, (uuid) => void this.run(uuid)).catch((err) => log.warn({ err }, "Check-ups failed"));
+    const tick = () => {
+      void runCheckups(this.db, (uuid) => void this.run(uuid), this.incidents).catch((err) => log.warn({ err }, "Check-ups failed"));
+      void this.incidents.prune();
+    };
     setTimeout(tick, 60_000).unref();
     setInterval(tick, 3600_000).unref();
   }
@@ -191,6 +208,7 @@ export class Agent {
    * cut off doesn't loop — or says it was interrupted.
    */
   async resetStates(): Promise<void> {
+    await this.incidents.resetAfterRestart();
     const cut = await this.db.select({ id: botProjects.id, uuid: botProjects.uuid }).from(botProjects).where(eq(botProjects.agentState, "working"));
     await this.db.update(botProjects).set({ agentState: "idle" }).where(eq(botProjects.agentState, "working"));
     for (const p of cut) {
@@ -566,27 +584,35 @@ export class Agent {
    * its code frozen). Kojy starts on a fix right away — no daily limit and no
    * approval step. While Kojy is busy with this bot the crash waits its turn;
    * another crash of the bug a fix is working on right now is left to that fix.
-   * `earlier`: why an earlier automatic fix for this crash was undone.
+   * Every decision is written on the crash's incident (state + a note for the owner).
    */
-  private async onCrash(uuid: string, streak: number, tail: string[], earlier?: string): Promise<void> {
-    // Only code errors (a traceback, or code the watchdog caught frozen): a
-    // network blip or Highrise outage isn't something to "fix".
+  private async onCrash(uuid: string, streak: number, tail: string[], context: CrashContext = {}): Promise<void> {
+    const { earlier } = context;
+    const incidentId = context.incident?.id ?? null;
+    // Only bugs in the bot's code (a traceback, or code the watchdog caught
+    // frozen): a network blip, a Highrise outage or a missing secret value
+    // isn't something to fix in the code — the incident's note says what it is.
+    if (context.incident && !FIXABLE.has(context.incident.category as IncidentCategory)) return;
     const excerpt = crashExcerpt(tail);
     if (!excerpt) { log.info({ uuid }, "Crash not sent to Kojy: no traceback in its output"); return; }
     if (isNetworkFailure(tail)) { log.info({ uuid }, "Crash not sent to Kojy: the network or Highrise was away"); return; }
     const signature = crashSignature(tail);
-    if (this.active.has(uuid)) {
-      if (this.fixing.get(uuid) === signature) return;
+    const queueIt = async () => {
       const queue = this.queuedCrash.get(uuid) ?? new Map();
-      queue.set(signature, { streak, tail, earlier });
+      queue.set(signature, { streak, tail, context });
       this.queuedCrash.set(uuid, queue);
       log.info({ uuid }, "Crash queued: Kojy is busy with this bot and fixes it next");
+      await this.incidents.update(incidentId, { state: "queued", note: "Kojy is busy with this bot right now and fixes this next." });
+    };
+    if (this.active.has(uuid)) {
+      if (this.fixing.get(uuid) === signature) return; // the fix running now is for this very crash
+      await queueIt();
       return;
     }
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (!project) return;
     // A crash soon after an automatic fix: the fix didn't hold. Put the code back and start over.
-    if (await this.fixDidNotHold(uuid, project, streak, tail)) return;
+    if (await this.fixDidNotHold(uuid, project, streak, tail, incidentId)) return;
     // A Discord setup error (intents, token): ask Discord what's wrong, so the
     // fix is the right one, and tell the owner what only they can do.
     const discord = isDiscordSetupError(lastException(tail)) ? await this.discordDiagnosis(project).catch(() => null) : null;
@@ -595,15 +621,14 @@ export class Agent {
       const steps = [...discord.ownerSteps, ...(project.autoFix ? [] : discord.codeFixes.map((c) => `Open the bot's chat and ask Kojy: “${c}”`))];
       await this.tellOwnerAboutDiscord(project, steps, discord.botName, `${project.name} can't connect to Discord`);
     }
-    if (!project.autoFix) { log.info({ uuid }, "Crash not sent to Kojy: automatic fixes are off for this bot"); return; }
-    if (project.desiredState !== "running") { log.info({ uuid }, "Crash not sent to Kojy: the bot was stopped"); return; }
-    if (!configuredLanes().length) { log.info({ uuid }, "Crash not sent to Kojy: no AI key is configured"); return; }
-    if (this.active.has(uuid)) { // a request started while this crash was being looked at
-      const queue = this.queuedCrash.get(uuid) ?? new Map();
-      queue.set(signature, { streak, tail, earlier });
-      this.queuedCrash.set(uuid, queue);
-      return;
-    }
+    const skip = async (why: string) => {
+      log.info({ uuid }, `Crash not sent to Kojy: ${why}`);
+      await this.incidents.update(incidentId, { state: "open", note: why });
+    };
+    if (!project.autoFix) return skip("Automatic fixes are switched off for this bot (its settings), so Kojy didn't fix it.");
+    if (project.desiredState !== "running") return skip("The bot had been stopped, so Kojy didn't fix it.");
+    if (!configuredLanes().length) return skip("No AI key is set up on this KojyAI server, so Kojy can't fix it.");
+    if (this.active.has(uuid)) return queueIt(); // a request started while this crash was being looked at
 
     const thread = `project:${project.id}`;
     const frozen = excerpt.includes("BotFrozenError");
@@ -625,7 +650,9 @@ export class Agent {
       " Finish with one or two sentences for the owner: what was wrong and what you changed.",
       "crash");
     log.info({ uuid, streak, frozen, again: !!earlier }, "Auto-fix started");
-    await this.runCrashFix(uuid, project, { signature, tail, snapshotId, requestId: request.id, what: frozen ? "a freeze" : "a crash" });
+    await this.incidents.update(incidentId, { state: "fixing", attempt: true, retryAt: null, note: "Kojy is fixing it." },
+      earlier ? `Earlier fix undone (${earlier}) — new automatic fix started` : "Automatic fix started");
+    await this.runCrashFix(uuid, project, { signature, tail, snapshotId, requestId: request.id, what: frozen ? "a freeze" : "a crash", incidentId });
   }
 
   /**
@@ -651,10 +678,24 @@ export class Agent {
       if (result?.aiUnavailable) {
         // Every AI key was at its limit: pick it up again once one is free.
         const at = this.scheduleCrashRetry(uuid, fix);
-        await this.add(scope, "assistant", `Every AI is at its limit right now, so I'll pick up ${fix.what} again by myself at about ${new Date(at).toISOString().slice(11, 16)} UTC.`, "event");
+        const hhmm = new Date(at).toISOString().slice(11, 16);
+        await this.add(scope, "assistant", `Every AI is at its limit right now, so I'll pick up ${fix.what} again by myself at about ${hhmm} UTC.`, "event");
+        await this.incidents.update(fix.incidentId, { state: "waiting_for_ai", retryAt: new Date(at), note: `Every AI was at its limit; Kojy tries again at about ${hhmm} UTC.` }, "No AI was free — waiting");
       } else if (result?.outcome !== "busy") {
-        if (changed && entry.status === "done" && fix.snapshotId) this.watchFix(uuid, project, fix);
-        else if (!changed && fix.snapshotId) { try { deleteSnapshot(uuid, fix.snapshotId); } catch { /* nothing to undo anyway */ } }
+        const files = entry?.files.map((f) => f.path).slice(0, 4).join(", ") ?? "";
+        const said = entry?.summary.trim().slice(0, 300) ?? "";
+        if (changed && entry.status === "done" && fix.snapshotId) {
+          this.watchFix(uuid, project, fix);
+          await this.incidents.update(fix.incidentId, {
+            state: "watching", watchUntil: new Date(Date.now() + FIX_WATCH_MS), fixSnapshotId: fix.snapshotId, fixFiles: codeFingerprint(uuid),
+            note: `Kojy changed ${files}${said ? `: ${said}` : ""} — watching that it holds.`,
+          }, `Fixed (${files})`);
+        } else if (changed) {
+          await this.incidents.update(fix.incidentId, { state: "open", note: `Kojy changed ${files} but didn't finish (${entry.status.replace(/_/g, " ")}).` }, "Fix not finished");
+        } else {
+          if (fix.snapshotId) { try { deleteSnapshot(uuid, fix.snapshotId); } catch { /* nothing to undo anyway */ } }
+          await this.incidents.update(fix.incidentId, { state: "open", note: `Kojy looked into it and changed nothing${said ? `: ${said}` : "."}` }, "Looked into — nothing changed");
+        }
         const title = changed ? `Kojy fixed ${fix.what} in ${project.name}` : `Kojy looked into ${fix.what} in ${project.name}`;
         const summary = entry?.summary.trim().slice(0, 400) || "See the bot's chat.";
         await notifyUser(this.db, project.ownerId, "bot_error", title, summary, `/studio/p/${uuid}`);
@@ -684,13 +725,20 @@ export class Agent {
   private async retryCrashFix(uuid: string, fix: CrashFix): Promise<void> {
     if (this.active.has(uuid)) { this.scheduleCrashRetry(uuid, fix); return; }
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
-    if (!project?.autoFix || project.desiredState !== "running") return;
+    if (!project?.autoFix || project.desiredState !== "running") {
+      await this.incidents.update(fix.incidentId, { state: "open", retryAt: null, note: "The bot was stopped (or automatic fixes switched off) before an AI was free." });
+      return;
+    }
     // Only while that crash is still what the chat is about: the owner may have asked for something else since.
     const [last] = await this.db.select({ id: projectMessages.id }).from(projectMessages)
       .where(and(eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.role, "user"), ne(projectMessages.kind, "event"), ne(projectMessages.kind, "owner_edit")))
       .orderBy(desc(projectMessages.id)).limit(1);
-    if (last && last.id !== fix.requestId) return;
+    if (last && last.id !== fix.requestId) {
+      await this.incidents.update(fix.incidentId, { state: "open", retryAt: null, note: "The owner asked Kojy for something else meanwhile; it's fixed if it happens again." });
+      return;
+    }
     log.info({ uuid }, "Picking up an automatic fix no AI could take earlier");
+    await this.incidents.update(fix.incidentId, { state: "fixing", retryAt: null, note: "Kojy is fixing it." }, "An AI is free again — fixing");
     await this.runCrashFix(uuid, project, fix);
   }
 
@@ -703,7 +751,7 @@ export class Agent {
     const [signature, crash] = next;
     queue.delete(signature);
     if (!queue.size) this.queuedCrash.delete(uuid);
-    void this.onCrash(uuid, crash.streak, crash.tail, crash.earlier)
+    void this.onCrash(uuid, crash.streak, crash.tail, crash.context)
       .catch((err) => log.warn({ err, uuid }, "Queued crash failed"))
       .finally(() => this.drainCrashQueue(uuid));
   }
@@ -717,12 +765,16 @@ export class Agent {
     this.clearWatch(uuid);
     const timer = setTimeout(() => {
       this.watching.delete(uuid);
-      if (!this.supervisor.isRunning(uuid)) return; // stopped meanwhile: nothing was proven
+      if (!this.supervisor.isRunning(uuid)) { // stopped meanwhile: nothing was proven
+        void this.incidents.update(fix.incidentId, { state: "open", watchUntil: null, note: "The bot was stopped before the fix could be confirmed." });
+        return;
+      }
       void this.add({ thread: `project:${project.id}`, projectId: project.id, key: uuid, orgId: project.orgId }, "assistant",
         `✓ The automatic fix held: no crash in the ${Math.round(FIX_WATCH_MS / 60_000)} minutes after it.`, "event").catch(() => undefined);
+      void this.incidents.update(fix.incidentId, { state: "fixed", watchUntil: null, note: "Fixed by Kojy — the fix held." }, "The fix held");
     }, FIX_WATCH_MS);
     timer.unref();
-    this.watching.set(uuid, { snapshotId: fix.snapshotId, signature: fix.signature, tail: fix.tail, files: codeFingerprint(uuid), timer });
+    this.watching.set(uuid, { snapshotId: fix.snapshotId, signature: fix.signature, tail: fix.tail, files: codeFingerprint(uuid), incidentId: fix.incidentId, timer });
   }
 
   private clearWatch(uuid: string): void {
@@ -739,7 +791,7 @@ export class Agent {
    * upload), nothing is put back: the crash goes the normal way. True when it
    * handled the crash.
    */
-  private async fixDidNotHold(uuid: string, project: ProjectRow, streak: number, tail: string[]): Promise<boolean> {
+  private async fixDidNotHold(uuid: string, project: ProjectRow, streak: number, tail: string[], incidentId: number | null): Promise<boolean> {
     const w = this.watching.get(uuid);
     if (!w) return false;
     this.clearWatch(uuid);
@@ -749,6 +801,8 @@ export class Agent {
     const why = same ? "the same error came back" : "the bot crashed with a different error right after it";
     const changed = fingerprintChanges(w.files, codeFingerprint(uuid));
     if (changed.length) {
+      await this.incidents.update(w.incidentId, { state: "open", watchUntil: null, note: "It crashed again after Kojy's fix, but the code had been changed since, so the fix wasn't undone." },
+        `Crashed again after the fix (${why}); code changed since — not undone`);
       await this.add(scope, "assistant",
         `The bot crashed again after the automatic fix (${why}), but its code was changed since (${changed.slice(0, 3).join(", ")}${changed.length > 3 ? ", …" : ""}), ` +
         "so I'm not undoing anything — I'm looking at this crash as it is now.", "event");
@@ -769,12 +823,17 @@ export class Agent {
     await notifyUser(this.db, project.ownerId, "bot_error", title, `The automatic fix didn't hold (${why}). The code is back to how it was before it, and Kojy is working on a new fix.`, `/studio/p/${uuid}`);
     void sendAlert(`↶ ${title}: ${why}.`);
     log.info({ uuid, same }, "Automatic fix didn't hold — code restored, starting over");
+    await this.incidents.update(w.incidentId, { watchUntil: null }, `The fix didn't hold (${why}) — undone`);
+    if (incidentId && incidentId !== w.incidentId) {
+      await this.incidents.update(incidentId, { state: "ignored", note: "Came from an automatic fix that was undone right away." }, "Caused by a fix that was undone");
+    }
     // Start over on the crash the fix was for, saying what went wrong. A
     // different error is described with names and numbers taken out (V-03).
     const location = crashLocation(tail);
     const earlier = same ? "the same error came back after it"
       : `right after it the bot crashed with a different error (${normalizeError(lastException(tail))}${location ? ` at ${location}` : ""})`;
-    void this.onCrash(uuid, streak, w.tail, earlier).catch((err) => log.warn({ err, uuid }, "New automatic fix failed"));
+    void this.onCrash(uuid, streak, w.tail, { incident: w.incidentId ? { id: w.incidentId, category: "code" } : null, earlier })
+      .catch((err) => log.warn({ err, uuid }, "New automatic fix failed"));
     return true;
   }
 }

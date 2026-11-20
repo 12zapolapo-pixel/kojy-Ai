@@ -1040,3 +1040,56 @@ export const botActivity = pgTable("bot_activity", {
   orgTimeIdx:    index("bot_activity_org_time_idx").on(t.orgId, t.createdAt),
   sourceTimeIdx: index("bot_activity_source_time_idx").on(t.source, t.sourceId, t.createdAt),
 }));
+
+// Problems a Python bot had: one row per kind of problem (the same error in
+// the same place = the same signature), counted each time it happens again.
+// Written by the runner for every exit the owner didn't ask for and every
+// error the bot survived; read by the bot page ("Problems"), Kojy's get_logs
+// and the automatic fixes, which keep their state here so a KojyAI restart
+// doesn't lose it.
+//   category  code | frozen | not_in_room | network | highrise_refused |
+//             missing_secret | missing_package | out_of_memory | config | unknown
+//   phase     import | startup | in_room | unknown
+//   state     open | queued | fixing | waiting_for_ai | watching | fixed |
+//             ignored | needs_owner
+//   note      what happens next, or why nothing is happening (for the owner)
+//   summary   the error with names and numbers taken out — safe to show the AI
+//   example   one real error line, for the owner (may contain a visitor's name)
+export const botIncidents = pgTable("bot_incidents", {
+  id:            serial("id").primaryKey(),
+  projectId:     integer("project_id").notNull(),
+  signature:     varchar("signature", { length: 300 }).notNull(),
+  category:      varchar("category", { length: 24 }).notNull(),
+  phase:         varchar("phase", { length: 12 }).default("unknown").notNull(),
+  // false: the bot kept running (an error in a handler it survived).
+  fatal:         boolean("fatal").default(true).notNull(),
+  state:         varchar("state", { length: 20 }).default("open").notNull(),
+  note:          varchar("note", { length: 400 }),
+  summary:       varchar("summary", { length: 300 }).default("").notNull(),
+  example:       text("example").default("").notNull(),
+  count:         integer("count").default(1).notNull(),
+  firstSeenAt:   ts("first_seen_at").defaultNow().notNull(),
+  lastSeenAt:    ts("last_seen_at").defaultNow().notNull(),
+  attempts:      integer("attempts").default(0).notNull(),
+  lastAttemptAt: ts("last_attempt_at"),
+  retryAt:       ts("retry_at"),
+  // An automatic fix: the undo point from before it, the code right after it, how long it's watched.
+  fixSnapshotId: varchar("fix_snapshot_id", { length: 20 }),
+  fixFiles:      jsonb("fix_files").$type<Record<string, string>>(),
+  watchUntil:    ts("watch_until"),
+  data:          jsonb("data").$type<IncidentData>(),
+  createdAt:     createdAt(),
+  updatedAt:     updatedAt(),
+}, (t) => ({
+  projectSignatureIdx: uniqueIndex("bot_incidents_project_signature_idx").on(t.projectId, t.signature),
+  projectSeenIdx:      index("bot_incidents_project_seen_idx").on(t.projectId, t.lastSeenAt),
+}));
+
+export interface IncidentData {
+  /** What happened to it, newest last (at most 20 entries). */
+  timeline?: { at: number; what: string }[];
+  /** The launcher's crash report from the latest occurrence, when there was one. */
+  report?: Record<string, unknown>;
+  /** How the bot stopped the latest time ("code 1", "SIGKILL", "out of memory"). */
+  exit?: string;
+}
