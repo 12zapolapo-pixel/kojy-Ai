@@ -136,6 +136,11 @@ export class HostRunner {
     return this.sessions.has(uuid);
   }
 
+  /** A start or stop on the host is under way. */
+  isBusy(uuid: string): boolean {
+    return this.busy.has(uuid);
+  }
+
   isRunning(uuid: string): boolean {
     const s = this.sessions.get(uuid);
     return !!s && (s.state === "running" || s.state === "starting");

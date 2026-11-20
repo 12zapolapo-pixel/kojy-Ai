@@ -28,10 +28,11 @@ import { decryptApiKey } from "@kojyai/shared/crypto";
 import { ActivityRecorder, notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger } from "./logger.js";
 import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./sandbox.js";
-import { NOT_MODERATOR_MARK, PLATFORM_RESTART_LINE, ROOM_RIGHTS_PREFIX } from "./agent/botHealth.js";
+import { CONNECTED_PREFIX, NOT_MODERATOR_MARK, PLATFORM_RESTART_LINE, ROOM_RIGHTS_PREFIX } from "./agent/botHealth.js";
 import { DISCORD_CONNECTED } from "./agent/discord.js";
 import { HostRunner, type HostRef, type HostRunnerOptions, type RunProject } from "./hostRunner.js";
-import { IncidentLedger, classifyExit, parseReport, reportToTail, type CrashReport, type Incident } from "./incidents.js";
+import { IncidentLedger, ROOM_TROUBLE, classifyExit, parseReport, reportToTail, type CrashReport, type Incident, type IncidentCategory } from "./incidents.js";
+import { PresenceTracker, SILENT_MS, parsePresence, type PresenceEvent } from "./presence.js";
 import { lastException } from "./agent/autoFix.js";
 import { isStartCommand, saveKnownGood, startCommand } from "@kojyai/shared/projects";
 
@@ -65,6 +66,19 @@ export const CRASH_LOOP_LIMIT = Math.max(3, Number(process.env.CRASH_LOOP_LIMIT 
 export const CRASH_LOOP_STATUS = `Paused after ${CRASH_LOOP_LIMIT} crashes in a row. Fix the error (or ask Kojy), then press Start.`;
 const STOP_GRACE_MS = 10_000;
 const NO_MODERATOR_STATUS = "Not a moderator in its room: commands that move, kick, mute or ban people won't work";
+/** How often the room checks are looked at (a bot whose checks stop coming is restarted). */
+const PRESENCE_TICK_MS = 60_000;
+/** How often what the website shows is compared with what really runs. */
+const RECONCILE_EVERY_MS = 5 * 60_000;
+/** Runs in a row that ended out of the room before the owner is told what to check. */
+const OUT_OF_ROOM_ALERT_AFTER = 2;
+/** Highrise refusing the bot again and again: try less often (it can't help until a secret changes). */
+const REFUSED_RETRY_S = [120, 300, 900, 1800];
+/** This many bots, most of them, out of their rooms at once: Highrise or the network, not each bot. */
+const OUTAGE_MIN_BOTS = 3;
+const OUTAGE_SHARE = 0.75;
+/** How often the bot's code is checked as running (a status left "crashed" with nothing coming is stuck). */
+const STUCK_AFTER_MS = 10 * 60_000;
 /** How often bots waiting for a free server on their bot host try again. */
 const PENDING_HOST_EVERY_MS = 30 * 60_000;
 
@@ -132,6 +146,14 @@ export class Supervisor {
   fixingNow?: (uuid: string) => boolean;
   /** Runs that may still turn out fine: when the timer ends with no crash or error, their code is kept as known good. */
   private goodTimers = new Map<string, NodeJS.Timeout>();
+  /** Whether each bot is really in its room (the launcher's checks). */
+  readonly presence: PresenceTracker;
+  /** Runs in a row that ended without the bot being in its room. */
+  private outOfRoom = new Map<string, number>();
+  /** When a Highrise-wide outage was last reported to the admins. */
+  private outageAlertedAt = 0;
+  private presenceTimer: NodeJS.Timeout | null = null;
+  private reconcileTimer: NodeJS.Timeout | null = null;
   /** A Discord bot connected to Discord (once per start; see agent/discord.ts). */
   onDiscordConnected?: (uuid: string) => void;
 
@@ -149,6 +171,11 @@ export class Supervisor {
   constructor(private db: Database, hostTesting?: Pick<HostRunnerOptions, "makeClient" | "makeConsole">) {
     this.activity = new ActivityRecorder(db, 5000, (err) => log.warn({ err }, "Could not save bot activity"));
     this.incidents = new IncidentLedger(db);
+    this.presence = new PresenceTracker(db, {
+      isRunning: (uuid) => this.isRunning(uuid),
+      backInRoom: (uuid, projectId) => this.backInRoom(uuid, projectId),
+      silent: (uuid, why, times) => void this.silent(uuid, why, times).catch((err: unknown) => log.warn({ err, uuid }, "Could not restart a silent bot")),
+    });
     mkdirSync(LOG_DIR, { recursive: true });
     mkdirSync(VENVS_DIR, { recursive: true });
     this.hosts = new HostRunner(db, {
@@ -158,6 +185,7 @@ export class Supervisor {
         this.startFailures.delete(uuid);
         this.tails.set(uuid, this.tails.get(uuid) ?? []);
         this.goodLater(uuid);
+        this.presence.started(uuid, project.id, true);
         this.record(project, "start");
         void this.db.update(botProjects).set({ lastStartedAt: new Date() }).where(eq(botProjects.uuid, uuid));
       },
@@ -187,6 +215,12 @@ export class Supervisor {
       this.pendingTimer.unref();
       setTimeout(() => void this.sweepPendingHosts(), 60_000).unref();
     }
+    if (!this.presenceTimer) {
+      this.presenceTimer = setInterval(() => this.presence.tick(), PRESENCE_TICK_MS);
+      this.presenceTimer.unref();
+      this.reconcileTimer = setInterval(() => void this.reconcile().catch((err: unknown) => log.warn({ err }, "Could not compare the bots with what runs")), RECONCILE_EVERY_MS);
+      this.reconcileTimer.unref();
+    }
   }
 
   async handle(uuid: string, action: string, payload?: Record<string, unknown>): Promise<void> {
@@ -205,11 +239,13 @@ export class Supervisor {
   async shutdown(): Promise<void> {
     for (const t of this.restartTimers.values()) clearTimeout(t);
     if (this.pendingTimer) clearInterval(this.pendingTimer);
+    if (this.presenceTimer) clearInterval(this.presenceTimer);
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     // Bots on a bot host keep running there; only their live consoles close.
     this.hosts.detachAll();
     const uuids = [...this.procs.keys()];
     // Says why in each bot's console, so the owner and Kojy don't hunt for a bug.
-    for (const uuid of uuids) this.console(uuid, "system", PLATFORM_RESTART_LINE);
+    for (const uuid of uuids) { this.console(uuid, "system", PLATFORM_RESTART_LINE); this.presence.stopped(uuid); }
     await Promise.all(uuids.map((uuid) => this.kill(uuid)));
     await Promise.allSettled(uuids.map((uuid) => this.setStatus(uuid, "stopped", "Runner restarting — the bot starts again when it's back")));
     await this.activity.stop();
@@ -232,6 +268,8 @@ export class Supervisor {
         this.tails.set(uuid, []);
         this.reports.delete(uuid);
         this.busy.delete(uuid);
+        // Watched from now (also when only reattaching to a bot that kept running there).
+        this.presence.started(uuid, project.id, true);
         return await this.hosts.start(project, reason);
       }
       const dir = path.join(PROJECTS_DIR, uuid);
@@ -269,6 +307,7 @@ export class Supervisor {
       child.once("spawn", () => {
         this.startFailures.delete(uuid);
         this.goodLater(uuid);
+        this.presence.started(uuid, project.id, !isStartCommand(project.entrypoint));
         this.record(run.project, "start");
         void this.setStatus(uuid, "running", null);
         void this.db.update(botProjects).set({ lastStartedAt: new Date() }).where(eq(botProjects.uuid, uuid));
@@ -329,6 +368,8 @@ export class Supervisor {
       PYTHONDONTWRITEBYTECODE: "1",
       VIRTUAL_ENV: path.dirname(path.dirname(python)),
       KOJY_ENTRY: project.entrypoint,
+      // Highrise was seen listing this bot in its room: the launcher may count it missing from that list.
+      KOJY_EXPECT_LISTED: project.roomListsBot ? "1" : "0",
       ...(process.env.HR_BOTAPI_URL ? { HR_BOTAPI_URL: process.env.HR_BOTAPI_URL } : {}),
     };
     return Object.assign(env, await this.secrets(project));
@@ -365,7 +406,7 @@ export class Supervisor {
         try {
           const e = JSON.parse(line) as { k?: string; id?: string | null; n?: string | null; a?: number; d?: string };
           if (e.k && ACTIVITY_KINDS.has(e.k)) this.record(run.project, e.k, e.id, e.n, { amount: e.a ?? null, detail: e.d ?? null });
-          else if (e.k === "crash" || e.k === "error") this.onReport(uuid, run.project, e);
+          else if (e.k === "crash" || e.k === "error" || e.k === "presence") this.onReport(uuid, run.project, e);
         } catch { /* not ours */ }
       }
     });
@@ -399,6 +440,8 @@ export class Supervisor {
   private async stop(uuid: string): Promise<void> {
     this.holds.delete(uuid);
     this.notGood(uuid);
+    this.presence.stopped(uuid);
+    this.outOfRoom.delete(uuid);
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
     this.startFailures.delete(uuid);
@@ -418,6 +461,7 @@ export class Supervisor {
    */
   private async rehost(uuid: string, payload?: Record<string, unknown>): Promise<void> {
     const from = hostRef(payload?.["from"]);
+    this.presence.stopped(uuid);
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
     this.startFailures.delete(uuid);
@@ -459,6 +503,8 @@ export class Supervisor {
 
   /** Project deleted: stop it (here or on its bot host) and remove its Python environment. */
   private async purge(uuid: string, payload?: Record<string, unknown>): Promise<void> {
+    this.presence.stopped(uuid);
+    this.outOfRoom.delete(uuid);
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
     this.startFailures.delete(uuid);
@@ -540,7 +586,18 @@ export class Supervisor {
     const streak = ranFor >= HEALTHY_RUN_MS ? 1 : (this.crashStreak.get(uuid) ?? 0) + 1;
     if (streak === 1) this.alerted.delete(uuid);
     this.crashStreak.set(uuid, streak);
-    const delay = RESTART_DELAYS_S[Math.min(streak - 1, RESTART_DELAYS_S.length - 1)]!;
+    // Not being in its room is counted by runs, however long each lasted: a bot
+    // restarted every few minutes because it can't get in has "healthy" long
+    // runs, so the crash streak above never sees it.
+    const everInRoom = this.presence.everInRoom(uuid) || report?.connected === true || lines.some((l) => l.startsWith(CONNECTED_PREFIX));
+    this.presence.exited(uuid);
+    const roomTrouble = !!incident && ROOM_TROUBLE.includes(incident.category as IncidentCategory);
+    const outOfRoom = roomTrouble ? (this.outOfRoom.get(uuid) ?? 0) + 1 : 0;
+    if (roomTrouble) this.outOfRoom.set(uuid, outOfRoom);
+    else if (everInRoom) this.outOfRoom.delete(uuid);
+    const refused = incident?.category === "highrise_refused";
+    let delay = RESTART_DELAYS_S[Math.min(streak - 1, RESTART_DELAYS_S.length - 1)]!;
+    if (refused && outOfRoom >= OUT_OF_ROOM_ALERT_AFTER) delay = REFUSED_RETRY_S[Math.min(outOfRoom - OUT_OF_ROOM_ALERT_AFTER, REFUSED_RETRY_S.length - 1)]!;
     const held = this.holds.get(uuid);
     this.console(uuid, "system", `✖ Bot exited (${how}) after ${Math.round(ranFor / 1000)}s — ${held ? "not restarted until Kojy's fix is ready" : `restarting in ${delay}s`}`);
 
@@ -559,7 +616,8 @@ export class Supervisor {
       this.onCrash?.(uuid, streak, tail, incident);
       return null;
     }
-    if (streak >= CRASH_LOOP_LIMIT) {
+    if (streak >= CRASH_LOOP_LIMIT && !roomTrouble) {
+      // (A bot that can't get into its room keeps being tried — less often — instead: it can't be fixed in its code.)
       await this.pauseCrashLoop(uuid, project, streak);
       await this.incidents.update(incident?.id, {}, `Paused after ${streak} crashes in a row`);
       return null;
@@ -567,7 +625,11 @@ export class Supervisor {
     await this.db.update(botProjects).set({ restartCount: p.restartCount + 1 }).where(eq(botProjects.uuid, uuid));
     await this.setStatus(uuid, "crashed", `Exited with ${how}${incident?.summary ? ` (${incident.summary})` : ""}; restarting in ${delay}s`.slice(0, 500));
     this.onCrash?.(uuid, streak, tail, incident);
-    if (streak >= 3 && this.alerted.get(uuid) !== streak && !this.alerted.has(uuid)) {
+    if (roomTrouble && outOfRoom >= OUT_OF_ROOM_ALERT_AFTER) {
+      await this.outOfRoomAgain(uuid, project, incident, outOfRoom, delay);
+      return delay;
+    }
+    if (streak >= 3 && !roomTrouble && this.alerted.get(uuid) !== streak && !this.alerted.has(uuid)) {
       this.alerted.set(uuid, streak);
       const last = this.tail(uuid).filter((l) => l.trim()).slice(-1)[0] ?? "";
       const body = `${project.name} has crashed ${streak} times in a row and keeps restarting. Last output: ${last.slice(0, 200)}`;
@@ -636,8 +698,103 @@ export class Supervisor {
     if (t) { clearTimeout(t); this.goodTimers.delete(uuid); }
   }
 
-  /** A report from the launcher: a crash (kept for when the exit comes) or an error the bot survived. */
+  // ── in the room or not ─────────────────────────────────────────────────────
+
+  /** The bot got into its room (again): its "not in the room" problems are closed. */
+  private backInRoom(uuid: string, projectId: number): void {
+    this.outOfRoom.delete(uuid);
+    void this.incidents.resolveRoomTrouble(projectId);
+  }
+
+  /**
+   * Most bots out of their rooms at once: Highrise or the network is down —
+   * not each bot's fault, so their owners aren't each told to check secrets.
+   */
+  private outage(): { out: number; checked: number } | null {
+    const { checked, out } = this.presence.counts();
+    const failing = new Set([...out, ...[...this.outOfRoom.keys()]]);
+    const total = Math.max(checked, failing.size);
+    return failing.size >= OUTAGE_MIN_BOTS && failing.size / total >= OUTAGE_SHARE ? { out: failing.size, checked: total } : null;
+  }
+
+  /** Tells the owner about an incident once, until it's resolved (kept on the incident, so a restart doesn't repeat it). */
+  private async alertOwner(project: RunProject, uuid: string, incident: Incident | null, title: string, body: string): Promise<void> {
+    if (incident?.data?.alertedAt) return;
+    await this.incidents.update(incident?.id, { alerted: true });
+    void notifyUser(this.db, project.ownerId, "bot_error", title, body.slice(0, 900), `/studio/p/${uuid}`);
+    void sendAlert(`⚠️ ${title}: ${body.slice(0, 300)}`);
+  }
+
+  /**
+   * Runs keep ending with the bot out of its room. Unless Highrise is down
+   * for everyone, the owner is told — once — what to check, and the incident
+   * says so ("needs you"). A refusal is tried less and less often.
+   */
+  private async outOfRoomAgain(uuid: string, project: RunProject, incident: Incident | null, runs: number, delay: number): Promise<void> {
+    const outage = this.outage();
+    if (outage) {
+      await this.incidents.update(incident?.id, { state: "open", note: `Most bots are out of their rooms right now (${outage.out} of ${outage.checked}): Highrise or the network seems to be down, not this bot. It keeps being started again until they're back.` });
+      if (Date.now() - this.outageAlertedAt > 30 * 60_000) {
+        this.outageAlertedAt = Date.now();
+        void sendAlert(`🌐 ${outage.out} of ${outage.checked} bots can't get into their rooms — Highrise or the network looks down.`);
+      }
+      return;
+    }
+    const why = incident?.note?.replace(/,? so it was started again\.?$/, "").replace(/^It /, "") ?? "it isn't getting into its room";
+    const advice = roomAdvice(incident);
+    const note = `${runs} runs in a row ended without the bot in its room (${why.replace(/\.$/, "")}). ${advice}${delay >= 120 ? ` KojyAI tries again every ${Math.round(delay / 60)} min.` : ""}`;
+    await this.incidents.update(incident?.id, { state: "needs_owner", note }, `${runs} runs in a row out of the room`);
+    this.console(uuid, "system", `⚠ ${note}`);
+    await this.alertOwner(project, uuid, incident, `${project.name} isn't getting into its room`, note);
+  }
+
+  /** No room check from the bot for too long: KojyAI can't see it working, so it's restarted (and the owner told if it keeps happening). */
+  private async silent(uuid: string, why: string, times: number): Promise<void> {
+    const [row] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+    if (!row || row.desiredState !== "running" || this.holds.has(uuid)) return;
+    this.console(uuid, "system", `■ ${why} — restarting it`);
+    const incident = await this.incidents.record(row.id, {
+      signature: "silent", category: "silent", phase: "in_room", fatal: true, summary: "No sign of life from the bot's room checks", example: why,
+      state: times >= 2 ? "needs_owner" : "open",
+      note: times >= 2 ? `${why}, ${times} times in a row; restarting didn't help. If it runs on a bot host, check the server there.` : `${why}; it was restarted.`,
+    }, "no room checks");
+    if (times >= 2) {
+      await this.alertOwner({ id: row.id, orgId: row.orgId, ownerId: row.ownerId, name: row.name }, uuid, incident,
+        `${row.name} keeps going quiet`, `KojyAI got no room checks from ${row.name} for over ${Math.round(SILENT_MS / 60_000)} minutes, ${times} times in a row, and restarted it each time. If it runs on a bot host, check the server there.`);
+    }
+    await this.handle(uuid, "restart");
+  }
+
+  /**
+   * What the website shows against what really runs: a bot shown as running
+   * (or starting) that KojyAI isn't running, or one left "crashed" with no
+   * restart coming, is started again — the page never stays wrong.
+   */
+  async reconcile(): Promise<void> {
+    const rows = await this.db.select({ uuid: botProjects.uuid, status: botProjects.status, desiredState: botProjects.desiredState, updatedAt: botProjects.updatedAt }).from(botProjects);
+    const now = Date.now();
+    for (const row of rows) {
+      const uuid = row.uuid;
+      if (this.isRunning(uuid) || this.busy.has(uuid) || this.hosts.isBusy(uuid) || this.restartTimers.has(uuid) || this.holds.has(uuid)) continue;
+      const shownRunning = row.status === "running" || row.status === "starting";
+      const stuck = row.status === "crashed" && now - row.updatedAt.getTime() > STUCK_AFTER_MS;
+      if (!shownRunning && !stuck) continue;
+      if (row.desiredState !== "running") { await this.setStatus(uuid, "stopped", null); continue; }
+      this.console(uuid, "system", shownRunning ? "KojyAI wasn't running this bot although its page said it was — starting it" : "The bot was left crashed with no restart coming — starting it");
+      log.warn({ uuid, status: row.status }, "Status didn't match what runs — starting the bot");
+      void this.start(uuid, "KojyAI found it wasn't running");
+    }
+  }
+
+  /** A room check from the launcher. */
+  private onPresence(uuid: string, ev: PresenceEvent): void {
+    void this.presence.report(uuid, ev).catch((err: unknown) => log.warn({ err, uuid }, "Could not keep the room check"));
+  }
+
+  /** A report from the launcher: a crash (kept for when the exit comes), an error the bot survived, or a room check. */
   private onReport(uuid: string, project: RunProject, raw: unknown): void {
+    const presence = parsePresence(raw);
+    if (presence) { this.onPresence(uuid, presence); return; }
     const report = parseReport(raw);
     if (!report) return;
     if (report.fatal) { this.reports.set(uuid, report); return; }
@@ -745,6 +902,7 @@ export class Supervisor {
   /** Appends one line to the project's console log (rotated at 2 MB). */
   console(uuid: string, stream: "stdout" | "stderr" | "stdin" | "system", line: string): void {
     if (stream === "stdout" || stream === "stderr") {
+      this.presence.output(uuid);
       const t = this.tails.get(uuid);
       if (t) { t.push(line.slice(0, 500)); if (t.length > 80) t.shift(); }
       // Here and on a bot host alike (its lines come through here too).
@@ -767,4 +925,12 @@ export class Supervisor {
   private async setStatus(uuid: string, status: Status, message: string | null): Promise<void> {
     await this.db.update(botProjects).set({ status, statusMessage: message }).where(eq(botProjects.uuid, uuid));
   }
+}
+
+/** What the owner can check when the bot keeps ending up out of its room. */
+export function roomAdvice(incident: Pick<Incident, "category" | "signature"> | null): string {
+  if (incident?.category === "highrise_refused") return "Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets, and that the bot is still added to that room.";
+  if (incident?.signature === "watchdog:missing-from-list") return "Highrise doesn't list the bot among the room's users: it may have been removed or banned from the room, or HIGHRISE_ROOM_ID points to another room.";
+  if (incident?.category === "network") return "Highrise keeps ending its session; if other bots are fine, check that the bot's token isn't also used somewhere else (a second copy of the bot running).";
+  return "If other bots are fine, check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets, that the bot is still added to the room, and that no second copy of it runs elsewhere.";
 }

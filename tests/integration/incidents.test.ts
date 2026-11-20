@@ -92,6 +92,25 @@ describe("incident ledger", () => {
     expect((await sqlc.query("SELECT id FROM bot_incidents WHERE id = $1", [row.id])).rows).toEqual([]);
   });
 
+  test("the owner is told once (kept on the incident); back in the room, the room problems close and can be told again", async () => {
+    const ledger = new IncidentLedger(db);
+    const watchdog = classifyExit({ tail: ["[kojy] Watchdog: the bot hasn't been connected to Highrise for 301s — restarting the bot."], how: "code 4", ranForMs: 400_000 });
+    const row = (await ledger.record(other, watchdog, "code 4"))!;
+    expect(row).toMatchObject({ category: "not_in_room", state: "open" }); // never "not a bug" any more
+    await ledger.update(row.id, { state: "needs_owner", alerted: true }, "2 runs in a row out of the room");
+    const again = (await ledger.record(other, watchdog, "code 4"))!;
+    expect(again.data?.alertedAt).toEqual(expect.any(Number)); // a restart can see the owner was already told
+    const codeBug = (await ledger.record(other, crash("amy"), "code 1"))!;
+    await ledger.resolveRoomTrouble(other);
+    const after = (await sqlc.query("SELECT state, note, data FROM bot_incidents WHERE id = $1", [row.id])).rows[0];
+    expect(after.state).toBe("fixed");
+    expect(after.note).toMatch(/^Back in its room since \d\d:\d\d UTC\.$/);
+    expect(after.data.alertedAt).toBeUndefined();
+    expect(after.data.timeline.at(-1).what).toBe("Back in its room");
+    // A bug in the code isn't a room problem: left as it was.
+    expect((await sqlc.query("SELECT state FROM bot_incidents WHERE id = $1", [codeBug.id])).rows[0].state).toBe("open");
+  });
+
   test("Kojy's get_logs lists them newest first, without the ignored ones", async () => {
     const ledger = new IncidentLedger(db);
     const text = describeIncidents(await ledger.list(project), Date.now());
