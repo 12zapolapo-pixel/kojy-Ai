@@ -336,6 +336,33 @@ export function removeSnapshots(uuid: string): void {
   rmSync(path.join(SNAPSHOT_DIR, uuid), { recursive: true, force: true });
 }
 
+/**
+ * Writes a snapshot's code into `dest` (an empty folder), plus the bot's
+ * current data/ and database files (snapshots don't keep those) — the code
+ * as it was, with the data as it is, e.g. to run the old code in a test room.
+ */
+export function extractSnapshot(uuid: string, id: string, dest: string): void {
+  if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
+  const file = path.join(SNAPSHOT_DIR, uuid, `${id}.zip`);
+  if (!existsSync(file)) throw new ProjectFileError("That snapshot no longer exists");
+  const files = unzipSync(readFileSync(file));
+  delete files[".kojy-snapshot.json"];
+  const root = path.resolve(dest);
+  for (const [rel, data] of Object.entries(files)) {
+    const target = path.resolve(root, rel);
+    if (!target.startsWith(root + path.sep)) continue; // never outside dest
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, data);
+  }
+  const live = projectDir(uuid);
+  for (const f of listFiles(uuid)) {
+    if (f.isDir || !isPersistentData(f.path)) continue;
+    const target = path.join(root, f.path);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, readFileSync(path.join(live, f.path)));
+  }
+}
+
 /** Removes one snapshot (e.g. one taken before a change that never happened). */
 export function deleteSnapshot(uuid: string, id: string): void {
   if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");

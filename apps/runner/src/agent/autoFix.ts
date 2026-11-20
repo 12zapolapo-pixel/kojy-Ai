@@ -132,6 +132,39 @@ export function crashSignature(tail: string[]): string {
   return ex ? `${normalizeError(ex)} @ ${crashLocation(tail).replace(/:\d+ in /, " in ")}` : "";
 }
 
+/**
+ * The signature of every traceback in some console lines (e.g. a test room
+ * run), in order. An exception group's traceback is one, up to its last
+ * decorated line; its real error inside decides the signature.
+ */
+export function tracebackSignatures(lines: string[]): string[] {
+  const out: string[] = [];
+  let block: string[] | null = null;
+  let group = false;
+  const flush = () => {
+    if (block) { const sig = crashSignature(block); if (sig) out.push(sig); }
+    block = null;
+    group = false;
+  };
+  const begin = (line: string, text: string) => { block = [line]; group = text.startsWith("Exception Group"); };
+  for (const line of lines) {
+    const text = undecorate(line).trim();
+    const starts = /^(?:Exception Group )?Traceback \(most recent call last\)/.test(text);
+    if (!block) { if (starts) begin(line, text); continue; }
+    if (group) {
+      if (/^[\s|+]/.test(line)) { (block as string[]).push(line); continue; }
+      flush();
+      if (starts) begin(line, text);
+      continue;
+    }
+    if (starts && !/^\s*[|+]/.test(line)) { flush(); begin(line, text); continue; }
+    (block as string[]).push(line);
+    if (EXCEPTION_LINE.test(text)) flush();
+  }
+  flush();
+  return out;
+}
+
 /** The network or Highrise being away (DNS, refused, reset, timeout) — not a bug in the bot's code. */
 const NETWORK_FAILURE = /ClientConnectorError|ClientConnectionError|ClientOSError|ServerDisconnectedError|ServerTimeoutError|WSServerHandshakeError|ConnectionResetError|ConnectionRefusedError|ConnectionAbortedError|gaierror|TimeoutError|Temporary failure in name resolution|Name or service not known|Network is unreachable|Cannot connect to host/;
 export function isNetworkFailure(tail: string[]): boolean {

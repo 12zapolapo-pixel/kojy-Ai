@@ -1104,6 +1104,8 @@ export interface IncidentData {
     requestId?: number;
     snapshotId?: string | null;
     survived?: { handler: string; command?: string };
+    /** The handler that was running when it failed (to replay it in a test room). */
+    event?: { handler?: string; command?: string };
     earlier?: string;
     /** Already picked up once after a restart (it isn't again, so a restart loop can't loop the fix). */
     resumed?: boolean;
