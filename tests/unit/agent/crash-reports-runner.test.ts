@@ -117,3 +117,62 @@ describe("the supervisor and reports", () => {
     record.mockRestore();
   });
 });
+
+describe("holding a bot for Kojy's fix", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "kojy-hold-"));
+  const updates: Record<string, unknown>[] = [];
+  const db = {
+    select: () => { const q = { from() { return q; }, where() { return q; }, limit: async () => [{ uuid: "h1", desiredState: "running", restartCount: 0 }] }; return q; },
+    update: () => ({ set: (v: Record<string, unknown>) => ({ where: async () => { updates.push(v); } }) }),
+    insert: () => ({ values: async () => undefined }),
+  };
+  let sup: InstanceType<typeof import("../../../apps/runner/src/supervisor.js").Supervisor>;
+  let LIMIT: number;
+  beforeAll(async () => {
+    process.env.PROJECTS_DIR = path.join(root, "projects");
+    process.env.VENVS_DIR = path.join(root, "venvs");
+    process.env.RUNNER_SANDBOX = "off";
+    mkdirSync(path.join(root, "projects"), { recursive: true });
+    const m = await import("../../../apps/runner/src/supervisor.js");
+    LIMIT = m.CRASH_LOOP_LIMIT;
+    sup = new m.Supervisor(db as never);
+    vi.spyOn(sup.incidents, "record").mockResolvedValue(null);
+  });
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  type Internals = { onExit(u: string, r: unknown, c: number, sig: null): Promise<void>; restartTimers: Map<string, NodeJS.Timeout>; crashStreak: Map<string, number>; start(u: string, why?: string): Promise<void> };
+  const project = { id: 1, orgId: 1, ownerId: 1, name: "Japalo" };
+  const run = () => ({ startedAt: Date.now() - 3000, stopping: false, project });
+
+  it("a held bot isn't restarted by itself, but Kojy still hears about each crash", async () => {
+    const s = sup as unknown as Internals;
+    let told = 0;
+    sup.onCrash = () => { told++; };
+    sup.hold("h1", "Kojy is fixing a crash — the bot starts again with the fix");
+    await s.onExit("h1", run(), 1, null);
+    expect(s.restartTimers.has("h1")).toBe(false);
+    expect(told).toBe(1);
+    expect(updates.at(-1)).toMatchObject({ status: "crashed", statusMessage: "Kojy is fixing a crash — the bot starts again with the fix" });
+  });
+
+  it("releasing the hold starts the bot again (an explicit start ends a hold too)", async () => {
+    const s = sup as unknown as Internals;
+    const start = vi.spyOn(s, "start").mockResolvedValue(undefined);
+    await sup.release("h1");
+    expect(start).toHaveBeenCalledWith("h1", "after Kojy's fix");
+    expect(sup.isHeld("h1")).toBe(false);
+    start.mockRestore();
+  });
+
+  it("a crash loop while Kojy is fixing it is held instead of paused for good", async () => {
+    const s = sup as unknown as Internals;
+    sup.onCrash = () => undefined;
+    sup.fixingNow = () => true;
+    s.crashStreak.set("h1", LIMIT - 1);
+    updates.length = 0;
+    await s.onExit("h1", run(), 1, null);
+    expect(updates.some((u) => u.desiredState === "stopped")).toBe(false);
+    expect(sup.isHeld("h1")).toBe(true);
+    sup.fixingNow = undefined;
+    await sup.release("h1").catch(() => undefined);
+  });
+});

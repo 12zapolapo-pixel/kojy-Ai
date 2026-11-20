@@ -71,7 +71,7 @@ export function automaticRefusal(_kind: AutomatedKind, tool: string, args: Recor
     return null; // the tool itself reports the bad path
   }
   if (isPersistentData(rel)) return no(`changing the bot's saved data (${rel})`);
-  if (DEPENDENCY_FILE.test(rel)) return no(`changing the bot's dependencies (${rel})`);
+  if (DEPENDENCY_FILE.test(rel)) return no(`changing the bot's dependencies (${rel}); a missing well-known package is added by KojyAI itself`);
   const before = tool === "edit_file" ? String(args.old_text ?? "") : currentText(rel);
   const after = tool === "edit_file" ? String(args.new_text ?? "") : String(args.content ?? "");
   const risks = addedRisks(before, after);

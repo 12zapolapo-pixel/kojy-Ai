@@ -1092,4 +1092,20 @@ export interface IncidentData {
   report?: Record<string, unknown>;
   /** How the bot stopped the latest time ("code 1", "SIGKILL", "out of memory"). */
   exit?: string;
+  /**
+   * What an automatic fix needs to pick the work up again after a KojyAI
+   * restart: the crash (signature, its traceback lines), the chat request and
+   * undo point of a fix in progress, and whether it was an error the bot survived.
+   */
+  fix?: {
+    signature: string;
+    tail: string[];
+    streak: number;
+    requestId?: number;
+    snapshotId?: string | null;
+    survived?: { handler: string; command?: string };
+    earlier?: string;
+    /** Already picked up once after a restart (it isn't again, so a restart loop can't loop the fix). */
+    resumed?: boolean;
+  };
 }

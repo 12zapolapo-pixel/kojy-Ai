@@ -78,14 +78,14 @@ describe("incident ledger", () => {
     expect(secret?.note).toMatch(/only you have these values/);
   });
 
-  test("after a KojyAI restart nothing looks busy forever, and old finished incidents are pruned", async () => {
+  test("what an automatic fix needs to pick up after a restart is kept on it, and old finished incidents are pruned", async () => {
     const ledger = new IncidentLedger(db);
     const row = (await ledger.record(other, crash("amy"), "code 1"))!;
-    await ledger.update(row.id, { state: "waiting_for_ai", retryAt: new Date(Date.now() + 60_000) });
-    await ledger.resetAfterRestart();
-    const after = (await sqlc.query("SELECT state, retry_at, note FROM bot_incidents WHERE id = $1", [row.id])).rows[0];
-    expect(after).toMatchObject({ state: "open", retry_at: null });
-    expect(after?.note).toMatch(/KojyAI restarted/);
+    await ledger.update(row.id, { state: "waiting_for_ai", retryAt: new Date(Date.now() + 60_000), fix: { signature: row.signature, tail: ["Traceback (most recent call last):", "KeyError: 'amy'"], streak: 1, requestId: 42, snapshotId: "123" } });
+    const waiting = (await ledger.inProgress()).find((r) => r.id === row.id);
+    expect(waiting?.data?.fix).toMatchObject({ requestId: 42, snapshotId: "123", streak: 1 });
+    await ledger.update(row.id, { state: "fixed", fix: null });
+    expect((await ledger.inProgress()).some((r) => r.id === row.id)).toBe(false);
 
     await sqlc.query("UPDATE bot_incidents SET last_seen_at = now() - interval '40 days' WHERE id = $1", [row.id]);
     await ledger.prune();

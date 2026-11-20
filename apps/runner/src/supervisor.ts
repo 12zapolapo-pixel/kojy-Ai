@@ -117,6 +117,14 @@ export class Supervisor {
   readonly incidents: IncidentLedger;
   /** The launcher's crash report from each bot's current run (see launcher.py). */
   private reports = new Map<string, CrashReport>();
+  /**
+   * Bots not restarted automatically while Kojy fixes a crash that restarting
+   * can't help (it fails while loading or starting): why, for the status line.
+   * An explicit start (the owner, Kojy, the fix finishing) ends the hold.
+   */
+  private holds = new Map<string, string>();
+  /** Set by the coder AI: whether it's fixing (or about to fix) this bot's crash right now. */
+  fixingNow?: (uuid: string) => boolean;
   /** A Discord bot connected to Discord (once per start; see agent/discord.ts). */
   onDiscordConnected?: (uuid: string) => void;
 
@@ -163,8 +171,9 @@ export class Supervisor {
     const rows = await this.db.select({ uuid: botProjects.uuid }).from(botProjects)
       .where(eq(botProjects.desiredState, "running"));
     log.info({ count: rows.length }, "Restoring running projects");
-    // Bots on a bot host kept running: start() only reattaches to them.
-    for (const { uuid } of rows) void this.start(uuid, "back after a KojyAI restart");
+    // Bots on a bot host kept running: start() only reattaches to them. A bot
+    // held for Kojy's fix (its crash would only happen again) starts with the fix.
+    for (const { uuid } of rows) if (!this.holds.has(uuid)) void this.start(uuid, "back after a KojyAI restart");
     if (!this.pendingTimer) {
       this.pendingTimer = setInterval(() => void this.sweepPendingHosts(), PENDING_HOST_EVERY_MS);
       this.pendingTimer.unref();
@@ -202,6 +211,7 @@ export class Supervisor {
 
   private async start(uuid: string, reason?: string): Promise<void> {
     if (this.procs.has(uuid) || this.busy.has(uuid)) return;
+    this.holds.delete(uuid);
     this.clearRestart(uuid);
     this.busy.add(uuid);
     try {
@@ -375,6 +385,7 @@ export class Supervisor {
   }
 
   private async stop(uuid: string): Promise<void> {
+    this.holds.delete(uuid);
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
     this.startFailures.delete(uuid);
@@ -510,18 +521,30 @@ export class Supervisor {
     this.reports.delete(uuid);
     const incident = await this.incidents.record(project.id, classifyExit({ tail: this.tail(uuid), how, ranForMs: ranFor, report }), how, report);
     // What Kojy is shown: the console's own traceback when it's there (it has every step), else the report's.
-    const console = this.tail(uuid);
-    const tail = report?.line && lastException(console) !== report.line ? reportToTail(report) : console;
+    const lines = this.tail(uuid);
+    const tail = report?.line && lastException(lines) !== report.line ? reportToTail(report) : lines;
     const streak = ranFor >= HEALTHY_RUN_MS ? 1 : (this.crashStreak.get(uuid) ?? 0) + 1;
     if (streak === 1) this.alerted.delete(uuid);
     this.crashStreak.set(uuid, streak);
     const delay = RESTART_DELAYS_S[Math.min(streak - 1, RESTART_DELAYS_S.length - 1)]!;
-    this.console(uuid, "system", `✖ Bot exited (${how}) after ${Math.round(ranFor / 1000)}s — restarting in ${delay}s`);
+    const held = this.holds.get(uuid);
+    this.console(uuid, "system", `✖ Bot exited (${how}) after ${Math.round(ranFor / 1000)}s — ${held ? "not restarted until Kojy's fix is ready" : `restarting in ${delay}s`}`);
 
     const [p] = await this.db.select({ desiredState: botProjects.desiredState, restartCount: botProjects.restartCount })
       .from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (p?.desiredState !== "running") { await this.setStatus(uuid, "stopped", null); return null; }
 
+    if (held) {
+      await this.setStatus(uuid, "crashed", held);
+      this.onCrash?.(uuid, streak, tail, incident);
+      return null;
+    }
+    if (streak >= CRASH_LOOP_LIMIT && this.fixingNow?.(uuid)) {
+      // Kojy is on it: wait for the fix instead of pausing the bot for good.
+      this.hold(uuid, `Crashed ${streak} times in a row — Kojy is fixing it, and the bot starts again with the fix`);
+      this.onCrash?.(uuid, streak, tail, incident);
+      return null;
+    }
     if (streak >= CRASH_LOOP_LIMIT) {
       await this.pauseCrashLoop(uuid, project, streak);
       await this.incidents.update(incident?.id, {}, `Paused after ${streak} crashes in a row`);
@@ -552,6 +575,30 @@ export class Supervisor {
     const body = `${project.name} crashed ${streak} times in a row, so it was paused instead of restarting forever. Last output: ${last.slice(0, 200)}. Open its chat and ask Kojy to fix it, then press Start.`;
     void notifyUser(this.db, project.ownerId, "bot_error", `${project.name} was paused (crash loop)`, body, `/studio/p/${uuid}`);
     void sendAlert(`⏸ ${body}`);
+  }
+
+  /**
+   * Don't restart the bot by itself until the hold ends (Kojy is fixing a
+   * crash that would only happen again). `why` goes on the status line.
+   */
+  hold(uuid: string, why: string): void {
+    const first = !this.holds.has(uuid);
+    this.holds.set(uuid, why);
+    this.clearRestart(uuid);
+    if (first) this.console(uuid, "system", `⏸ Not restarting until Kojy's fix is ready: ${why}`);
+    if (!this.isRunning(uuid)) void this.setStatus(uuid, "crashed", why.slice(0, 500)).catch(() => undefined);
+  }
+
+  isHeld(uuid: string): boolean {
+    return this.holds.has(uuid);
+  }
+
+  /** Ends a hold: the bot starts again (with whatever code it has now) if the owner still wants it running. */
+  async release(uuid: string, reason = "after Kojy's fix"): Promise<void> {
+    if (!this.holds.delete(uuid)) return;
+    if (this.isRunning(uuid)) return;
+    const [p] = await this.db.select({ desiredState: botProjects.desiredState }).from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+    if (p?.desiredState === "running") await this.start(uuid, reason);
   }
 
   /** A report from the launcher: a crash (kept for when the exit comes) or an error the bot survived. */

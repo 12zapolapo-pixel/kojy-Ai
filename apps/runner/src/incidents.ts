@@ -260,6 +260,8 @@ export interface IncidentPatch {
   fixSnapshotId?: string | null;
   fixFiles?: Record<string, string> | null;
   watchUntil?: Date | null;
+  /** What's needed to pick an automatic fix up again after a restart (null clears it). */
+  fix?: IncidentData["fix"] | null;
 }
 
 const MAX_TIMELINE = 20;
@@ -318,10 +320,12 @@ export class IncidentLedger {
       if (patch.fixFiles !== undefined) set.fixFiles = patch.fixFiles;
       if (patch.watchUntil !== undefined) set.watchUntil = patch.watchUntil;
       if (patch.attempt) { set.attempts = sql`${botIncidents.attempts} + 1`; set.lastAttemptAt = new Date(); }
-      if (what) {
+      if (what || patch.fix !== undefined) {
         const [row] = await this.db.select({ data: botIncidents.data }).from(botIncidents).where(eq(botIncidents.id, id)).limit(1);
         const data: IncidentData = { ...(row?.data ?? {}) };
-        pushTimeline(data, what);
+        if (what) pushTimeline(data, what);
+        if (patch.fix === null) delete data.fix;
+        else if (patch.fix) data.fix = { ...patch.fix, tail: patch.fix.tail.slice(-60).map((l) => clip(l, 300)) };
         set.data = data;
       }
       if (Object.keys(set).length) await this.db.update(botIncidents).set(set).where(eq(botIncidents.id, id));
@@ -335,6 +339,16 @@ export class IncidentLedger {
     return this.db.select().from(botIncidents).where(eq(botIncidents.projectId, projectId)).orderBy(desc(botIncidents.lastSeenAt)).limit(limit);
   }
 
+  /** Incidents an automatic fix was working on (to pick up again after a restart). */
+  async inProgress(): Promise<Incident[]> {
+    try {
+      return await this.db.select().from(botIncidents).where(inArray(botIncidents.state, WORKING_STATES));
+    } catch (err) {
+      log.warn({ err }, "Could not read the incidents in progress");
+      return [];
+    }
+  }
+
   /** Signatures an automatic fix is working on for this bot. */
   async workingOn(projectId: number): Promise<Set<string>> {
     try {
@@ -343,22 +357,6 @@ export class IncidentLedger {
       return new Set(rows.map((r) => r.signature));
     } catch {
       return new Set();
-    }
-  }
-
-  /**
-   * After a KojyAI restart: what was being worked on in memory is gone, so it
-   * says so instead of looking busy forever. It's worked on again when it
-   * happens again.
-   */
-  async resetAfterRestart(): Promise<void> {
-    try {
-      await this.db.update(botIncidents).set({ state: "open", retryAt: null, note: "KojyAI restarted while Kojy was working on this; it's fixed again when it happens again." })
-        .where(inArray(botIncidents.state, ["queued", "fixing", "waiting_for_ai"]));
-      await this.db.update(botIncidents).set({ state: "fixed", watchUntil: null, note: "Fixed by Kojy (KojyAI restarted before the fix could be watched to the end)." })
-        .where(eq(botIncidents.state, "watching"));
-    } catch (err) {
-      log.warn({ err }, "Could not reset incidents after a restart");
     }
   }
 

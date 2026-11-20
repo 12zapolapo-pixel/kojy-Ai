@@ -23,7 +23,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
 import { botHosts, botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
@@ -41,7 +41,8 @@ import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, rec
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
 import { runCheckups } from "./checkup.js";
-import { FIXABLE, IncidentLedger, type Incident, type IncidentCategory } from "../incidents.js";
+import { FIXABLE, IncidentLedger, type Incident, type IncidentCategory, type IncidentPatch } from "../incidents.js";
+import { addRequirement, hasRequirement, isLocalModule, packageFor } from "../packages.js";
 import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, crashLocation, crashSignature, isNetworkFailure, lastException, normalizeError, type AutomatedKind } from "./autoFix.js";
 
 const log = createLogger("agent");
@@ -135,7 +136,7 @@ interface CrashFix {
 /** What onCrash knows besides the console lines. */
 interface CrashContext {
   /** The incident the supervisor recorded it as. */
-  incident?: Pick<Incident, "id" | "category"> | null;
+  incident?: (Pick<Incident, "id" | "category"> & Partial<Pick<Incident, "phase" | "summary" | "state" | "attempts" | "lastAttemptAt">>) | null;
   /** Why an earlier automatic fix for this crash was undone. */
   earlier?: string;
   /** Not a crash: an error the bot survived (it kept running) — in this handler, for this chat command. */
@@ -180,6 +181,8 @@ export class Agent {
   private fixing = new Map<string, string>();
   /** Automatic fixes waiting for an AI to be free again. */
   private retryTimers = new Map<string, NodeJS.Timeout>();
+  /** Crashes whose next automatic fix waits a little ("uuid|signature"): the last attempt didn't fix it. */
+  private deferred = new Map<string, NodeJS.Timeout>();
   /** What the owner was last told about a Discord bot's setup (so it's said once, not on every restart). */
   private discordWarned = new Map<string, string>();
 
@@ -189,6 +192,7 @@ export class Agent {
   constructor(private db: Database, private supervisor: Supervisor, private redis: Redis | null) {
     this.incidents = (supervisor as { incidents?: IncidentLedger }).incidents ?? new IncidentLedger(db);
     supervisor.onCrash = (uuid, streak, tail, incident) => void this.onCrash(uuid, streak, tail, { incident });
+    supervisor.fixingNow = (uuid) => this.fixingNow(uuid);
     // An error the bot survived is fixed the same way: the bot kept running, but that part of it is broken.
     supervisor.onBotError = (uuid, tail, incident, report) => void this.onCrash(uuid, 1, tail, {
       incident, survived: { handler: report.event?.handler ?? "a handler", ...(report.event?.command ? { command: report.event.command } : {}) },
@@ -216,10 +220,12 @@ export class Agent {
    * cut off doesn't loop — or says it was interrupted.
    */
   async resetStates(): Promise<void> {
-    await this.incidents.resetAfterRestart();
+    // Automatic fixes first: the ones they pick up themselves aren't resumed twice below.
+    const resumed = await this.resumeIncidents().catch((err: unknown) => { log.warn({ err }, "Could not pick up automatic fixes"); return new Set<string>(); });
     const cut = await this.db.select({ id: botProjects.id, uuid: botProjects.uuid }).from(botProjects).where(eq(botProjects.agentState, "working"));
     await this.db.update(botProjects).set({ agentState: "idle" }).where(eq(botProjects.agentState, "working"));
     for (const p of cut) {
+      if (resumed.has(p.uuid)) continue;
       try {
         await this.resumeAfterRestart(p.uuid, p.id);
       } catch (err) {
@@ -597,6 +603,8 @@ export class Agent {
   private async onCrash(uuid: string, streak: number, tail: string[], context: CrashContext = {}): Promise<void> {
     const { earlier } = context;
     const incidentId = context.incident?.id ?? null;
+    // A package the bot imports isn't installed: KojyAI adds it itself (no AI needed).
+    if (context.incident?.category === "missing_package") return this.installMissingPackage(uuid, streak, tail, context);
     // Only bugs in the bot's code (a traceback, or code the watchdog caught
     // frozen): a network blip, a Highrise outage or a missing secret value
     // isn't something to fix in the code — the incident's note says what it is.
@@ -605,12 +613,20 @@ export class Agent {
     if (!excerpt) { log.info({ uuid }, "Crash not sent to Kojy: no traceback in its output"); return; }
     if (isNetworkFailure(tail)) { log.info({ uuid }, "Crash not sent to Kojy: the network or Highrise was away"); return; }
     const signature = crashSignature(tail);
+    const saved = this.fixData(signature, tail, streak, context);
+    // A crash that restarting can't help (it fails while loading or starting,
+    // or again right after a restart): the bot waits for the fix instead.
+    const holdIt = () => {
+      if (!this.restartsCantHelp(context, streak)) return;
+      this.supervisorHold(uuid, `Kojy is fixing a crash${context.incident?.summary ? ` (${context.incident.summary})` : ""} — the bot starts again with the fix`);
+    };
     const queueIt = async () => {
       const queue = this.queuedCrash.get(uuid) ?? new Map();
       queue.set(signature, { streak, tail, context });
       this.queuedCrash.set(uuid, queue);
+      holdIt();
       log.info({ uuid }, "Crash queued: Kojy is busy with this bot and fixes it next");
-      await this.incidents.update(incidentId, { state: "queued", note: "Kojy is busy with this bot right now and fixes this next." });
+      await this.incidents.update(incidentId, { state: "queued", fix: saved, note: "Kojy is busy with this bot right now and fixes this next." });
     };
     if (this.active.has(uuid)) {
       if (this.fixing.get(uuid) === signature) return; // the fix running now is for this very crash
@@ -637,6 +653,21 @@ export class Agent {
     if (project.desiredState !== "running") return skip("The bot had been stopped, so Kojy didn't fix it.");
     if (!configuredLanes().length) return skip("No AI key is set up on this KojyAI server, so Kojy can't fix it.");
     if (this.active.has(uuid)) return queueIt(); // a request started while this crash was being looked at
+    // The same bug right after an attempt that didn't fix it: Kojy tries again,
+    // a little later each time (it never gives up) — trying the same thing every
+    // few seconds would only use up the AI for every bot.
+    const inc = context.incident;
+    if (!earlier && inc?.attempts && inc.lastAttemptAt && inc.state === "open" && Date.now() - inc.lastAttemptAt.getTime() < RETRY_SPACING_WINDOW_MS) {
+      const due = inc.lastAttemptAt.getTime() + retrySpacingMs(inc.attempts);
+      if (Date.now() < due) {
+        holdIt();
+        this.deferCrash(uuid, streak, tail, context, due);
+        const hhmm = new Date(due).toISOString().slice(11, 16);
+        await this.incidents.update(incidentId, { state: "queued", retryAt: new Date(due), fix: saved,
+          note: `Kojy tried ${inc.attempts} time${inc.attempts > 1 ? "s" : ""} without a fix that held; it tries again at about ${hhmm} UTC.` });
+        return;
+      }
+    }
 
     const thread = `project:${project.id}`;
     const frozen = excerpt.includes("BotFrozenError");
@@ -662,7 +693,8 @@ export class Agent {
       " Finish with one or two sentences for the owner: what was wrong and what you changed.",
       "crash");
     log.info({ uuid, streak, frozen, again: !!earlier }, "Auto-fix started");
-    await this.incidents.update(incidentId, { state: "fixing", attempt: true, retryAt: null, note: "Kojy is fixing it." },
+    holdIt();
+    await this.incidents.update(incidentId, { state: "fixing", attempt: true, retryAt: null, note: "Kojy is fixing it.", fix: { ...saved, requestId: request.id, snapshotId } },
       earlier ? `Earlier fix undone (${earlier}) — new automatic fix started` : "Automatic fix started");
     await this.runCrashFix(uuid, project, { signature, tail, snapshotId, requestId: request.id, what: survived ? "an error" : frozen ? "a freeze" : "a crash", incidentId, survived });
   }
@@ -693,7 +725,10 @@ export class Agent {
         const hhmm = new Date(at).toISOString().slice(11, 16);
         await this.add(scope, "assistant", `Every AI is at its limit right now, so I'll pick up ${fix.what} again by myself at about ${hhmm} UTC.`, "event");
         await this.incidents.update(fix.incidentId, { state: "waiting_for_ai", retryAt: new Date(at), note: `Every AI was at its limit; Kojy tries again at about ${hhmm} UTC.` }, "No AI was free — waiting");
+        if (this.supervisorHeld(uuid)) this.supervisorHold(uuid, `Waiting for an AI to fix a crash (about ${hhmm} UTC) — the bot starts again with the fix`);
       } else if (result?.outcome !== "busy") {
+        // Fix or no fix, a bot that was waiting for it starts again now (Kojy may already have restarted it).
+        await this.supervisorRelease(uuid);
         const files = entry?.files.map((f) => f.path).slice(0, 4).join(", ") ?? "";
         const said = entry?.summary.trim().slice(0, 300) ?? "";
         if (changed && entry.status === "done" && fix.snapshotId) {
@@ -739,6 +774,7 @@ export class Agent {
     const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
     if (!project?.autoFix || project.desiredState !== "running") {
       await this.incidents.update(fix.incidentId, { state: "open", retryAt: null, note: "The bot was stopped (or automatic fixes switched off) before an AI was free." });
+      await this.supervisorRelease(uuid);
       return;
     }
     // Only while that crash is still what the chat is about: the owner may have asked for something else since.
@@ -747,11 +783,168 @@ export class Agent {
       .orderBy(desc(projectMessages.id)).limit(1);
     if (last && last.id !== fix.requestId) {
       await this.incidents.update(fix.incidentId, { state: "open", retryAt: null, note: "The owner asked Kojy for something else meanwhile; it's fixed if it happens again." });
+      await this.supervisorRelease(uuid);
       return;
     }
     log.info({ uuid }, "Picking up an automatic fix no AI could take earlier");
     await this.incidents.update(fix.incidentId, { state: "fixing", retryAt: null, note: "Kojy is fixing it." }, "An AI is free again — fixing");
     await this.runCrashFix(uuid, project, fix);
+  }
+
+  // ── the fix coordinator's helpers ──────────────────────────────────────────
+
+  /** What an automatic fix needs to pick its work up again after a restart (kept on the incident). */
+  private fixData(signature: string, tail: string[], streak: number, context: CrashContext): NonNullable<IncidentPatch["fix"]> {
+    return {
+      signature, tail: crashExcerpt(tail).split("\n"), streak,
+      ...(context.survived ? { survived: context.survived } : {}), ...(context.earlier ? { earlier: context.earlier } : {}),
+    };
+  }
+
+  /** A crash restarting can't help: it fails while loading or starting, or again right after a restart. Never an error the bot survived. */
+  private restartsCantHelp(context: CrashContext, streak: number): boolean {
+    if (context.survived) return false;
+    const phase = context.incident?.phase;
+    return phase === "import" || phase === "startup" || streak >= 2;
+  }
+
+  /** Whether Kojy is fixing, or about to fix, a crash of this bot (the supervisor then waits instead of pausing it). */
+  fixingNow(uuid: string): boolean {
+    return this.fixing.has(uuid) || this.queuedCrash.has(uuid) || this.retryTimers.has(uuid) || [...this.deferred.keys()].some((k) => k.startsWith(`${uuid}|`));
+  }
+
+  // The supervisor's hold (tests use a stand-in without it).
+  private supervisorHold(uuid: string, why: string): void { (this.supervisor as Partial<Supervisor>).hold?.(uuid, why); }
+  private supervisorHeld(uuid: string): boolean { return (this.supervisor as Partial<Supervisor>).isHeld?.(uuid) ?? false; }
+  private async supervisorRelease(uuid: string): Promise<void> {
+    await (this.supervisor as Partial<Supervisor>).release?.(uuid)?.catch((err: unknown) => log.warn({ err, uuid }, "Could not start the bot after its fix"));
+  }
+
+  /** Looks at a crash again at `at` (ms), skipping the spacing between attempts. */
+  private deferCrash(uuid: string, streak: number, tail: string[], context: CrashContext, at: number): void {
+    const key = `${uuid}|${crashSignature(tail)}`;
+    const old = this.deferred.get(key);
+    if (old) clearTimeout(old);
+    const timer = setTimeout(() => {
+      this.deferred.delete(key);
+      const incident = context.incident ? { ...context.incident, lastAttemptAt: null } : null;
+      void this.onCrash(uuid, streak, tail, { ...context, incident }).catch((err) => log.warn({ err, uuid }, "Deferred automatic fix failed"));
+    }, Math.max(0, at - Date.now()));
+    timer.unref();
+    this.deferred.set(key, timer);
+  }
+
+  /**
+   * The bot failed to load because a package it imports isn't installed.
+   * When the import is in the bot's own code and the package is a well-known
+   * one, KojyAI adds it to requirements.txt and restarts the bot (that
+   * installs it) — no AI involved. A name it doesn't know, or one already
+   * listed, is left to the owner with a note; a module that is one of the
+   * bot's own files is a code bug, fixed by Kojy.
+   */
+  private async installMissingPackage(uuid: string, streak: number, tail: string[], context: CrashContext): Promise<void> {
+    const incidentId = context.incident?.id ?? null;
+    const module = /No module named '([\w.]+)'/.exec(lastException(tail))?.[1];
+    const [project] = await this.db.select().from(botProjects).where(eq(botProjects.uuid, uuid)).limit(1);
+    if (!project || !module) return;
+    if (isLocalModule(uuid, module)) return this.onCrash(uuid, streak, tail, { ...context, incident: context.incident ? { ...context.incident, category: "code" } : null });
+    if (!project.autoFix || project.desiredState !== "running") {
+      await this.incidents.update(incidentId, { note: `The bot imports "${module}", which isn't installed${project.autoFix ? "" : " (automatic fixes are off, so it wasn't added)"}.` });
+      return;
+    }
+    const top = module.split(".")[0]!;
+    // The import has to be in the bot's own code — never a name built from something a visitor typed.
+    const imported = tail.some((l) => new RegExp(`^\\s*(?:from\\s+${top}(?:[.\\s]|$)|import\\s+(?:[\\w.]+\\s*,\\s*)*${top}(?:[.\\s,]|$))`).test(l));
+    const pip = packageFor(module);
+    if (!pip || !imported) {
+      await this.incidents.update(incidentId, { state: "needs_owner",
+        note: `The bot imports "${module}", which isn't installed, and KojyAI only installs well-known packages by itself (a name that's slightly off can belong to someone else). Add the package that provides it to requirements.txt.` });
+      return;
+    }
+    if (hasRequirement(uuid, pip)) {
+      await this.incidents.update(incidentId, { state: "needs_owner",
+        note: `${pip} is in requirements.txt, but "${module}" still can't be imported — its install may have failed (see the console), or the code needs a different version.` });
+      return;
+    }
+    try {
+      snapshotProject(uuid, `Before KojyAI added the package ${pip}`);
+      addRequirement(uuid, pip);
+    } catch (err) {
+      log.warn({ err, uuid }, "Could not add the missing package");
+      return;
+    }
+    log.info({ uuid, pip }, "Added a missing package");
+    const scope = { thread: `project:${project.id}`, projectId: project.id, key: uuid, orgId: project.orgId };
+    await this.add(scope, "assistant", `📦 The bot imports \`${module}\`, but the package **${pip}** wasn't installed. I added it to requirements.txt and I'm starting the bot again — that installs it. (It's in Undo if you don't want it.)`, "event");
+    await this.incidents.update(incidentId, { state: "watching", watchUntil: new Date(Date.now() + FIX_WATCH_MS), note: `KojyAI added ${pip} to requirements.txt and started the bot again.` }, `Added the package ${pip}`);
+    await notifyUser(this.db, project.ownerId, "bot_error", `KojyAI added ${pip} to ${project.name}`, `The bot imports ${module}, which wasn't installed. KojyAI added ${pip} to requirements.txt and started it again.`, `/studio/p/${uuid}`);
+    await this.supervisor.handle(uuid, "restart");
+    const timer = setTimeout(() => {
+      void this.incidents.update(incidentId, this.supervisor.isRunning(uuid)
+        ? { state: "fixed", watchUntil: null, note: `Fixed: KojyAI added ${pip} and the bot runs.` }
+        : { state: "open", watchUntil: null, note: `KojyAI added ${pip}, but the bot isn't running.` });
+    }, FIX_WATCH_MS);
+    timer.unref();
+  }
+
+  /**
+   * After a KojyAI restart: automatic fixes pick up where they were. A fix that
+   * was running resumes (once — a restart loop can't loop it), one waiting for
+   * an AI or for its turn is tried again, and a fix being watched is watched to
+   * the end. Bots whose crash only happens again wait for their fix (held)
+   * instead of starting. Returns the bots whose chat request is resumed here.
+   */
+  private async resumeIncidents(): Promise<Set<string>> {
+    const resumed = new Set<string>();
+    const rows = await this.incidents.inProgress();
+    if (!rows.length) return resumed;
+    const projects = await this.db.select().from(botProjects).where(inArray(botProjects.id, [...new Set(rows.map((r) => r.projectId))]));
+    const byId = new Map(projects.map((p) => [p.id, p]));
+    const now = Date.now();
+    for (const row of rows) {
+      const project = byId.get(row.projectId);
+      const fix = row.data?.fix;
+      const lost = () => this.incidents.update(row.id, { state: "open", retryAt: null, watchUntil: null, fix: null,
+        note: "KojyAI restarted while Kojy was working on this; it's fixed again when it happens again." });
+      if (!project || !fix) { await lost(); continue; }
+      const uuid = project.uuid;
+      const context: CrashContext = { incident: { id: row.id, category: row.category, phase: row.phase, summary: row.summary }, ...(fix.survived ? { survived: fix.survived } : {}), ...(fix.earlier ? { earlier: fix.earlier } : {}) };
+      if (row.state === "watching") {
+        const left = (row.watchUntil?.getTime() ?? now) - now;
+        if (!row.fixSnapshotId || !row.fixFiles || left <= 0) {
+          await this.incidents.update(row.id, { state: "fixed", watchUntil: null, note: "Fixed by Kojy — the fix held." }, "The fix held");
+          continue;
+        }
+        this.startWatch(uuid, project, { signature: fix.signature, tail: fix.tail, snapshotId: row.fixSnapshotId, incidentId: row.id, survived: fix.survived }, row.fixFiles, left);
+        continue;
+      }
+      const holdText = `Kojy is fixing a crash (${row.summary}) — the bot starts again with the fix`;
+      if (this.restartsCantHelp(context, fix.streak)) this.supervisorHold(uuid, holdText);
+      if (row.state === "fixing" || row.state === "waiting_for_ai") {
+        if (!fix.requestId || (row.state === "fixing" && fix.resumed)) { await lost(); await this.supervisorRelease(uuid); continue; }
+        const crashFix: CrashFix = { signature: fix.signature, tail: fix.tail, snapshotId: fix.snapshotId ?? null, requestId: fix.requestId, what: fix.survived ? "an error" : "a crash", incidentId: row.id, survived: fix.survived };
+        const running = row.state === "fixing";
+        const at = running ? now + RESUME_DELAY_MS : Math.max(row.retryAt?.getTime() ?? now, now + RESUME_DELAY_MS);
+        this.fixing.set(uuid, fix.signature); // a crash of it meanwhile isn't fixed twice
+        if (running) {
+          resumed.add(uuid);
+          await this.incidents.update(row.id, { fix: { ...fix, resumed: true } }, "KojyAI restarted — picking the fix up again");
+          await this.add({ thread: `project:${project.id}`, projectId: project.id, key: uuid, orgId: project.orgId }, "assistant", "KojyAI restarted while I was fixing this — picking up where I left off.", "event");
+        }
+        const timer = setTimeout(() => {
+          this.retryTimers.delete(uuid);
+          this.fixing.delete(uuid);
+          void (running ? this.runCrashFix(uuid, project, crashFix) : this.retryCrashFix(uuid, crashFix)).catch((err) => log.warn({ err, uuid }, "Resumed automatic fix failed"));
+        }, at - now);
+        timer.unref();
+        this.retryTimers.set(uuid, timer);
+        continue;
+      }
+      // queued: its turn (or a spaced retry) comes after the restart.
+      this.deferCrash(uuid, fix.streak, fix.tail, context, Math.max(row.retryAt?.getTime() ?? now, now + RESUME_DELAY_MS));
+    }
+    if (rows.length) log.info({ count: rows.length }, "Picked up automatic fixes after the restart");
+    return resumed;
   }
 
   /** Starts on the next crash that came in while Kojy was busy with this bot. */
@@ -774,6 +967,11 @@ export class Agent {
    */
   private watchFix(uuid: string, project: ProjectRow, fix: CrashFix): void {
     if (!fix.snapshotId) return;
+    this.startWatch(uuid, project, { ...fix, snapshotId: fix.snapshotId }, codeFingerprint(uuid), FIX_WATCH_MS);
+  }
+
+  /** Watches a fix for `ms` more: `files` is the code right after it (a rollback never overwrites later changes). */
+  private startWatch(uuid: string, project: ProjectRow, fix: Pick<CrashFix, "signature" | "tail" | "incidentId" | "survived"> & { snapshotId: string }, files: Record<string, string>, ms: number): void {
     this.clearWatch(uuid);
     const timer = setTimeout(() => {
       this.watching.delete(uuid);
@@ -783,10 +981,10 @@ export class Agent {
       }
       void this.add({ thread: `project:${project.id}`, projectId: project.id, key: uuid, orgId: project.orgId }, "assistant",
         `✓ The automatic fix held: no crash in the ${Math.round(FIX_WATCH_MS / 60_000)} minutes after it.`, "event").catch(() => undefined);
-      void this.incidents.update(fix.incidentId, { state: "fixed", watchUntil: null, note: "Fixed by Kojy — the fix held." }, "The fix held");
-    }, FIX_WATCH_MS);
+      void this.incidents.update(fix.incidentId, { state: "fixed", watchUntil: null, fix: null, note: "Fixed by Kojy — the fix held." }, "The fix held");
+    }, ms);
     timer.unref();
-    this.watching.set(uuid, { snapshotId: fix.snapshotId, signature: fix.signature, tail: fix.tail, files: codeFingerprint(uuid), incidentId: fix.incidentId, survived: fix.survived, timer });
+    this.watching.set(uuid, { snapshotId: fix.snapshotId, signature: fix.signature, tail: fix.tail, files, incidentId: fix.incidentId, survived: fix.survived, timer });
   }
 
   private clearWatch(uuid: string): void {
@@ -858,6 +1056,16 @@ export class Agent {
 export const AUTO_FIX_LABEL = "automatic crash fix";
 /** How long after an automatic fix a crash counts as "the fix didn't hold". */
 export const FIX_WATCH_MS = Number(process.env.AGENT_FIX_WATCH_MS ?? 15 * 60_000);
+/** Attempts on the same bug are spaced out only while the last one was this recent. */
+const RETRY_SPACING_WINDOW_MS = 2 * 3600_000;
+
+/**
+ * How long the next automatic fix of the same bug waits after `attempts`
+ * that didn't fix it: 2, 5, 15, 30 minutes, then hourly. It never stops trying.
+ */
+export function retrySpacingMs(attempts: number): number {
+  return ([2, 5, 15, 30][attempts - 1] ?? 60) * 60_000;
+}
 
 /**
  * Turn order every AI accepts. The history starts with a user turn: Gemini
