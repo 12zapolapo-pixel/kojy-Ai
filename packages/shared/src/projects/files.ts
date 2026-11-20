@@ -10,6 +10,7 @@
  * the API container's own files.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { unzip, unzipSync, zip, zipSync, strFromU8, type Unzipped } from "fflate";
@@ -330,4 +331,31 @@ export function compareSnapshot(uuid: string, id: string, maxFiles = 30): { file
 
 export function removeSnapshots(uuid: string): void {
   rmSync(path.join(SNAPSHOT_DIR, uuid), { recursive: true, force: true });
+}
+
+/** Removes one snapshot (e.g. one taken before a change that never happened). */
+export function deleteSnapshot(uuid: string, id: string): void {
+  if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
+  rmSync(path.join(SNAPSHOT_DIR, uuid, `${id}.zip`), { force: true });
+}
+
+/**
+ * path → sha256 of each code file (what a snapshot keeps: not data/ or
+ * databases, nothing over 5 MB). Two fingerprints differ when anyone changed,
+ * added or removed code in between.
+ */
+export function codeFingerprint(uuid: string): Record<string, string> {
+  const root = projectDir(uuid);
+  const out: Record<string, string> = {};
+  if (!existsSync(root)) return out;
+  for (const f of listFiles(uuid)) {
+    if (f.isDir || isPersistentData(f.path) || f.size > 5 * 1024 * 1024) continue;
+    try { out[f.path] = createHash("sha256").update(readFileSync(path.join(root, f.path))).digest("hex"); } catch { /* gone meanwhile */ }
+  }
+  return out;
+}
+
+/** Files that were added, removed or changed between two fingerprints. */
+export function fingerprintChanges(before: Record<string, string>, after: Record<string, string>): string[] {
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((p) => before[p] !== after[p]).sort();
 }

@@ -1,8 +1,8 @@
 /**
  * Daily check-up — once a day, for bots that have it switched on, look at
  * the last 24 hours: crashes and Python errors from the console log, plus
- * how busy the room was. A day with errors starts Kojy on them with a
- * plan-first request (so nothing changes without the owner's approval).
+ * how busy the room was. A day with errors starts Kojy on fixing them right
+ * away, within the same limits as a crash fix (autoFix.ts).
  * OWNERSHIP: apps/runner/src/agent
  *
  * Errors are grouped by kind (the error with names and numbers taken out,
@@ -142,6 +142,7 @@ async function checkOne(db: Database, project: typeof botProjects.$inferSelect, 
   await db.insert(projectMessages).values({ thread, projectId: project.id, role: "user", kind: "checkup", data: { checkup: data },
     content: `Daily check-up for the last 24 hours: ${summary}. ${kinds.length} kind${kinds.length === 1 ? "" : "s"} of error${fresh ? ` (${fresh} new since the last check-up)` : ""}, most frequent first (from the bot, not from the owner):\n` +
       `${kinds.length ? untrusted(describeKinds(kinds, before)) : "(crashes without a printed error)"}\n\n` +
-      "Find what causes them, starting with the most frequent and the NEW ones. If a fix is needed, explain it in one or two sentences and use propose_plan — don't change anything until I approve. If it's harmless or outside the bot (e.g. Highrise was down), just say so." });
+      "Find what causes them, starting with the most frequent and the NEW ones, and fix them now without waiting for me: the smallest fix for each, checked with check_code, test_in_room and run_saved_tests, then restart the bot with bot_control and confirm with get_logs that it's back in the room. " +
+      "If one is harmless or outside the bot (e.g. Highrise was down), just say so. Finish with one or two sentences per error: what was wrong and what you changed." });
   startAgent(project.uuid);
 }

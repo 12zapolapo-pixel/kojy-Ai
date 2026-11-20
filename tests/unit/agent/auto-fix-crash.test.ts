@@ -1,8 +1,12 @@
 /**
- * A crash starts Kojy on the fix right away (the first crash, no approval
- * step), freezes too; network errors, exits without a traceback and a second
- * crash moments later don't. Uses a tiny in-memory stand-in for the queries.
+ * A crash starts Kojy on the fix right away (no approval step, no daily
+ * limit), freezes too; network errors and exits without a traceback don't.
+ * A crash while Kojy is busy waits its turn, and a fix no AI could take is
+ * picked up again by itself. Uses a tiny in-memory stand-in for the queries.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Table = object;
@@ -30,13 +34,17 @@ const db = {
   }),
 };
 
+const root = mkdtempSync(path.join(tmpdir(), "kojy-autofix-"));
 let Agent: typeof import("../../../apps/runner/src/agent/agent.js").Agent;
+let files: typeof import("../../../packages/shared/src/projects/files.js");
 beforeAll(async () => {
+  process.env.PROJECTS_DIR = root;
   process.env.GROQ_API_KEY = "gsk_fake-test-key"; // an AI is configured
   vi.resetModules();
   ({ Agent } = await import("../../../apps/runner/src/agent/agent.js"));
+  files = await import("../../../packages/shared/src/projects/files.js");
 });
-afterAll(() => { delete process.env.GROQ_API_KEY; });
+afterAll(() => { delete process.env.GROQ_API_KEY; rmSync(root, { recursive: true, force: true }); });
 
 const crash = [
   "2026-11-03 15:00:00 INFO     highrise_bot.bot: visitor said hello",
@@ -51,19 +59,44 @@ const frozen = [
   "    time.sleep(30)",
   "BotFrozenError: the bot's code didn't hand control back for 61s, so the bot couldn't answer anyone in the room.",
 ];
+const otherBug = [
+  "Traceback (most recent call last):",
+  '  File "/app/projects/u1/highrise_bot/shop.py", line 40, in buy',
+  "    price = PRICES[item]",
+  "KeyError: 'sword'",
+];
 const network = [
   "Traceback (most recent call last):",
   "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host highrise.game:443 ssl:default [Temporary failure in name resolution]",
 ];
 
+type RunResult = import("../../../apps/runner/src/agent/agent.js").RunResult;
+const finished: RunResult = { outcome: "done", ended: null, aiUnavailable: false };
+
 function setup(project: Record<string, unknown> = {}) {
   rows = { bot_projects: [{ id: 1, uuid: "u1", name: "Japalo", ownerId: 7, autoFix: true, desiredState: "running", ...project }], project_messages: [], agent_work_log: [] };
-  const supervisor: { onCrash?: (uuid: string, streak: number, tail: string[]) => void } = {};
+  const supervisor: { onCrash?: (uuid: string, streak: number, tail: string[]) => void; isRunning?: () => boolean } = { isRunning: () => true };
   const agent = new Agent(db as never, supervisor as never, null);
-  const run = vi.spyOn(agent, "run").mockResolvedValue(undefined);
+  const active = (agent as unknown as { active: Map<string, AbortController> }).active;
+  /** Each run stays "working" until release() is called (or finishes at once when not held). */
+  let hold = false;
+  const waiting: (() => void)[] = [];
+  let result: RunResult = finished;
+  const run = vi.spyOn(agent, "run").mockImplementation(async (uuid: string) => {
+    active.set(uuid, new AbortController());
+    if (hold) await new Promise<void>((r) => waiting.push(r));
+    active.delete(uuid);
+    return result;
+  });
   const crashMessages = () => (rows.project_messages ?? []).filter((m) => m.kind === "crash").map((m) => String(m.content));
+  const events = () => (rows.project_messages ?? []).filter((m) => m.kind === "event").map((m) => String(m.content));
   const fire = async (tail: string[], streak = 1) => { supervisor.onCrash!("u1", streak, tail); await new Promise((r) => setTimeout(r, 20)); };
-  return { run, crashMessages, fire };
+  return {
+    run, crashMessages, events, fire,
+    holdRuns: () => { hold = true; },
+    release: async () => { hold = false; for (const r of waiting.splice(0)) r(); await new Promise((r) => setTimeout(r, 30)); },
+    nextResult: (r: RunResult) => { result = r; },
+  };
 }
 
 beforeEach(() => { vi.clearAllMocks(); });
@@ -80,7 +113,7 @@ describe("automatic crash fix", () => {
     expect(msg).toMatch(/Fix it now — the owner wants crashes fixed without waiting for them/);
     expect(msg).toMatch(/restart the bot with bot_control and confirm with get_logs/);
     expect(msg).not.toMatch(/propose_plan/);
-    expect(run).toHaveBeenCalledWith("u1");
+    expect(run).toHaveBeenCalledWith("u1", { snapshotted: true, automatic: true });
     expect(rows.notifications?.[0]).toMatchObject({ userId: 7, title: "Kojy looked into a crash in Japalo" });
   });
 
@@ -100,12 +133,54 @@ describe("automatic crash fix", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("doesn't start a second fix for a crash moments after the last one", async () => {
+  it("has no daily limit: every crash after the last fix starts another fix", async () => {
     const { run, crashMessages, fire } = setup();
+    for (let i = 1; i <= 5; i++) await fire(crash, i);
+    expect(crashMessages()).toHaveLength(5);
+    expect(run).toHaveBeenCalledTimes(5);
+  });
+
+  it("while a fix runs, the same bug crashing again is left to it; a different crash waits its turn and is fixed next", async () => {
+    const { run, crashMessages, fire, holdRuns, release } = setup();
+    holdRuns();
     await fire(crash);
-    await fire(crash, 2);
-    expect(crashMessages()).toHaveLength(1);
-    expect(run).toHaveBeenCalledOnce();
+    await fire(crash, 2); // the bot restarted with the old code and crashed the same way
+    await fire(otherBug, 3);
+    expect(run).toHaveBeenCalledTimes(1);
+    await release();
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(crashMessages()).toHaveLength(2);
+    expect(crashMessages()[1]).toContain("in buy");
+  });
+
+  it("takes one undo point before the fix and removes it again when nothing was changed", async () => {
+    const { fire } = setup();
+    files.ensureProjectDir("u1");
+    files.writeProjectFile("u1", "bot.py", "print('hi')\n");
+    const before = files.listSnapshots("u1").length;
+    await fire(crash);
+    expect(files.listSnapshots("u1")).toHaveLength(before); // taken, then removed: the fix changed nothing
+  });
+
+  it("when every AI is at its limit, says when it will try again and picks the fix up by itself", async () => {
+    const { run, events, fire, nextResult } = setup();
+    const ai = await import("../../../apps/runner/src/agent/groq.js");
+    ai._resetAiStateForTests();
+    nextResult({ outcome: "done", ended: "error", aiUnavailable: true });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const fired = fire(crash);
+      await vi.advanceTimersByTimeAsync(50);
+      await fired;
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(events().some((e) => /Every AI is at its limit right now, so I'll pick up a crash again by myself at about \d\d:\d\d UTC/.test(e))).toBe(true);
+      nextResult(finished);
+      await vi.advanceTimersByTimeAsync(31_000); // the AI is free again: the shortest wait is 30s
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(run).toHaveBeenLastCalledWith("u1", { snapshotted: true, automatic: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does nothing when auto-fix is switched off for the bot", async () => {

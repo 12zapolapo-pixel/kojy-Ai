@@ -199,6 +199,9 @@ export class Supervisor {
       if (!project) return;
       if (project.hostId && project.hostServer) {
         if (isStartCommand(project.entrypoint)) return this.setStatus(uuid, "error", "Start commands (run: …) only run on KojyAI's own server. Move the bot back in Settings → Where it runs.");
+        // A fresh run's output only: an old traceback left here would be taken
+        // for the cause of the next exit (one without a traceback of its own).
+        this.tails.set(uuid, []);
         this.busy.delete(uuid);
         return await this.hosts.start(project, reason);
       }

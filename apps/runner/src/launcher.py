@@ -332,6 +332,9 @@ def main() -> None:
     try:
         bot_class = getattr(importlib.import_module(module_name), class_name)
     except (ImportError, AttributeError) as error:
+        # The traceback names the line of the bot's code that failed (a wrong
+        # import, a renamed function), so the runner can start Kojy on it.
+        traceback.print_exc()
         fail(f"Can't load {entry}: {error}")
 
     from highrise.__main__ import BotDefinition, main as sdk_main

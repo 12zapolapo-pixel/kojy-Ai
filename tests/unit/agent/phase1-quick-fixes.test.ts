@@ -1,7 +1,8 @@
 /**
- * Phase 1 fixes: a hanging AI gives up and the next one answers, the
- * auto-fix limit, which lessons Kojy reads, owner-edit notes never start a
- * request, and the owner's own edits get an undo point.
+ * Phase 1 fixes: a hanging AI gives up and the next one answers, which
+ * lessons Kojy reads, owner-edit notes never start a request, and the owner's
+ * own edits get an undo point. (Automatic fixes no longer have a daily limit:
+ * see auto-fix-crash.test.ts.)
  */
 import http from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -9,7 +10,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { autoFixAllowed } from "../../../apps/runner/src/agent/agent.js";
 import { requestIndex, taskMemory } from "../../../apps/runner/src/agent/taskMemory.js";
 import { pickMemories, type MemoryRow } from "../../../packages/shared/src/projects/memories.js";
 
@@ -53,20 +53,6 @@ describe("an AI that never answers", () => {
     expect(message.content).toBe("hello from works");
     expect(seen).toEqual(["hangs", "works"]);
     expect(Date.now() - started).toBeLessThan(5000);
-  });
-});
-
-describe("autoFixAllowed", () => {
-  const now = 10 * 86_400_000;
-  it("allows the first fix, then waits 5 minutes before another", () => {
-    expect(autoFixAllowed([], now)).toBe(true);
-    expect(autoFixAllowed([now - 60_000], now)).toBe(false);
-    expect(autoFixAllowed([now - 6 * 60_000], now)).toBe(true);
-  });
-  it("allows at most 3 in 24 hours, counting only the last day", () => {
-    const h = 3600_000;
-    expect(autoFixAllowed([now - h, now - 2 * h, now - 3 * h], now)).toBe(false);
-    expect(autoFixAllowed([now - h, now - 2 * h, now - 25 * h], now)).toBe(true);
   });
 });
 

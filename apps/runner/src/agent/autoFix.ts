@@ -1,17 +1,15 @@
 /**
- * What Kojy may do in a run it started by itself.
+ * What Kojy may do in a run it started by itself — a crash (or an error the
+ * bot survived) or the daily check-up. Both fix the bot right away with no
+ * approval step: the owner wants every problem fixed automatically.
  *
- * Crash (the owner's choice: fix right away, no approval): read, test, edit
- * code and restart the bot. A crash's output can carry text a room visitor
- * typed (V-03), so even then a crash run can't delete files, touch the bot's
- * saved data or dependencies, change secrets or the entrypoint, stop the bot,
- * save long-term notes, or ADD code that reaches the internet, reads secrets,
- * runs programs, deletes files or builds code at runtime — a fix that really
- * needs one of those goes through propose_plan and the owner. Only the traceback reaches
- * the AI, with long quoted text (likely chat) left out.
- *
- * Daily check-up (nothing is broken): investigate and propose; changes wait
- * for the owner's approval.
+ * The bot's output can carry text a room visitor typed (V-03), so such a run
+ * still can't delete files, touch the bot's saved data or dependencies,
+ * change secrets or the entrypoint, stop the bot, save long-term notes, run
+ * shell commands or git, or ADD code that reaches the internet, reads secrets,
+ * runs programs, deletes files or builds code at runtime. None of that waits
+ * for the owner: Kojy is told to fix the problem another way. Only the
+ * traceback reaches the AI, with long quoted text (likely chat) left out.
  * OWNERSHIP: apps/runner/src/agent
  */
 
@@ -20,14 +18,8 @@ import { cleanRelPath, isPersistentData } from "@kojyai/shared/projects";
 export type AutomatedKind = "crash" | "checkup";
 export const AUTOMATED_KINDS = new Set<string>(["crash", "checkup"]);
 
-/** A check-up run can't use these until the owner approves a plan. */
-export const NEEDS_OWNER = new Set(["write_file", "edit_file", "delete_file", "bot_control", "set_entrypoint", "request_secrets", "remember", "save_test", "run_command", "git"]);
-export const OWNER_APPROVAL_NEEDED =
-  "Not allowed yet: this run was started by the daily check-up, not by the owner. " +
-  "Investigate and test as much as you like, then explain the cause and call propose_plan with the fix. Once the owner approves, you can change files and restart the bot.";
-
-/** Never in a crash run. */
-const CRASH_RUN_LOCKED: Record<string, string> = {
+/** Never in an automatic run. */
+export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
   delete_file: "deleting files",
   set_entrypoint: "changing the entrypoint",
   request_secrets: "asking for secrets",
@@ -37,7 +29,7 @@ const CRASH_RUN_LOCKED: Record<string, string> = {
   git: "using git (pushing or pulling)",
 };
 
-/** Kinds of code a crash fix may not add (counted before and after the change). */
+/** Kinds of code an automatic fix may not add (counted before and after the change). */
 const RISKS: { label: string; re: RegExp }[] = [
   { label: "internet access", re: /\b(?:requests|urllib3?|httpx|aiohttp|http\.client|socket|websockets?|ftplib|smtplib|telnetlib|paramiko|open_connection|create_connection|start_server|sock_connect)\b/g },
   { label: "running programs", re: /\b(?:subprocess|os\.system|os\.popen|os\.exec\w*|os\.spawn\w*|pty|multiprocessing)\b/g },
@@ -57,14 +49,18 @@ export function addedRisks(before: string, after: string): string[] {
 }
 
 /**
- * Why `tool` can't run in this automatic run, or null if it can.
- * `currentText(rel)` returns a file's current content ("" if it doesn't exist).
+ * Why `tool` can't run in this automatic run, or null if it can. The same
+ * rules for crashes and check-ups. `currentText(rel)` returns a file's current
+ * content ("" if it doesn't exist).
  */
-export function automaticRefusal(kind: AutomatedKind, tool: string, args: Record<string, unknown>, currentText: (rel: string) => string): string | null {
-  if (kind === "checkup") return NEEDS_OWNER.has(tool) ? OWNER_APPROVAL_NEEDED : null;
+export function automaticRefusal(_kind: AutomatedKind, tool: string, args: Record<string, unknown>, currentText: (rel: string) => string): string | null {
   const no = (what: string) =>
-    `Not allowed in an automatic crash fix: ${what}. Fix the crash without it; if the fix really needs it, explain why and call propose_plan so the owner can approve it.`;
-  const locked = CRASH_RUN_LOCKED[tool];
+    `Not allowed in an automatic fix: ${what}. Don't wait for the owner — fix the problem another way within these limits ` +
+    "(handle the bad value, add a guard or a default, catch the error where it happens, change the logic).";
+  if (tool === "propose_plan") {
+    return "Don't stop for the owner's approval in an automatic fix: the owner wants every problem fixed automatically. Make the fix yourself (within the limits), check it, restart the bot and confirm it's back.";
+  }
+  const locked = AUTOMATIC_RUN_LOCKED[tool];
   if (locked) return no(locked);
   if (tool === "bot_control" && String(args.action ?? "") === "stop") return no("stopping the bot (restart it instead)");
   if (tool !== "write_file" && tool !== "edit_file") return null;
