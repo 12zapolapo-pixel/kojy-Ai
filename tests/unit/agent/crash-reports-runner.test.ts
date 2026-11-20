@@ -176,3 +176,34 @@ describe("holding a bot for Kojy's fix", () => {
     await sup.release("h1").catch(() => undefined);
   });
 });
+
+describe("keeping the code that ran fine", () => {
+  it("after a run went 10 minutes without a crash or an error — not a run that crashed", async () => {
+    const files = await import("../../../packages/shared/src/projects/files.js");
+    const m = await import("../../../apps/runner/src/supervisor.js");
+    const stub = {
+      select: () => { const q = { from() { return q; }, where() { return q; }, limit: async () => [] }; return q; },
+      update: () => ({ set: () => ({ where: async () => undefined }) }),
+      insert: () => ({ values: async () => undefined }),
+    };
+    const sup = new m.Supervisor(stub as never);
+    type Internals = { goodLater(u: string): void; notGood(u: string): void };
+    files.ensureProjectDir("g1");
+    files.writeProjectFile("g1", "bot.py", "x = 1\n");
+    vi.spyOn(sup, "isRunning").mockReturnValue(true);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      (sup as unknown as Internals).goodLater("g1");
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 10);
+      expect(files.knownGood("g1")).not.toBeNull();
+
+      files.writeProjectFile("g1", "bot.py", "x = 2\n");
+      (sup as unknown as Internals).goodLater("g1");
+      (sup as unknown as Internals).notGood("g1"); // it crashed
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 10);
+      expect(files.changesSinceKnownGood("g1")!.files.map((f) => f.path)).toEqual(["bot.py"]); // still the version from before
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

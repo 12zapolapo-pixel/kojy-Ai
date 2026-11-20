@@ -217,6 +217,19 @@ describe("automatic crash fix", () => {
     expect(rows.notifications?.[0]).toMatchObject({ title: "Kojy looked into an error in Japalo" });
   });
 
+  it("the request already shows the code where it failed and what changed since the bot last ran fine", async () => {
+    const { crashMessages, fire } = setup();
+    files.ensureProjectDir("u1");
+    const shop = Array.from({ length: 45 }, (_, i) => (i === 39 ? "    price = PRICES[item]" : `# line ${i + 1}`));
+    files.writeProjectFile("u1", "highrise_bot/shop.py", shop.join("\n").replace("    price = PRICES[item]", "    price = PRICES.get(item, 0)"));
+    files.saveKnownGood("u1");
+    files.writeProjectFile("u1", "highrise_bot/shop.py", shop.join("\n"));
+    await fire(otherBug);
+    const msg = crashMessages()[0]!;
+    expect(msg).toMatch(/The code where it failed, from the bot's files now \(→ marks the line\):\n```\nhighrise_bot\/shop\.py:\n[\s\S]*→40 \|     price = PRICES\[item\]/);
+    expect(msg).toMatch(/What changed in the code since the bot last ran fine — the cause is most likely here:\n```diff\n[\s\S]*-\s+price = PRICES\.get\(item, 0\)/);
+  });
+
   it("does nothing when auto-fix is switched off for the bot", async () => {
     const { run, fire } = setup({ autoFix: false });
     await fire(crash);

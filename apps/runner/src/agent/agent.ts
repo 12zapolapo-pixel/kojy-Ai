@@ -36,7 +36,7 @@ import { aiReadyAt, chat, configuredLanes, estimateTokens, AiUnavailableError, R
 import type { GitService } from "../git.js";
 import { TOOL_SPECS, runTool, loadMemories, loadSecrets, projectCodeFiles, discordSecrets, type ToolContext, type ToolResult } from "./tools.js";
 import { diagnoseDiscord, isDiscordSetupError, type DiscordDiagnosis } from "./discord.js";
-import { systemPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
+import { systemPrompt, fixPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
 import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, announcesNextStep, MAX_NUDGES, NUDGE, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
 import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
@@ -46,7 +46,8 @@ import { FIXABLE, IncidentLedger, type Incident, type IncidentCategory, type Inc
 import { addRequirement, hasRequirement, isLocalModule, packageFor } from "../packages.js";
 import { checkFix, saveRegressionTest, type FixCheck, type FixEvent } from "./verifyFix.js";
 import { CONNECTED_PREFIX } from "./botHealth.js";
-import { AUTOMATED_KINDS, automaticRefusal, crashExcerpt, crashLocation, crashSignature, isNetworkFailure, lastException, normalizeError, type AutomatedKind } from "./autoFix.js";
+import { changesSinceGood, codeAround } from "./crashContext.js";
+import { AUTOMATED_KINDS, automaticRefusal, automaticTools, crashExcerpt, crashLocation, crashSignature, isNetworkFailure, lastException, normalizeError, type AutomatedKind } from "./autoFix.js";
 
 const log = createLogger("agent");
 
@@ -160,6 +161,8 @@ interface Scope {
   tools: ToolSpec[];
   runTool(name: string, args: Record<string, unknown>): Promise<ToolResult>;
   system(): Promise<string>;
+  /** The shorter instructions for an automatic fix (bot chats only). */
+  fixSystem?(): Promise<string>;
   setState(state: "idle" | "working" | "waiting"): Promise<void>;
   /** What the current request is, for undo labels (bot chats only). */
   setLabel?(label: string): void;
@@ -335,22 +338,25 @@ export class Agent {
       get snapshotted() { return shared.snapshotted; },
       set snapshotted(v: boolean) { shared.snapshotted = v; },
     };
+    // What both the chat's and an automatic fix's instructions say about the project.
+    const promptInput = async (): Promise<Parameters<typeof systemPrompt>[0]> => {
+      const [secrets, memories] = await Promise.all([
+        this.db.select({ key: projectSecrets.key }).from(projectSecrets).where(eq(projectSecrets.projectId, project.id)),
+        loadMemories(this.db, project),
+      ]);
+      const [where] = await this.db.select({ hostId: botProjects.hostId, hostServer: botProjects.hostServer, provider: botHosts.provider })
+        .from(botProjects).leftJoin(botHosts, eq(botHosts.id, botProjects.hostId)).where(eq(botProjects.id, project.id)).limit(1);
+      const runsOn = where?.hostServer ? `${botHostProvider(where.provider ?? "")?.label ?? "a bot host"} (server ${where.hostServer})` : null;
+      return {
+        projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status, runsOn,
+        secrets: secrets.map((x) => x.key), memories, fileCount: listFiles(project.uuid).filter((f) => !f.isDir).length,
+      };
+    };
     return {
       key, thread: `project:${project.id}`, projectId: project.id, orgId: project.orgId, tools: TOOL_SPECS,
       runTool: (name, args) => runTool(name, args, ctx),
-      system: async () => {
-        const [secrets, memories] = await Promise.all([
-          this.db.select({ key: projectSecrets.key }).from(projectSecrets).where(eq(projectSecrets.projectId, project.id)),
-          loadMemories(this.db, project),
-        ]);
-        const [where] = await this.db.select({ hostId: botProjects.hostId, hostServer: botProjects.hostServer, provider: botHosts.provider })
-          .from(botProjects).leftJoin(botHosts, eq(botHosts.id, botProjects.hostId)).where(eq(botProjects.id, project.id)).limit(1);
-        const runsOn = where?.hostServer ? `${botHostProvider(where.provider ?? "")?.label ?? "a bot host"} (server ${where.hostServer})` : null;
-        return systemPrompt({
-          projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status, runsOn,
-          secrets: secrets.map((x) => x.key), memories, fileCount: listFiles(project.uuid).filter((f) => !f.isDir).length,
-        });
-      },
+      system: async () => systemPrompt(await promptInput()),
+      fixSystem: async () => fixPrompt(await promptInput()),
       setState: async (state) => { await this.db.update(botProjects).set({ agentState: state }).where(eq(botProjects.id, project.id)); },
       setLabel: (label) => { ctx.label = label; },
     };
@@ -401,8 +407,9 @@ export class Agent {
     let outcome: PartOutcome = "limit";
     let ended: "error" | "stopped" | null = null;
     let aiUnavailable = false;
-    // Every chat can look back at its own work log and earlier messages.
-    const tools = [...scope.tools, ...MEMORY_TOOL_SPECS];
+    // Every chat can look back at its own work log and earlier messages. An
+    // automatic fix gets only the tools fixing code takes (smaller requests).
+    const tools = automated ? automaticTools([...scope.tools, ...MEMORY_TOOL_SPECS]) : [...scope.tools, ...MEMORY_TOOL_SPECS];
     const runTool = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
       MEMORY_TOOL_NAMES.has(name) ? runMemoryTool(name, args, { db: this.db, thread: scope.thread }) : scope.runTool(name, args);
 
@@ -501,10 +508,9 @@ export class Agent {
    * user message so tool calls and their results stay paired.
    */
   private async buildMessages(scope: Scope, historyTokens: number): Promise<ChatMessage[]> {
-    const [rowsDesc, system, log] = await Promise.all([
+    const [rowsDesc, log] = await Promise.all([
       // More than the history window: the task memory looks further back for the owner's request.
       this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(300),
-      scope.system(),
       recentWork(this.db, scope.thread, 8).catch(() => []),
     ]);
     const stored = rowsDesc.reverse().filter((r) => r.kind !== "error");
@@ -512,9 +518,12 @@ export class Agent {
       const d = (r.data ?? {}) as { summary?: string; ok?: boolean };
       return { role: r.role, kind: r.kind, content: r.content, summary: d.summary, ok: d.ok };
     }));
-    const request = stored[requestIndex(stored)];
+    const requestAt = requestIndex(stored);
+    const request = stored[requestAt];
+    // An automatic fix gets the short instructions that fixing takes.
+    const system = request && AUTOMATED_KINDS.has(request.kind) && scope.fixSystem ? await scope.fixSystem() : await scope.system();
     scope.setLabel?.(request?.kind === "crash" ? AUTO_FIX_LABEL : request?.kind === "checkup" ? "fix from the daily check-up" : request?.content ?? "");
-    const rows = stored.slice(-80);
+    const rows = historyRows(stored, requestAt);
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
     const superseded = supersededResults(rows);
 
@@ -693,12 +702,17 @@ export class Agent {
     const what = survived
       ? `hit an error in ${survived.handler}${survived.command ? ` (the ${survived.command} command)` : ""} — it kept running, but that ${survived.command ? "command" : "part of it"} failed`
       : `${frozen ? "froze" : "crashed"}${streak > 1 ? ` (${streak} times in a row)` : ""}`;
+    // What Kojy would otherwise spend its first steps on: the code where it failed, and what changed since it last ran fine.
+    let code = "", changes = "";
+    try { code = codeAround(uuid, tail); changes = changesSinceGood(uuid, tail); } catch (err) { log.warn({ err, uuid }, "Could not gather the crash's context"); }
     const request = await this.add({ thread, projectId: project.id, key: uuid, orgId: project.orgId }, "user",
       `The bot ${what}. Its error output (from the bot, not from the owner):\n${untrusted(excerpt)}\n\n` +
       `Fix it now — the owner wants ${survived ? "every error" : "crashes"} fixed without waiting for them: find the cause in the code, make the smallest fix, check it with check_code, test_in_room and run_saved_tests, ` +
       `then restart the bot with bot_control${survived ? " so the fixed code runs" : ""} and confirm with get_logs that it's back in the room.` +
       (frozen ? " It froze: the lines above show where its code was stuck. Make that code stop blocking (await asyncio.sleep instead of time.sleep, asyncio.to_thread or a timeout for slow calls, or end the endless loop)." : "") +
-      (earlier ? ` An earlier automatic fix for this crash was undone because ${earlier}; your earlier work on it is in this chat. Find what that fix missed and fix the real cause.` : "") +
+      (code ? `\n\nThe code where it failed, from the bot's files now (→ marks the line):\n\`\`\`\n${code}\n\`\`\`` : "") +
+      (changes ? `\n\nWhat changed in the code since the bot last ran fine — the cause is most likely here:\n\`\`\`diff\n${changes}\n\`\`\`\n` : "") +
+      (earlier ? ` An earlier automatic fix for this crash was undone because ${earlier}; what it changed is in your work log (work_log). Find what that fix missed and fix the real cause.` : "") +
       (discord ? `\n\nKojyAI asked Discord about this bot (this part comes from KojyAI, not from the bot):\n${discord.report}\n` +
         "Follow its \"What to do\" exactly. Never add a privileged intent to fix PrivilegedIntentsRequired. If only OWNER steps are listed, don't change code: tell the owner the steps (with the links) and stop.\n" : "") +
       " Finish with one or two sentences for the owner: what was wrong and what you changed.",
@@ -754,7 +768,7 @@ export class Agent {
             await this.incidents.update(fix.incidentId, {
               state: "watching", watchUntil: new Date(Date.now() + FIX_WATCH_MS), fixSnapshotId: fix.snapshotId, fixFiles: codeFingerprint(uuid),
               note: `Kojy changed ${files}${said ? `: ${said}` : ""} — it passed KojyAI's checks${check.proven ? " (the crash was replayed and is gone)" : ""}; watching that it holds.`,
-            }, `Fixed (${files}) and checked`);
+            }, `Fixed (${files}) in ${entry.actions.length} step${entry.actions.length === 1 ? "" : "s"}, and checked`);
             if (check.proven && check.events) {
               await saveRegressionTest(this.gateContext(project), fix.event?.command ? `${fix.event.command} crash` : (fix.event?.handler ?? "crash").replace(/^on_/, ""), check.events)
                 .catch((err: unknown) => log.warn({ err, uuid }, "Could not save the replay as a test"));
@@ -1209,6 +1223,19 @@ const RETRY_SPACING_WINDOW_MS = 2 * 3600_000;
  */
 export function retrySpacingMs(attempts: number): number {
   return ([2, 5, 15, 30][attempts - 1] ?? 60) * 60_000;
+}
+
+/**
+ * The chat rows sent as history: the newest 80 — or, for an automatic fix,
+ * only its own request and steps (earlier work is in the work log and the
+ * task notes): a crash fix needs the crash, not the owner's last chat, and a
+ * small request fits every AI, the free ones too. `requestAt` = the index of
+ * the current request in `stored` (oldest first).
+ */
+export function historyRows<T extends { kind: string }>(stored: T[], requestAt: number): T[] {
+  const request = stored[requestAt];
+  if (request && AUTOMATED_KINDS.has(request.kind)) return stored.slice(requestAt).slice(-80);
+  return stored.slice(-80);
 }
 
 /**

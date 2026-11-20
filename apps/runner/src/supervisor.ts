@@ -33,7 +33,7 @@ import { DISCORD_CONNECTED } from "./agent/discord.js";
 import { HostRunner, type HostRef, type HostRunnerOptions, type RunProject } from "./hostRunner.js";
 import { IncidentLedger, classifyExit, parseReport, reportToTail, type CrashReport, type Incident } from "./incidents.js";
 import { lastException } from "./agent/autoFix.js";
-import { isStartCommand, startCommand } from "@kojyai/shared/projects";
+import { isStartCommand, saveKnownGood, startCommand } from "@kojyai/shared/projects";
 
 const log = createLogger("supervisor");
 
@@ -51,6 +51,11 @@ const RESTART_DELAYS_S = [5, 15, 30, 60];
 /** A start that failed before the bot ran (pip, network, database): try again, slower. */
 const START_RETRY_DELAYS_S = [30, 120, 600, 1800];
 const HEALTHY_RUN_MS = 120_000;
+/**
+ * A run this long without a crash or an error keeps its code as "the last
+ * version that ran fine" — what a crash fix compares the code with.
+ */
+const KNOWN_GOOD_AFTER_MS = Number(process.env.KNOWN_GOOD_AFTER_MS ?? 10 * 60_000);
 /**
  * Short runs in a row after which a bot stops being restarted: it's in a
  * crash loop (about 8 minutes of restarts with the delays above), and
@@ -125,6 +130,8 @@ export class Supervisor {
   private holds = new Map<string, string>();
   /** Set by the coder AI: whether it's fixing (or about to fix) this bot's crash right now. */
   fixingNow?: (uuid: string) => boolean;
+  /** Runs that may still turn out fine: when the timer ends with no crash or error, their code is kept as known good. */
+  private goodTimers = new Map<string, NodeJS.Timeout>();
   /** A Discord bot connected to Discord (once per start; see agent/discord.ts). */
   onDiscordConnected?: (uuid: string) => void;
 
@@ -150,6 +157,7 @@ export class Supervisor {
       started: (uuid, project) => {
         this.startFailures.delete(uuid);
         this.tails.set(uuid, this.tails.get(uuid) ?? []);
+        this.goodLater(uuid);
         this.record(project, "start");
         void this.db.update(botProjects).set({ lastStartedAt: new Date() }).where(eq(botProjects.uuid, uuid));
       },
@@ -260,6 +268,7 @@ export class Supervisor {
 
       child.once("spawn", () => {
         this.startFailures.delete(uuid);
+        this.goodLater(uuid);
         this.record(run.project, "start");
         void this.setStatus(uuid, "running", null);
         void this.db.update(botProjects).set({ lastStartedAt: new Date() }).where(eq(botProjects.uuid, uuid));
@@ -386,6 +395,7 @@ export class Supervisor {
 
   private async stop(uuid: string): Promise<void> {
     this.holds.delete(uuid);
+    this.notGood(uuid);
     this.clearRestart(uuid);
     this.crashStreak.delete(uuid);
     this.startFailures.delete(uuid);
@@ -516,6 +526,7 @@ export class Supervisor {
    */
   private async crashed(uuid: string, project: RunProject, ranFor: number, how: string): Promise<number | null> {
     this.record(project, "crash");
+    this.notGood(uuid);
     // Every exit is recorded, whatever happens next (a pause, the owner having stopped it).
     const report = this.reports.get(uuid) ?? null;
     this.reports.delete(uuid);
@@ -601,6 +612,27 @@ export class Supervisor {
     if (p?.desiredState === "running") await this.start(uuid, reason);
   }
 
+  /** Keeps this run's code as known good if it runs KNOWN_GOOD_AFTER_MS without a crash or an error. */
+  private goodLater(uuid: string): void {
+    this.notGood(uuid);
+    const timer = setTimeout(() => {
+      this.goodTimers.delete(uuid);
+      if (!this.isRunning(uuid)) return;
+      try {
+        if (saveKnownGood(uuid)) log.info({ uuid }, "Kept the code as the last version that ran fine");
+      } catch (err) {
+        log.warn({ err, uuid }, "Could not keep the code that ran fine");
+      }
+    }, KNOWN_GOOD_AFTER_MS);
+    timer.unref();
+    this.goodTimers.set(uuid, timer);
+  }
+
+  private notGood(uuid: string): void {
+    const t = this.goodTimers.get(uuid);
+    if (t) { clearTimeout(t); this.goodTimers.delete(uuid); }
+  }
+
   /** A report from the launcher: a crash (kept for when the exit comes) or an error the bot survived. */
   private onReport(uuid: string, project: RunProject, raw: unknown): void {
     const report = parseReport(raw);
@@ -611,6 +643,7 @@ export class Supervisor {
 
   /** The bot survived an error (in one of its handlers): recorded, and Kojy fixes it — the bot keeps running. */
   private async botError(uuid: string, project: RunProject, report: CrashReport): Promise<void> {
+    this.notGood(uuid);
     const incident = await this.incidents.record(project.id, classifyExit({ tail: this.tail(uuid), how: "kept running", ranForMs: 0, report }), "kept running", report, report.times ?? 1);
     // Shown on the bot's page until it next (re)starts.
     const where = `${report.event?.handler ?? "a handler"}${report.event?.command ? ` (the ${report.event.command} command)` : ""}`;

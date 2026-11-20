@@ -29,6 +29,22 @@ export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
   git: "using git (pushing or pulling)",
 };
 
+/**
+ * The tools an automatic run is given: what finding and fixing a bug in the
+ * code takes. The rest are refused in such a run anyway (or don't help fix
+ * code), and every tool's description goes with every AI request — fewer
+ * tools, smaller requests, more AI keys that can take them.
+ */
+export const AUTOMATIC_RUN_TOOLS = new Set([
+  "list_files", "read_file", "search_code", "edit_file", "write_file", "check_code", "test_in_room", "run_saved_tests",
+  "get_logs", "bot_control", "find_env_vars", "find_emotes", "discord_check", "work_log", "search_chat",
+]);
+
+/** The tool specs an automatic run gets. */
+export function automaticTools<T extends { function: { name: string } }>(specs: T[]): T[] {
+  return specs.filter((t) => AUTOMATIC_RUN_TOOLS.has(t.function.name));
+}
+
 /** Kinds of code an automatic fix may not add (counted before and after the change). */
 const RISKS: { label: string; re: RegExp }[] = [
   { label: "internet access", re: /\b(?:requests|urllib3?|httpx|aiohttp|http\.client|socket|websockets?|ftplib|smtplib|telnetlib|paramiko|open_connection|create_connection|start_server|sock_connect)\b/g },

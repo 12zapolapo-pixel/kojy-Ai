@@ -167,7 +167,7 @@ describe("the agent and the checks", () => {
     const agent = new Agent(db as never, supervisor as never, null);
     const run = vi.spyOn(agent, "run").mockImplementation(async () => {
       files.writeProjectFile(uuid, "bot.py", "after the fix\n"); // Kojy's edit
-      rows.agent_work_log = [{ status: "done", summary: "Used .get() so a new visitor has 0 coins.", files: [{ path: "bot.py", change: "edited" }] }];
+      rows.agent_work_log = [{ status: "done", summary: "Used .get() so a new visitor has 0 coins.", files: [{ path: "bot.py", change: "edited" }], actions: ["read_file", "edit_file", "check_code"] }];
       return { outcome: "done", ended: null, aiUnavailable: false };
     });
     vi.spyOn(agent, "liveCheck").mockResolvedValue({ ok: true, why: "the bot is back in its room with the fix" });

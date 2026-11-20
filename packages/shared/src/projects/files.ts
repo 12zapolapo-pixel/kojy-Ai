@@ -20,6 +20,8 @@ import { lineDiff, type FileDiff } from "./diff.js";
 export const PROJECTS_DIR = path.resolve(process.env.PROJECTS_DIR ?? "./data/projects");
 export const LOG_DIR = path.join(PROJECTS_DIR, ".logs");
 const SNAPSHOT_DIR = path.join(PROJECTS_DIR, ".snapshots");
+/** The code each bot last ran fine with (see saveKnownGood) — apart from Undo's snapshots. */
+const KNOWN_GOOD_DIR = path.join(PROJECTS_DIR, ".known-good");
 const MAX_SNAPSHOTS = 30;
 
 /** Never shown, uploaded or zipped. */
@@ -334,6 +336,70 @@ export function compareSnapshot(uuid: string, id: string, maxFiles = 30): { file
 
 export function removeSnapshots(uuid: string): void {
   rmSync(path.join(SNAPSHOT_DIR, uuid), { recursive: true, force: true });
+  rmSync(path.join(KNOWN_GOOD_DIR, `${uuid}.zip`), { force: true });
+}
+
+// ── the last code the bot ran fine with ─────────────────────────────────────
+
+/**
+ * Keeps the bot's code as "the last version that ran fine" (one per bot,
+ * not in Undo). Called after a run went well for a while; does nothing when
+ * that code is already the one kept. Returns whether it saved.
+ */
+export function saveKnownGood(uuid: string): boolean {
+  const fingerprint = codeFingerprint(uuid);
+  if (!Object.keys(fingerprint).length) return false;
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  const kept = knownGood(uuid);
+  if (kept && JSON.stringify(kept.fingerprint) === JSON.stringify(fingerprint)) return false;
+  const root = projectDir(uuid);
+  const entries: Record<string, Uint8Array> = {};
+  for (const rel of Object.keys(fingerprint)) entries[rel] = readFileSync(path.join(root, rel));
+  entries[".kojy-known-good.json"] = new TextEncoder().encode(JSON.stringify({ savedAt: Date.now(), fingerprint }));
+  mkdirSync(KNOWN_GOOD_DIR, { recursive: true });
+  writeFileSync(file, zipSync(entries, { level: 6 }));
+  return true;
+}
+
+/** When the last version that ran fine was kept, and its fingerprint; null when there's none. */
+export function knownGood(uuid: string): { savedAt: number; fingerprint: Record<string, string> } | null {
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  if (!existsSync(file)) return null;
+  try {
+    const meta = unzipSync(readFileSync(file), { filter: (f) => f.name === ".kojy-known-good.json" })[".kojy-known-good.json"];
+    return meta ? JSON.parse(strFromU8(meta)) as { savedAt: number; fingerprint: Record<string, string> } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What changed in the code since the last version that ran fine, file by
+ * file ("modified" with the diff from then to now, "added" = new since,
+ * "removed" = gone since). null when no such version was kept.
+ */
+export function changesSinceKnownGood(uuid: string, maxFiles = 30): { savedAt: number; files: FileDiff[]; more: number } | null {
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  if (!existsSync(file)) return null;
+  const then = unzipSync(readFileSync(file));
+  const meta = then[".kojy-known-good.json"];
+  delete then[".kojy-known-good.json"];
+  const savedAt = meta ? (JSON.parse(strFromU8(meta)) as { savedAt: number }).savedAt : 0;
+  const root = projectDir(uuid);
+  const now = codeFingerprint(uuid);
+  const text = (b: Uint8Array): string | null => (b.length > MAX_EDIT_BYTES || b.includes(0) ? null : strFromU8(b));
+  const out: FileDiff[] = [];
+  for (const rel of [...new Set([...Object.keys(now), ...Object.keys(then)])].sort()) {
+    const old = then[rel];
+    if (!(rel in now)) { out.push({ path: rel, change: "removed", added: 0, removed: old ? (text(old) ?? "").split("\n").length : 0, diff: null }); continue; }
+    const current = readFileSync(path.join(root, rel));
+    if (!old) { out.push({ path: rel, change: "added", added: (text(current) ?? "").split("\n").length, removed: 0, diff: null }); continue; }
+    if (Buffer.from(current).equals(Buffer.from(old))) continue;
+    const a = text(old), b = text(current);
+    const d = a !== null && b !== null ? lineDiff(a, b, 2, 4000) : null;
+    out.push({ path: rel, change: "modified", added: d?.added ?? 0, removed: d?.removed ?? 0, diff: d?.text ?? null });
+  }
+  return { savedAt, files: out.slice(0, maxFiles), more: Math.max(0, out.length - maxFiles) };
 }
 
 /**
