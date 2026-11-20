@@ -15,18 +15,19 @@
  * only the owner has.
  */
 
-import { and, desc, eq, inArray, lt, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, notInArray, or, sql } from "drizzle-orm";
 import type { Database } from "@kojyai/db";
 import { botIncidents, type IncidentData } from "@kojyai/db/schema";
 import { createLogger } from "./logger.js";
 import { crashExcerpt, crashLocation, crashSignature, isNetworkFailure, lastException, normalizeError } from "./agent/autoFix.js";
 import { CONNECTED_PREFIX } from "./agent/botHealth.js";
+import { highriseMessage, ownersRefusal, refusalAdvice, refusalKind } from "./roomDoctor.js";
 
 const log = createLogger("incidents");
 
 export type IncidentCategory =
   | "code" | "frozen" | "not_in_room" | "cannot_connect" | "silent" | "network" | "highrise_refused"
-  | "missing_secret" | "missing_package" | "out_of_memory" | "unknown";
+  | "missing_secret" | "missing_package" | "out_of_memory" | "host_problem" | "unknown";
 export type IncidentPhase = "import" | "startup" | "in_room" | "unknown";
 export type IncidentState = "open" | "queued" | "fixing" | "waiting_for_ai" | "watching" | "fixed" | "ignored" | "needs_owner";
 export type Incident = typeof botIncidents.$inferSelect;
@@ -37,6 +38,13 @@ export const WORKING_STATES: IncidentState[] = ["queued", "fixing", "waiting_for
 export const FIXABLE = new Set<IncidentCategory>(["code", "frozen"]);
 /** The bot not being in its room (whatever the reason): closed by itself once it's back in. */
 export const ROOM_TROUBLE: IncidentCategory[] = ["not_in_room", "cannot_connect", "silent", "network", "highrise_refused"];
+/**
+ * Problems a good run settles: the bot ran fine for a while after them, so
+ * the secret, package, host or room problem was sorted out (by the owner, a
+ * fresh start, or Highrise coming back). A bug in the code isn't: a rare
+ * input can still hit it.
+ */
+export const SETTLED_BY_RUNNING: IncidentCategory[] = [...ROOM_TROUBLE, "missing_secret", "missing_package", "host_problem", "out_of_memory", "unknown"];
 
 export interface ExitInfo {
   /** The bot's last console lines (stdout and stderr). */
@@ -175,6 +183,24 @@ function where(location: string): string {
 }
 
 /**
+ * Highrise refused the bot. Its own words say whether only the owner can sort
+ * it out (the token, the room, the bot's access to it: "needs you" right
+ * away) or not — then the supervisor finds out (roomDoctor) before anyone is
+ * asked for anything.
+ */
+function refusal(line: string, base: { phase: IncidentPhase; fatal: boolean }): Classified {
+  const said = highriseMessage(line) || "no reason given";
+  const kind = refusalKind(said);
+  return {
+    ...base, signature: `refused:${normalizeError(said)}`, category: "highrise_refused", example: clip(line, 240),
+    summary: clip(`Highrise refused the bot: ${said}`, 300),
+    ...(ownersRefusal(kind)
+      ? { state: "needs_owner" as const, note: refusalAdvice(kind, said) }
+      : { state: "open" as const, note: kind === "busy" ? `Highrise asked the bot to wait (“${said}”) — it's started again a little later.` : `Highrise refused the bot (“${said}”); KojyAI is finding out why and keeps starting it again.` }),
+  };
+}
+
+/**
  * What kind of problem an exit was (or an error the bot survived): from the
  * launcher's report when there is one, else from the console lines it left.
  */
@@ -187,16 +213,9 @@ export function classifyExit(info: ExitInfo): Classified {
         summary: clip(`Highrise ended the session${said ? ` (${said})` : ""}`, 300),
         state: "ignored", note: "Highrise closed the bot's session (it does that now and then) — not a bug in the code. The bot was started again." };
     }
-    return { signature: `refused:${said || "no reason given"}`, category: "highrise_refused", phase: "startup", fatal: true, example: clip(r.line ?? "", 240),
-      summary: clip(`Highrise refused the bot${said ? `: ${said}` : ""}`, 300),
-      state: "needs_owner", note: "Highrise refused the bot. Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets." };
+    return refusal(r.line ?? "", { phase: "startup", fatal: true });
   }
-  if (r?.type === "ConnectRefused") {
-    const said = r.line || "no answer given";
-    return { signature: `refused:${normalizeError(said)}`, category: "highrise_refused", phase: "startup", fatal: true, example: clip(said, 240),
-      summary: clip(`Highrise refused the bot (${said})`, 300),
-      state: "needs_owner", note: `Highrise refused the bot's connection (${said}). Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets, and that the bot is still added to that room.` };
-  }
+  if (r?.type === "ConnectRefused") return refusal(r.line || "no answer given", { phase: "startup", fatal: true });
   if (r?.type === "NeverConnected" && !r.frames?.length) {
     // Not stuck in the bot's own code (that would be a freeze, below): it couldn't connect.
     const err = r.connect_error ?? "";
@@ -268,11 +287,7 @@ export function classifyExit(info: ExitInfo): Classified {
       state: "open", note: "It was killed for using too much memory." };
   }
   const refused = [...tail].reverse().find((l) => l.startsWith("ERROR: ") && l !== "ERROR: reconnecting...");
-  if (refused && !connected) {
-    return { ...base, signature: `refused:${normalizeError(refused.replace(/ closing connection with ID: .*$/, ""))}`, category: "highrise_refused",
-      summary: clip(normalizeError(refused), 300), example: clip(refused, 240),
-      state: "needs_owner", note: "Highrise refused the bot. Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets." };
-  }
+  if (refused && !connected) return refusal(refused, base);
   const how = info.how.replace(/\d+/g, "N");
   return { ...base, signature: `exit:${how}`, category: "unknown", summary: `Stopped without an error message (${info.how})`, example: info.how,
     state: "open", note: `It stopped without printing an error (${info.how}), so there's nothing in the code to go on yet. It was started again.` };
@@ -343,8 +358,10 @@ export class IncidentLedger {
    */
   async resolveRoomTrouble(projectId: number, at = new Date()): Promise<void> {
     try {
+      // HIGHRISE_ROOM_ID and HIGHRISE_BOT_TOKEN missing is settled too: it couldn't have got in without them.
       const rows = await this.db.select({ id: botIncidents.id, data: botIncidents.data }).from(botIncidents)
-        .where(and(eq(botIncidents.projectId, projectId), inArray(botIncidents.category, ROOM_TROUBLE), inArray(botIncidents.state, ["open", "needs_owner"])));
+        .where(and(eq(botIncidents.projectId, projectId), inArray(botIncidents.state, ["open", "needs_owner"]),
+          or(inArray(botIncidents.category, ROOM_TROUBLE), eq(botIncidents.signature, "config:room-and-token"))));
       for (const row of rows) {
         const data: IncidentData = { ...(row.data ?? {}) };
         delete data.alertedAt;
@@ -355,6 +372,29 @@ export class IncidentLedger {
       log.warn({ err, projectId }, "Could not close the room problems");
     }
   }
+  /**
+   * The bot has run fine since `since`: its problems that a good run settles
+   * (SETTLED_BY_RUNNING, ones that stopped it and haven't happened since)
+   * are closed, so "needs you" never stays up after it was sorted out.
+   */
+  async resolveAfterGoodRun(projectId: number, since: Date): Promise<number> {
+    try {
+      const rows = await this.db.select({ id: botIncidents.id, data: botIncidents.data }).from(botIncidents)
+        .where(and(eq(botIncidents.projectId, projectId), inArray(botIncidents.category, SETTLED_BY_RUNNING), inArray(botIncidents.state, ["open", "needs_owner"]),
+          eq(botIncidents.fatal, true), lt(botIncidents.lastSeenAt, since)));
+      for (const row of rows) {
+        const data: IncidentData = { ...(row.data ?? {}) };
+        delete data.alertedAt;
+        pushTimeline(data, "Ran fine again");
+        await this.db.update(botIncidents).set({ state: "fixed", note: `Sorted out — the bot has run fine since ${since.toISOString().slice(11, 16)} UTC.`, data }).where(eq(botIncidents.id, row.id));
+      }
+      return rows.length;
+    } catch (err) {
+      log.warn({ err, projectId }, "Could not close the problems a good run settled");
+      return 0;
+    }
+  }
+
 
   /** Moves an incident along; `what` goes on its timeline. No-op without an id. */
   async update(id: number | null | undefined, patch: IncidentPatch, what?: string): Promise<void> {

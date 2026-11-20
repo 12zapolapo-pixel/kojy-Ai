@@ -58,9 +58,9 @@ describe("crash reports", () => {
     expect(withCause.join("\n")).toMatch(/ValueError[\s\S]*During handling of the above exception[\s\S]*KeyError: 'amy'/);
   });
 
-  it("Highrise refusing the session is the owner's to check; Highrise closing a session it had accepted is not a bug", () => {
+  it("Highrise refusing the session over the token or room is the owner's to check; Highrise closing a session it had accepted is not a bug", () => {
     const refused = classifyExit({ tail: [], how: "code 5", ranForMs: 2000, report: { k: "crash", fatal: true, type: "SessionEnded", line: "ERROR: Invalid room id or api token closing connection with ID: x", connected: false, frames: [] } });
-    expect(refused).toMatchObject({ category: "highrise_refused", state: "needs_owner", signature: "refused:ERROR: Invalid room id or api token" });
+    expect(refused).toMatchObject({ category: "highrise_refused", state: "needs_owner", signature: "refused:Invalid room id or api token" });
     const ended = classifyExit({ tail: [], how: "code 5", ranForMs: 600_000, report: { k: "crash", fatal: true, type: "SessionEnded", line: "Websocket error, exiting.", connected: true, frames: [] } });
     expect(ended).toMatchObject({ category: "network", state: "ignored" });
   });

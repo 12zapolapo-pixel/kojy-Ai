@@ -55,6 +55,8 @@ const LAUNCHER_FILE = "kojy_launcher.py";
 const REQUIREMENTS_FILE = ".kojy/requirements.txt";
 const ENV_FILE = ".kojy/env.json";
 const KOJY_FILES = new Set([START_FILE, LAUNCHER_FILE, REQUIREMENTS_FILE, ENV_FILE]);
+/** A suspended server (the host's billing or rules) is tried again this often: the bot starts by itself once it's back. */
+const SUSPENDED_RETRY_S = 1800;
 /** Marks room activity in a host's console (see launcher.py). */
 export const ACTIVITY_PREFIX = "[kojy:activity] ";
 const ACTIVITY_KINDS = new Set(["chat", "whisper", "reply", "join", "leave", "tip", "emote"]);
@@ -84,6 +86,8 @@ export interface HostHooks {
   roomRights(uuid: string, project: RunProject, line: string): void;
   /** A crash report, an error the bot survived or a room check, from the launcher (see launcher.py). */
   report(uuid: string, project: RunProject, raw: unknown): void;
+  /** Something only the owner can sort out with their bot host (a suspended server): kept as a problem, the owner told once. */
+  ownerProblem(uuid: string, project: RunProject, summary: string, note: string): void;
 }
 
 export interface HostRunnerOptions {
@@ -207,7 +211,7 @@ export class HostRunner {
    * Starts the bot on its host. Already running there (KojyAI restarted, or
    * the host restarted it after a crash): just watch it again.
    */
-  async start(row: ProjectRow, reason?: string): Promise<void> {
+  async start(row: ProjectRow, reason?: string, fresh = false): Promise<void> {
     const uuid = row.uuid;
     if (this.busy.has(uuid)) return;
     this.busy.add(uuid);
@@ -218,8 +222,12 @@ export class HostRunner {
       s.memoryMb = server.memoryMb;
       s.node = server.node;
       if (server.suspended) {
-        this.hooks.console(uuid, "system", `✖ ${s.label} is suspended by the host, so the bot can't start there.`);
-        return await this.hooks.setStatus(uuid, "error", "The bot host suspended this server.");
+        // Usually the host's billing or rules: only the owner can sort that out — and the bot starts by itself once it's back.
+        this.hooks.console(uuid, "system", `✖ ${s.label} is suspended by the host, so the bot can't start there — KojyAI tries again every 30 min.`);
+        this.hooks.ownerProblem(uuid, s.project, "The bot host suspended its server",
+          `${s.client.provider.label} suspended the server this bot runs on (${s.label}), usually over billing or the host's rules — only you can sort that out with the host, or move the bot to KojyAI's server in its Settings → Where it runs. KojyAI starts it by itself once the server is back.`);
+        await this.hooks.setStatus(uuid, "error", "The bot host suspended this server — KojyAI starts it once it's back.");
+        return this.hooks.later(uuid, SUSPENDED_RETRY_S);
       }
       if (server.installing || server.transferring) {
         await this.hooks.setStatus(uuid, "installing", `${s.client.provider.label} is still setting up the server…`);
@@ -239,7 +247,7 @@ export class HostRunner {
       }
 
       await this.hooks.setStatus(uuid, "installing", `Uploading the bot to ${s.client.provider.label}…`);
-      const sent = await this.upload(s, row);
+      const sent = await this.upload(s, row, fresh);
       if (sent) this.hooks.console(uuid, "system", `Uploaded ${sent} changed file(s) to ${s.label}.`);
       const startup = await s.client.startup(s.ref.server);
       const variable = pythonFileVariable(startup);
@@ -383,8 +391,10 @@ export class HostRunner {
   // ── files ──────────────────────────────────────────────────────────────────
 
   /** Uploads what changed since the last start; returns how many files went up (settings not counted). */
-  private async upload(s: Session, row: ProjectRow): Promise<number> {
-    const prev: HostSync | null = row.hostSync && row.hostSync.server === s.ref.server ? row.hostSync : null;
+  private async upload(s: Session, row: ProjectRow, fresh = false): Promise<number> {
+    const synced: HostSync | null = row.hostSync && row.hostSync.server === s.ref.server ? row.hostSync : null;
+    // A fresh start sends every file again (the data on the host stays: it's newer there) and installs the packages again.
+    const prev: HostSync | null = synced && fresh ? { ...synced, files: {} } : synced;
     const dir = projectDir(row.uuid);
     const files: Record<string, string> = {};
     const send: [string, Uint8Array | string][] = [];
@@ -418,6 +428,7 @@ export class HostRunner {
       KOJY_ENTRY: row.entrypoint, KOJY_ACTIVITY: "stdout", PYTHONUNBUFFERED: "1", PYTHONDONTWRITEBYTECODE: "1",
       // Highrise was seen listing this bot in its room: the launcher may count it missing from that list.
       KOJY_EXPECT_LISTED: row.roomListsBot ? "1" : "0",
+      ...(fresh ? { KOJY_FRESH_INSTALL: String(Date.now()) } : {}),
       ...(process.env.HR_BOTAPI_URL ? { HR_BOTAPI_URL: process.env.HR_BOTAPI_URL } : {}),
     };
     await s.client.writeFile(s.ref.server, ENV_FILE, JSON.stringify(env));

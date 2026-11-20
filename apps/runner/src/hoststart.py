@@ -11,6 +11,7 @@ and the bot's own code next to them. Packages are installed into
 from __future__ import annotations
 
 import hashlib
+import shutil
 import json
 import os
 import runpy
@@ -46,12 +47,23 @@ def install_packages() -> None:
     with open(requirements, "rb") as f:
         wanted = hashlib.sha256(f.read() + sys.version.encode()).hexdigest()
     marker = os.path.join(KOJY, "installed")
+    # KojyAI asked for a fresh start (the bot kept going quiet or couldn't connect): install everything
+    # again — once per request (env.json stays there if the host restarts the server by itself).
+    fresh_id = os.environ.get("KOJY_FRESH_INSTALL", "")
+    fresh_done = os.path.join(KOJY, "fresh")
+    try:
+        with open(fresh_done, encoding="utf-8") as f:
+            fresh = bool(fresh_id) and f.read().strip() != fresh_id
+    except FileNotFoundError:
+        fresh = bool(fresh_id)
     try:
         with open(marker, encoding="utf-8") as f:
-            if f.read().strip() == wanted and os.path.isdir(PACKAGES):
+            if f.read().strip() == wanted and os.path.isdir(PACKAGES) and not fresh:
                 return
     except FileNotFoundError:
         pass
+    if fresh:
+        shutil.rmtree(PACKAGES, ignore_errors=True)
     say("Installing packages (first run or requirements.txt changed)…")
     try:
         # A stuck install (the host's network) would leave the server "running"
@@ -70,6 +82,9 @@ def install_packages() -> None:
         raise SystemExit(2)
     with open(marker, "w", encoding="utf-8") as f:
         f.write(wanted)
+    if fresh:
+        with open(fresh_done, "w", encoding="utf-8") as f:
+            f.write(fresh_id)
 
 
 def main() -> None:

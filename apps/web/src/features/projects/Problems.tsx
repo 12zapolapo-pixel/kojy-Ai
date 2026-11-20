@@ -33,6 +33,7 @@ const CATEGORY: Record<string, string> = {
   missing_secret: "Missing secret",
   missing_package: "Missing package",
   out_of_memory: "Out of memory",
+  host_problem: "Bot host problem",
   unknown: "Stopped",
 };
 

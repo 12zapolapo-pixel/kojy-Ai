@@ -111,12 +111,30 @@ describe("incident ledger", () => {
     expect((await sqlc.query("SELECT state FROM bot_incidents WHERE id = $1", [codeBug.id])).rows[0].state).toBe("open");
   });
 
+  test("a good run closes what it settles (a secret added, a host back) — not a bug in the code, and not what happened during it", async () => {
+    const ledger = new IncidentLedger(db);
+    const third = other + 2;
+    const secret = (await ledger.record(third, classifyExit({ tail: ["[kojy] Add HIGHRISE_ROOM_ID and HIGHRISE_BOT_TOKEN in the project's Secrets."], how: "code 2", ranForMs: 300 }), "code 2"))!;
+    const host = (await ledger.record(third, { signature: "host:suspended", category: "host_problem", phase: "startup", fatal: true, summary: "The bot host suspended its server", example: "", state: "needs_owner", note: "x" }, "host"))!;
+    const bugRow = (await ledger.record(third, crash("amy"), "code 1"))!;
+    await sqlc.query("UPDATE bot_incidents SET last_seen_at = now() - interval '20 minutes' WHERE project_id = $1", [third]);
+    const during = (await ledger.record(third, { signature: "exit:code N", category: "unknown", phase: "in_room", fatal: true, summary: "Stopped", example: "", state: "open", note: "" }, "code 9"))!;
+    expect(await ledger.resolveAfterGoodRun(third, new Date(Date.now() - 10 * 60_000))).toBe(2);
+    const state = async (id: number) => (await sqlc.query("SELECT state, note FROM bot_incidents WHERE id = $1", [id])).rows[0];
+    expect(await state(secret.id)).toMatchObject({ state: "fixed", note: expect.stringMatching(/^Sorted out — the bot has run fine since \d\d:\d\d UTC\.$/) });
+    expect((await state(host.id)).state).toBe("fixed");
+    expect((await state(bugRow.id)).state).toBe("open"); // a rare input can still hit a code bug
+    expect((await state(during.id)).state).toBe("open"); // it happened during the "good" run
+    await sqlc.query("DELETE FROM bot_incidents WHERE project_id = $1", [third]);
+  });
+
   test("Kojy's get_logs lists them newest first, without the ignored ones", async () => {
     const ledger = new IncidentLedger(db);
     const text = describeIncidents(await ledger.list(project), Date.now());
     expect(text).toMatch(/^- \[open\] ×\d+ KeyError: '…' in on_chat \(highrise_bot\/bot\.py\)/);
     const others = describeIncidents(await ledger.list(other), Date.now());
     expect(others).not.toContain("network");
-    expect(others).toContain("[needs_owner]");
+    // Back in its room settled the missing HIGHRISE_* secrets too: it couldn't have got in without them.
+    expect(others).toMatch(/- \[fixed\] ×1 HIGHRISE_ROOM_ID or HIGHRISE_BOT_TOKEN is missing .*Back in its room since/);
   });
 });

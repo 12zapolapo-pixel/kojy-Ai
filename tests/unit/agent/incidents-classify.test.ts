@@ -84,10 +84,10 @@ describe("classifyExit", () => {
     expect(exit(["[kojy] Watchdog: the bot didn't get into its room within 300s of starting — restarting the bot."], "code 4", 300_000)).toMatchObject({ category: "cannot_connect", signature: "never-connected" });
   });
 
-  it("Highrise refusing the connection (the launcher stops at once) is the owner's to check, with Highrise's answer", () => {
+  it("Highrise refusing the connection at the HTTP level isn't settled yet (it can be the bot host's network): KojyAI finds out", () => {
     const c = classifyExit({ tail: [], how: "code 5", ranForMs: 1500, report: { k: "crash", fatal: true, type: "ConnectRefused", line: "Highrise answered HTTP 403 (Invalid response status)", frames: [], connected: false } });
-    expect(c).toMatchObject({ category: "highrise_refused", state: "needs_owner" });
-    expect(c.note).toMatch(/HTTP 403.*Check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID in its Secrets, and that the bot is still added to that room/);
+    expect(c).toMatchObject({ category: "highrise_refused", state: "open" });
+    expect(c.note).toMatch(/HTTP 403.*KojyAI is finding out why/);
   });
 
   it("never getting into the room: the network, a refusal, or the bot's own code hanging (a freeze Kojy fixes)", () => {
@@ -95,7 +95,7 @@ describe("classifyExit", () => {
     expect(classifyExit({ tail: [], how: "code 4", ranForMs: 300_000, report: report({ connect_error: "couldn't reach Highrise: ClientConnectorError: Cannot connect" }) }))
       .toMatchObject({ category: "cannot_connect", state: "open", signature: "never-connected" });
     expect(classifyExit({ tail: [], how: "code 4", ranForMs: 300_000, report: report({ connect_error: "Highrise answered HTTP 401 (Unauthorized)" }) }))
-      .toMatchObject({ category: "highrise_refused", state: "needs_owner" });
+      .toMatchObject({ category: "highrise_refused", state: "open" });
     const hang = classifyExit({ tail: [], how: "code 4", ranForMs: 300_000, report: report({
       line: "BotFrozenError: the bot didn't get into its room within 300s of starting", frames: [{ file: "bot.py", line: 9, func: "load_shop", code: "time.sleep(3600)" }],
     }) });
@@ -108,10 +108,17 @@ describe("classifyExit", () => {
     expect(exit([], "SIGKILL").signature).toBe("exit:out_of_memory");
   });
 
-  it("Highrise refusing the session (the SDK prints ERROR and exits 0) is the owner's to check", () => {
-    const c = exit(["ERROR: Invalid room id or api token closing connection with ID: abc-123"], "code 0", 2000);
-    expect(c).toMatchObject({ category: "highrise_refused", state: "needs_owner" });
-    expect(c.note).toMatch(/HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID/);
+  it("Highrise refusing the session in its own words: the token, the room or the bot's access are the owner's; busy is waited out", () => {
+    // What Highrise really sends for a bad token (checked against the live API), as the SDK prints it.
+    const token = exit(["ERROR: Error(message='API token not found', do_not_reconnect=False, rid=None)"], "code 0", 2000);
+    expect(token).toMatchObject({ category: "highrise_refused", state: "needs_owner", summary: "Highrise refused the bot: API token not found" });
+    expect(token.note).toMatch(/doesn't accept the bot's token \(Highrise said: “API token not found”\).*HIGHRISE_BOT_TOKEN/);
+    const either = exit(["ERROR: Invalid room id or api token closing connection with ID: abc-123"], "code 0", 2000);
+    expect(either).toMatchObject({ category: "highrise_refused", state: "needs_owner" });
+    expect(either.note).toMatch(/HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID/);
+    expect(exit(["ERROR: Error(message='Bot is banned from this room', do_not_reconnect=True, rid=None)"], "code 0").note).toMatch(/won't let the bot into that room/);
+    expect(exit(["ERROR: Error(message='Rate limit exceeded, try again later', do_not_reconnect=False, rid=None)"], "code 0")).toMatchObject({ state: "open", note: expect.stringMatching(/asked the bot to wait/) });
+    expect(exit(["ERROR: Error(message='Something new', do_not_reconnect=False, rid=None)"], "code 0")).toMatchObject({ state: "open", note: expect.stringMatching(/finding out why/) });
     // Reconnect noise from a bot that was in the room isn't a refusal.
     expect(exit(["[kojy] Connected to Highrise", "ERROR: reconnecting..."], "code 0").category).toBe("unknown");
   });

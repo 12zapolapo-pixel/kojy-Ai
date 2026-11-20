@@ -6,7 +6,7 @@
  * lines when there's no fd 3 (KOJY_ACTIVITY=stdout).
  */
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -107,6 +107,24 @@ describe("the starter on the bot host", () => {
     expect(r.out).toContain("[kojy] Installing packages (first run or requirements.txt changed)…");
     expect(r.out).toMatch(/\[kojy\] Installing packages failed \(pip exit \d+\)\./);
   }, 70_000);
+});
+
+describe("a fresh start asked by KojyAI", () => {
+  test("installs the packages again from scratch — once per request, even if the host restarts the server by itself", async () => {
+    const dir = server("fresh", { KOJY_ENTRY: "bot:MyBot", HIGHRISE_BOT_TOKEN: "x" }, "\n");
+    const installs = async (settings: Record<string, string>) => {
+      writeFileSync(path.join(dir, ".kojy", "env.json"), JSON.stringify({ KOJY_ENTRY: "bot:MyBot", HIGHRISE_BOT_TOKEN: "x", ...settings }));
+      const r = await run(dir, "kojy_start.py", {}, 60_000);
+      expect(r.code).toBe(0);
+      return r.out.includes("[kojy] Installing packages");
+    };
+    expect(await installs({})).toBe(true); // first run
+    expect(await installs({})).toBe(false); // nothing changed
+    writeFileSync(path.join(dir, ".kojy", "packages", "half-installed.txt"), "left over");
+    expect(await installs({ KOJY_FRESH_INSTALL: "1700000000000" })).toBe(true);
+    expect(existsSync(path.join(dir, ".kojy", "packages", "half-installed.txt"))).toBe(false);
+    expect(await installs({ KOJY_FRESH_INSTALL: "1700000000000" })).toBe(false); // the same request again: already done
+  }, 120_000);
 });
 
 describe("a package install that hangs", () => {

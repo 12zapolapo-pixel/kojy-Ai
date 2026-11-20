@@ -144,35 +144,116 @@ describe("the supervisor and the room", () => {
     return { sup, s: sup as unknown as Internals, record, update, resolve };
   }
 
-  it("bots restarted every few minutes because they can't get into their room: the owner is told what to check — once", async () => {
+  const SECRETS = { HIGHRISE_ROOM_ID: "room-1", HIGHRISE_BOT_TOKEN: "token-1" };
+  const needsOwner = (update: ReturnType<typeof make>["update"]) => update.mock.calls.filter(([, patch]) => (patch as { state?: string }).state === "needs_owner");
+  const notes = (update: ReturnType<typeof make>["update"]) => update.mock.calls.map(([, patch]) => String((patch as { note?: string }).note ?? ""));
+
+  it("Highrise saying the token is wrong is the owner's to fix: told exactly that — once — and tried every 30 min meanwhile", async () => {
     projectRows = [{ desiredState: "running", restartCount: 0 }];
-    const { s, record, update } = make();
-    record.mockResolvedValue(notInRoom() as never);
-    // Each run lasted six minutes (the watchdog's limit): "healthy" for the crash streak, never in the room.
-    await s.onExit("u1", run(6 * 60_000), 4, null);
-    expect(update.mock.calls.some(([, patch]) => (patch as { state?: string }).state === "needs_owner")).toBe(false);
-    await s.onExit("u1", run(6 * 60_000), 4, null);
-    const escalated = update.mock.calls.find(([, patch]) => (patch as { state?: string }).state === "needs_owner")!;
-    expect(String((escalated[1] as { note: string }).note)).toMatch(/^2 runs in a row ended without the bot in its room \(wasn't in its room \(the bot hasn't been connected to Highrise for 301s\)\)\. If other bots are fine, check HIGHRISE_BOT_TOKEN and HIGHRISE_ROOM_ID/);
+    const { sup, s, record, update } = make();
+    const ask = vi.spyOn(sup, "askHighrise");
+    const refused = (alerted = false) => ({ ...notInRoom(alerted), category: "highrise_refused", signature: "refused:API token not found", summary: "Highrise refused the bot: API token not found",
+      example: "ERROR: Error(message='API token not found', do_not_reconnect=False, rid=None)" });
+    record.mockResolvedValue(refused() as never);
+    const delays: number[] = [];
+    vi.spyOn(s as unknown as { startLater(u: string, sec: number): void }, "startLater").mockImplementation((_u, sec) => { delays.push(sec); });
+    await s.onExit("u1", run(2000), 5, null);
+    await s.onExit("u1", run(2000), 5, null);
+    const [escalated] = needsOwner(update);
+    expect(String((escalated![1] as { note: string }).note)).toMatch(/^Highrise doesn't accept the bot's token \(Highrise said: “API token not found”\)\. Copy the bot's token again/);
     expect(update).toHaveBeenCalledWith(9, { alerted: true });
+    expect(ask).not.toHaveBeenCalled(); // Highrise's own words settled it
+    expect(delays.at(-1)).toBe(1800);
     // The third time: already told (kept on the incident), so not told again.
-    record.mockResolvedValue(notInRoom(true) as never);
+    record.mockResolvedValue(refused(true) as never);
     update.mockClear();
-    await s.onExit("u1", run(6 * 60_000), 4, null);
+    await s.onExit("u1", run(2000), 5, null);
     expect(update).not.toHaveBeenCalledWith(9, { alerted: true });
-    for (const t of s.restartTimers.values()) clearTimeout(t);
   });
 
-  it("Highrise refusing the bot again and again is tried less often, and never paused for good", async () => {
+  it("out of its room for an unclear reason: KojyAI asks Highrise itself — and only a refusal there goes to the owner", async () => {
     projectRows = [{ desiredState: "running", restartCount: 0 }];
-    const { s, record } = make();
-    record.mockResolvedValue({ ...notInRoom(true), category: "highrise_refused", note: "Highrise refused the bot's connection (HTTP 403)." } as never);
+    // Highrise refuses KojyAI too: that's its answer to this token and room.
+    let t = make();
+    vi.spyOn(t.sup, "secrets").mockResolvedValue(SECRETS);
+    const ask = vi.spyOn(t.sup, "askHighrise").mockResolvedValue({ kind: "refused", message: "Room not found", refusal: "room" });
+    t.record.mockResolvedValue(notInRoom() as never);
+    vi.spyOn(t.s as unknown as { startLater(u: string, sec: number): void }, "startLater").mockImplementation(() => undefined);
+    await t.s.onExit("u5", run(6 * 60_000), 4, null);
+    await t.s.onExit("u5", run(6 * 60_000), 4, null);
+    expect(ask).toHaveBeenCalledWith("room-1", "token-1");
+    expect(String((needsOwner(t.update)[0]![1] as { note: string }).note)).toMatch(/doesn't know the room in HIGHRISE_ROOM_ID.*KojyAI asked Highrise itself/);
+
+    // Highrise doesn't answer KojyAI either: it's away — nobody is asked for anything.
+    t = make();
+    vi.spyOn(t.sup, "secrets").mockResolvedValue(SECRETS);
+    vi.spyOn(t.sup, "askHighrise").mockResolvedValue({ kind: "unreachable", why: "Highrise didn't answer within 15s" });
+    t.record.mockResolvedValue(notInRoom() as never);
+    vi.spyOn(t.s as unknown as { startLater(u: string, sec: number): void }, "startLater").mockImplementation(() => undefined);
+    await t.s.onExit("u6", run(6 * 60_000), 4, null);
+    await t.s.onExit("u6", run(6 * 60_000), 4, null);
+    expect(needsOwner(t.update)).toEqual([]);
+    expect(notes(t.update).some((n) => /couldn't get through to Highrise either/.test(n))).toBe(true);
+    expect(t.update).not.toHaveBeenCalledWith(9, { alerted: true });
+  });
+
+  it("Highrise lets KojyAI in with the same token: Kojy fixes the code, then the code that last ran fine goes back — never the owner", async () => {
+    projectRows = [{ desiredState: "running", restartCount: 0, hostId: null, hostServer: null }];
+    const { sup, s, record, update } = make();
+    vi.spyOn(sup, "secrets").mockResolvedValue(SECRETS);
+    const ask = vi.spyOn(sup, "askHighrise").mockResolvedValue({ kind: "ok", roomName: "Japalo's Lounge", userId: "bot1" });
+    const fixes: string[] = [];
+    sup.onRoomProblem = (_u, _i, evidence) => { fixes.push(evidence); };
+    const rollBack = vi.spyOn(s as unknown as { rollBack(): Promise<boolean> }, "rollBack").mockResolvedValue(true);
+    const delays: number[] = [];
+    vi.spyOn(s as unknown as { startLater(u: string, sec: number): void }, "startLater").mockImplementation((_u, sec) => { delays.push(sec); });
+    record.mockResolvedValue(notInRoom() as never);
+    await s.onExit("u7", run(6 * 60_000), 4, null);
+    await s.onExit("u7", run(6 * 60_000), 4, null);
+    expect(fixes[0]).toMatch(/^KojyAI connected with the bot's token and room ID from the server the bot runs on just now and Highrise let it in \(room “Japalo's Lounge”\)/);
+    await s.onExit("u7", run(6 * 60_000), 4, null);
+    expect(ask).toHaveBeenCalledTimes(1); // asked at most every 10 minutes
+    expect(rollBack).not.toHaveBeenCalled(); // Kojy hasn't tried yet
+    // Kojy tried and it still happens: the code that last ran fine goes back.
+    record.mockResolvedValue({ ...notInRoom(), attempts: 1 } as never);
+    await s.onExit("u7", run(6 * 60_000), 4, null);
+    expect(rollBack).toHaveBeenCalledTimes(1);
+    expect(delays.at(-1)).toBe(3);
+    expect(needsOwner(update)).toEqual([]);
+  });
+
+  it("on a bot host that can't get in while KojyAI can: fresh starts there first; only then is the owner asked where it should run", async () => {
+    projectRows = [{ desiredState: "running", restartCount: 0, hostId: 7, hostServer: "abcd1234" }];
+    const { sup, s, record, update } = make();
+    vi.spyOn(sup, "secrets").mockResolvedValue(SECRETS);
+    vi.spyOn(sup, "askHighrise").mockResolvedValue({ kind: "ok", roomName: null, userId: null });
+    vi.spyOn(sup, "isRunning").mockReturnValue(false);
+    vi.spyOn(s as unknown as { startLater(u: string, sec: number): void }, "startLater").mockImplementation(() => undefined);
+    record.mockResolvedValue({ ...notInRoom(), category: "cannot_connect", signature: "never-connected", summary: "Didn't get into its room" } as never);
+    const fresh = (s as unknown as { freshStart: Set<string> }).freshStart;
+    await s.onExit("u8", run(6 * 60_000), 4, null);
+    await s.onExit("u8", run(6 * 60_000), 4, null);
+    expect(fresh.has("u8")).toBe(true);
+    expect(notes(update).some((n) => /the bot host is where it fails\. Starting it there again with a fresh copy of everything/.test(n))).toBe(true);
+    expect(needsOwner(update)).toEqual([]);
+    await s.onExit("u8", run(6 * 60_000), 4, null);
+    await s.onExit("u8", run(6 * 60_000), 4, null);
+    expect(String((needsOwner(update)[0]![1] as { note: string }).note)).toMatch(/can't reach Highrise from its bot host.*Only you can choose where it runs/);
+  });
+
+  it("Highrise refusing the bot with no clear reason is tried less often, and never paused for good", async () => {
+    projectRows = [{ desiredState: "running", restartCount: 0 }];
+    const { sup, s, record, update } = make();
+    vi.spyOn(sup, "secrets").mockResolvedValue(SECRETS);
+    vi.spyOn(sup, "askHighrise").mockResolvedValue({ kind: "unreachable", why: "Highrise answered HTTP 403" });
+    record.mockResolvedValue({ ...notInRoom(true), category: "highrise_refused", example: "Highrise answered HTTP 403 (Invalid response status)", summary: "Highrise refused the bot: Highrise answered HTTP 403" } as never);
     const delays: number[] = [];
     const startLater = vi.spyOn(s as unknown as { startLater(u: string, sec: number): void }, "startLater").mockImplementation((_u, sec) => { delays.push(sec); });
     for (let i = 0; i < 12; i++) await s.onExit("u2", run(1000), 5, null); // quick exits: a crash streak too
     expect(delays.slice(0, 2)).toEqual([5, 120]);
     expect(delays.at(-1)).toBe(1800);
     expect(delays).toHaveLength(12); // still tried after 10 in a row: not paused
+    expect(needsOwner(update)).toEqual([]);
     startLater.mockRestore();
   });
 
@@ -201,17 +282,39 @@ describe("the supervisor and the room", () => {
     expect(resolve).toHaveBeenCalledWith(3);
   });
 
-  it("a bot whose checks stopped is restarted, and the owner told when it keeps happening", async () => {
+  it("a bot whose checks stopped is restarted — then with a fresh install — and KojyAI keeps at it without asking the owner", async () => {
     projectRows = [{ id: 4, uuid: "u4", orgId: 1, ownerId: 7, name: "Japalo", desiredState: "running" }];
     const { sup, s, record, update } = make();
     record.mockResolvedValue({ id: 11, data: {} } as never);
     const handle = vi.spyOn(sup, "handle").mockResolvedValue(undefined);
+    const fresh = (s as unknown as { freshStart: Set<string> }).freshStart;
     await s.silent("u4", "No room check from the bot for 10 min", 1);
     expect(record).toHaveBeenCalledWith(4, expect.objectContaining({ category: "silent", state: "open" }), "no room checks");
     expect(handle).toHaveBeenCalledWith("u4", "restart");
+    expect(fresh.has("u4")).toBe(false);
     await s.silent("u4", "No room check from the bot for 10 min", 2);
-    expect(record).toHaveBeenLastCalledWith(4, expect.objectContaining({ category: "silent", state: "needs_owner" }), "no room checks");
-    expect(update).toHaveBeenCalledWith(11, { alerted: true });
+    expect(record).toHaveBeenLastCalledWith(4, expect.objectContaining({ category: "silent", state: "open", note: expect.stringMatching(/restarted with a fresh install of everything\.$/) }), "no room checks");
+    expect(fresh.has("u4")).toBe(true);
+    expect(update).not.toHaveBeenCalledWith(11, { alerted: true });
+    await s.silent("u4", "No room check from the bot for 10 min", 3);
+    expect(update).toHaveBeenCalledWith(11, { alerted: true }); // the admins hear about it
+    expect(needsOwner(update)).toEqual([]);
+  });
+
+  it("new secrets start a bot that was waiting on them right away; a healthy bot is left running", async () => {
+    projectRows = [{ id: 12, uuid: "u12", desiredState: "running" }];
+    const { sup } = make();
+    const handle = vi.spyOn(sup, "handle");
+    const start = vi.spyOn(sup as unknown as { start(u: string): Promise<void> }, "start").mockResolvedValue(undefined);
+    const list = vi.spyOn(sup.incidents, "list").mockResolvedValue([{ state: "needs_owner" }] as never);
+    await sup.handle("u12", "secrets_changed");
+    expect(start).toHaveBeenCalledWith("u12");
+    start.mockClear();
+    list.mockResolvedValue([]);
+    vi.spyOn(sup, "isRunning").mockReturnValue(true);
+    await sup.handle("u12", "secrets_changed");
+    expect(start).not.toHaveBeenCalled();
+    expect(handle).not.toHaveBeenCalledWith("u12", "restart");
   });
 
   it("a page that says running for a bot KojyAI isn't running is put right: started again (or shown stopped)", async () => {
@@ -222,10 +325,15 @@ describe("the supervisor and the room", () => {
       { uuid: "left", status: "running", desiredState: "stopped", updatedAt: new Date() },
       { uuid: "stuck", status: "crashed", desiredState: "running", updatedAt: new Date(Date.now() - 20 * 60_000) },
       { uuid: "fresh-crash", status: "crashed", desiredState: "running", updatedAt: new Date() },
+      // Left with an error and no new try coming: tried again after a while (never left down for good).
+      { uuid: "errored", status: "error", desiredState: "running", updatedAt: new Date(Date.now() - 40 * 60_000) },
+      { uuid: "error-just-now", status: "error", desiredState: "running", updatedAt: new Date() },
+      { uuid: "error-stopped", status: "error", desiredState: "stopped", updatedAt: new Date(Date.now() - 40 * 60_000) },
     ];
     updates.length = 0;
     await (s as unknown as { reconcile(): Promise<void> }).reconcile();
-    expect(start.mock.calls.map((c) => c[0]).sort()).toEqual(["ghost", "stuck"]);
+    expect(start.mock.calls.map((c) => c[0]).sort()).toEqual(["errored", "ghost", "stuck"]);
+    expect(updates.filter((u) => u.status === "stopped")).toHaveLength(1); // only "left": an owner-stopped bot's error stays as it was
     expect(updates).toContainEqual(expect.objectContaining({ status: "stopped" }));
   });
 });
