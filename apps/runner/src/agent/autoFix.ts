@@ -26,7 +26,11 @@ export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
   remember: "saving long-term notes",
   save_test: "saving tests",
   run_command: "running shell commands",
+  run_python: "running Python scripts",
   git: "using git (pushing or pulling)",
+  fetch_url: "reading web pages",
+  move_file: "moving or renaming files",
+  undo_changes: "undoing changes (KojyAI undoes a fix that doesn't hold by itself)",
 };
 
 /**
@@ -36,7 +40,7 @@ export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
  * tools, smaller requests, more AI keys that can take them.
  */
 export const AUTOMATIC_RUN_TOOLS = new Set([
-  "list_files", "read_file", "search_code", "edit_file", "write_file", "check_code", "test_in_room", "run_saved_tests",
+  "list_files", "read_file", "search_code", "edit_file", "multi_edit", "write_file", "append_file", "check_code", "test_in_room", "run_saved_tests",
   "get_logs", "bot_control", "find_env_vars", "find_emotes", "discord_check", "work_log", "search_chat",
 ]);
 
@@ -79,7 +83,7 @@ export function automaticRefusal(_kind: AutomatedKind, tool: string, args: Recor
   const locked = AUTOMATIC_RUN_LOCKED[tool];
   if (locked) return no(locked);
   if (tool === "bot_control" && String(args.action ?? "") === "stop") return no("stopping the bot (restart it instead)");
-  if (tool !== "write_file" && tool !== "edit_file") return null;
+  if (!["write_file", "edit_file", "append_file", "multi_edit"].includes(tool)) return null;
   let rel: string;
   try {
     rel = cleanRelPath(String(args.path ?? ""));
@@ -88,8 +92,13 @@ export function automaticRefusal(_kind: AutomatedKind, tool: string, args: Recor
   }
   if (isPersistentData(rel)) return no(`changing the bot's saved data (${rel})`);
   if (DEPENDENCY_FILE.test(rel)) return no(`changing the bot's dependencies (${rel}); a missing well-known package is added by KojyAI itself`);
-  const before = tool === "edit_file" ? String(args.old_text ?? "") : currentText(rel);
-  const after = tool === "edit_file" ? String(args.new_text ?? "") : String(args.content ?? "");
+  const edits = tool === "multi_edit" ? (Array.isArray(args.edits) ? args.edits as Record<string, unknown>[] : []) : [];
+  const before = tool === "edit_file" ? String(args.old_text ?? "")
+    : tool === "multi_edit" ? edits.map((e) => String(e.old_text ?? "")).join("\n")
+    : tool === "append_file" ? "" : currentText(rel);
+  const after = tool === "edit_file" ? String(args.new_text ?? "")
+    : tool === "multi_edit" ? edits.map((e) => String(e.new_text ?? "")).join("\n")
+    : String(args.content ?? "");
   const risks = addedRisks(before, after);
   return risks.length ? no(`adding code for ${risks.join(" or ")}`) : null;
 }

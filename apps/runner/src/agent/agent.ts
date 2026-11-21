@@ -32,12 +32,12 @@ import { botHostProvider } from "@kojyai/shared/bothost";
 import { codeFingerprint, compareSnapshot, deleteSnapshot, fingerprintChanges, isStartCommand, listFiles, projectDir, readLogs, resolveInside, restoreSnapshot, snapshotProject } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
-import { aiReadyAt, chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ToolCall, type ToolSpec } from "./groq.js";
+import { aiReadyAt, chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ChatResult, type ToolCall, type ToolSpec } from "./groq.js";
 import type { GitService } from "../git.js";
 import { TOOL_SPECS, runTool, loadMemories, loadSecrets, projectCodeFiles, discordSecrets, type ToolContext, type ToolResult } from "./tools.js";
 import { diagnoseDiscord, isDiscordSetupError, type DiscordDiagnosis } from "./discord.js";
 import { systemPrompt, fixPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
-import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, announcesNextStep, MAX_NUDGES, NUDGE, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
+import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, announcesNextStep, deniesCapability, MAX_NUDGES, MAX_DENIALS, NUDGE, CAPABILITY_NUDGE, STUDIO_CAPABILITY_NUDGE, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
 import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
 import { JS_TOOL_SPECS, runJsTool, type JsContext } from "./jsTools.js";
@@ -166,6 +166,8 @@ interface Scope {
   setState(state: "idle" | "working" | "waiting"): Promise<void>;
   /** What the current request is, for undo labels (bot chats only). */
   setLabel?(label: string): void;
+  /** Said to Kojy after a false "I can't" in this chat (none: such replies aren't checked). */
+  capabilityNudge?: string;
 }
 
 export const STUDIO_PREFIX = "studio-";
@@ -307,7 +309,7 @@ export class Agent {
       if (!Number.isInteger(orgId) || orgId <= 0) return null;
       const ctx: StudioContext = { db: this.db, supervisor: this.supervisor, redis: this.redis, orgId, startBotChat: (uuid) => void this.run(uuid) };
       return {
-        key, thread: `studio:${orgId}`, projectId: 0, orgId, tools: STUDIO_TOOL_SPECS,
+        key, thread: `studio:${orgId}`, projectId: 0, orgId, tools: STUDIO_TOOL_SPECS, capabilityNudge: STUDIO_CAPABILITY_NUDGE,
         runTool: (name, args) => runStudioTool(name, args, ctx),
         system: async () => studioPrompt(await studioSnapshot(ctx), await loadMemories(this.db, { orgId, id: -1 })),
         setState: async (state) => {
@@ -358,7 +360,7 @@ export class Agent {
       };
     };
     return {
-      key, thread: `project:${project.id}`, projectId: project.id, orgId: project.orgId, tools: TOOL_SPECS,
+      key, thread: `project:${project.id}`, projectId: project.id, orgId: project.orgId, tools: TOOL_SPECS, capabilityNudge: CAPABILITY_NUDGE,
       runTool: (name, args) => runTool(name, args, ctx),
       system: async () => systemPrompt(await promptInput()),
       fixSystem: async () => fixPrompt(await promptInput()),
@@ -418,26 +420,44 @@ export class Agent {
     const runTool = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
       MEMORY_TOOL_NAMES.has(name) ? runMemoryTool(name, args, { db: this.db, thread: scope.thread }) : scope.runTool(name, args);
 
+    const specs = new Map(tools.map((t) => [t.function.name, t]));
     // Kojy said what it would do next but didn't do it: told to go on (a few times in a row at most).
     let nudges = 0;
+    // A reply that wrongly said Kojy can't do it (held back, never shown or kept), and how many in a row.
+    let denial: string | null = null;
+    let denials = 0;
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
         if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); outcome = "done"; ended = "stopped"; break; }
         await this.progress(uuid, step === 0 ? "Thinking…" : "Working…", scope.orgId);
 
-        let message: ChatMessage | undefined;
+        let answer: ChatResult | undefined;
         // Too big for the plan → try again with less history (twice).
-        for (let budget = HISTORY_TOKENS; !message; budget = Math.floor(budget / 2)) {
+        for (let budget = HISTORY_TOKENS; !answer; budget = Math.floor(budget / 2)) {
           try {
-            ({ message } = await chat({
-              messages: [...await this.buildMessages(scope, budget), ...(nudges ? [{ role: "user" as const, content: NUDGE }] : [])], tools, signal,
+            answer = await chat({
+              messages: [
+                ...await this.buildMessages(scope, budget, automated),
+                ...(denial !== null ? [{ role: "assistant" as const, content: denial }, { role: "user" as const, content: scope.capabilityNudge ?? CAPABILITY_NUDGE }] : []),
+                ...(nudges ? [{ role: "user" as const, content: NUDGE }] : []),
+              ], tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`, scope.orgId),
-            }));
+            });
           } catch (err) {
             if (!(err instanceof RequestTooLargeError) || budget < HISTORY_TOKENS / 4) throw err;
           }
         }
+        const { message, truncated, outputLimit } = answer;
         const calls = message.tool_calls ?? [];
+        if (!calls.length && !automated && scope.capabilityNudge && denials < MAX_DENIALS && deniesCapability(message.content ?? "")) {
+          // "I don't have the tools to do that" — never true here. Not shown to the owner or kept in the chat
+          // (it would teach every later step the same): Kojy is told what it has and asked again.
+          denials++;
+          denial = message.content ?? "";
+          log.info({ uuid, denials }, "Kojy said it couldn't do something its tools do — asking again");
+          continue;
+        }
+        denial = null;
         await this.add(scope, "assistant", message.content ?? "", "text", calls.length ? { toolCalls: calls } : undefined);
         if (!calls.length) {
           if (nudges < MAX_NUDGES && announcesNextStep(message.content ?? "")) { nudges++; continue; }
@@ -448,13 +468,16 @@ export class Agent {
 
         let pause = false;
         for (const call of calls) {
-          let args: Record<string, unknown> = {};
-          try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* reported below */ }
-          await this.progress(uuid, describeCall(call.function.name, args), scope.orgId);
-          const refusal = automated ? automaticRefusal(automated, call.function.name, args, currentText) : null;
-          const result: ToolResult = refusal
-            ? { ok: false, output: refusal, summary: "Not allowed in an automatic fix" }
-            : await runTool(call.function.name, args);
+          const name = call.function.name;
+          const parsed = parseToolArguments(call.function.arguments);
+          const args = parsed ?? {};
+          await this.progress(uuid, describeCall(name, args), scope.orgId);
+          // A call whose arguments are cut off or broken is never run with none: the model is told why, and how to do it instead.
+          const bad = parsed ? missingArguments(specs.get(name), args) : badArguments(name, call.function.arguments, truncated, outputLimit);
+          const refusal = !bad && automated ? automaticRefusal(automated, name, args, currentText) : null;
+          const result: ToolResult = bad ?? (refusal
+            ? { ok: false, output: refusal, summary: AUTOMATIC_REFUSAL_SUMMARY }
+            : await runTool(name, args));
           await this.add(scope, "tool", result.output, result.cardKind ?? (result.card ? "secret_request" : "tool"), {
             toolCallId: call.id, name: call.function.name, summary: result.summary, ok: result.ok, ...(result.card ? { card: result.card } : {}),
             ...(result.diff ? { diff: result.diff } : {}),
@@ -512,7 +535,7 @@ export class Agent {
    * results are shrunk to their one-line summary; the cut always starts at a
    * user message so tool calls and their results stay paired.
    */
-  private async buildMessages(scope: Scope, historyTokens: number): Promise<ChatMessage[]> {
+  private async buildMessages(scope: Scope, historyTokens: number, automated: AutomatedKind | null = null): Promise<ChatMessage[]> {
     const [rowsDesc, log] = await Promise.all([
       // More than the history window: the task memory looks further back for the owner's request.
       this.db.select().from(projectMessages).where(eq(projectMessages.thread, scope.thread)).orderBy(desc(projectMessages.id)).limit(300),
@@ -525,23 +548,31 @@ export class Agent {
     }));
     const requestAt = requestIndex(stored);
     const request = stored[requestAt];
-    // An automatic fix gets the short instructions that fixing takes.
-    const system = request && AUTOMATED_KINDS.has(request.kind) && scope.fixSystem ? await scope.fixSystem() : await scope.system();
+    // An automatic fix gets the short instructions (and limits) that fixing takes. Who started the run
+    // decides, not what the request was: the owner saying "continue" on a crash fix has every tool.
+    const system = automated && scope.fixSystem ? await scope.fixSystem() : await scope.system();
     scope.setLabel?.(request?.kind === "crash" ? AUTO_FIX_LABEL : request?.kind === "checkup" ? "fix from the daily check-up" : request?.content ?? "");
     const rows = historyRows(stored, requestAt);
     const lastUser = rows.map((r) => r.role).lastIndexOf("user");
     const superseded = supersededResults(rows);
+    /** Calls whose result came back fine: a file write that worked needn't carry the whole file again. */
+    const worked = new Set(rows.filter((r) => r.role === "tool" && (r.data as { ok?: boolean } | null)?.ok !== false)
+      .map((r) => (r.data as { toolCallId?: string } | null)?.toolCallId ?? ""));
 
-    const toMsg = (r: Row, full: boolean): ChatMessage => {
+    const toMsg = (r: Row, full: boolean): ChatMessage | null => {
       if (r.role === "tool") {
         const d = (r.data ?? {}) as { toolCallId?: string; summary?: string };
+        // An automatic fix's refusal, seen later in the owner's chat, is not a limit on what Kojy can do now.
+        if (!automated && d.summary === AUTOMATIC_REFUSAL_SUMMARY) return { role: "tool", tool_call_id: d.toolCallId ?? "", content: AUTOMATIC_LIMIT_NOTE };
         if (superseded.has(r.id)) return { role: "tool", tool_call_id: d.toolCallId ?? "", content: `(earlier result — the same call was made again later) ${d.summary ?? ""}` };
         return { role: "tool", tool_call_id: d.toolCallId ?? "", content: full ? r.content : `(earlier result) ${d.summary ?? ""}` };
       }
       if (r.role === "assistant") {
         let calls = (r.data as { toolCalls?: ToolCall[] } | null)?.toolCalls;
+        // An earlier "I can't / I don't have the tools" was wrong; left in, every later step learns it.
+        if (!calls?.length && deniesCapability(r.content)) return null;
         // Old write_file/edit_file calls carry whole file contents; keep just their shape.
-        if (calls && !full) calls = calls.map((c) => ({ ...c, function: { ...c.function, arguments: shrinkArgs(c.function.arguments) } }));
+        if (calls) calls = calls.map((c) => (!full || (BIG_ARG_TOOLS.has(c.function.name) && worked.has(c.id)) ? { ...c, function: { ...c.function, arguments: shrinkArgs(c.function.arguments) } } : c));
         return { role: "assistant", content: r.content || null, ...(calls?.length ? { tool_calls: calls } : {}) };
       }
       return { role: "user", content: APP_NOTE_KINDS.has(r.kind) ? `[app] ${r.content}` : r.content };
@@ -554,10 +585,11 @@ export class Agent {
     for (let i = rows.length - 1; i >= 0; i--) {
       const full = i >= lastUser || rows[i]!.role === "user";
       let m = toMsg(rows[i]!, full);
+      if (!m) continue;
       let cost = estimateTokens(JSON.stringify(m));
       if (cost > budget && rows[i]!.role === "tool" && i >= lastUser) {
         // Even the current task's results are too big: keep their summary.
-        m = toMsg(rows[i]!, false);
+        m = toMsg(rows[i]!, false)!;
         cost = estimateTokens(JSON.stringify(m));
       }
       if (cost > budget && i < lastUser) { cut = i + 1; break; }
@@ -569,8 +601,12 @@ export class Agent {
     if (cut > 0) { while (start < picked.length && picked[start]!.role !== "user") start++; }
     const history = normalizeTurns(pairToolCalls(picked.slice(start)));
 
+    // Kojy's checklist for this request (update_todo), kept where it's never cut.
+    const todo = [...stored.slice(Math.max(0, requestAt))].reverse().find((r) => r.kind === "todo");
+    const items = ((todo?.data as { card?: { items?: { step: string; done?: boolean }[] } } | null)?.card?.items ?? []);
+    const todoPrompt = items.length ? `\n\n## Your checklist for this request (update_todo as you go)\n${items.map((t) => `- [${t.done ? "x" : " "}] ${t.step}`).join("\n")}` : "";
     // The request and finished steps are part of the system prompt, which is never cut to fit the budget.
-    return [{ role: "system", content: system + recentWorkPrompt(log, memory.task) + taskMemoryPrompt(memory) }, ...history];
+    return [{ role: "system", content: system + recentWorkPrompt(log, memory.task) + taskMemoryPrompt(memory) + todoPrompt }, ...history];
   }
 
   // ── stabilizer ─────────────────────────────────────────────────────────────
@@ -1356,7 +1392,13 @@ function describeCall(name: string, args: Record<string, unknown>): string {
   const p = typeof args.path === "string" ? ` ${args.path}` : "";
   switch (name) {
     case "read_file": return `Reading${p}…`;
-    case "edit_file": case "write_file": return `Editing${p}…`;
+    case "edit_file": case "write_file": case "multi_edit": case "append_file": return `Editing${p}…`;
+    case "move_file": return "Moving a file…";
+    case "undo_changes": return "Undoing my changes…";
+    case "run_python": return "Running a Python script…";
+    case "fetch_url": return `Reading ${typeof args.url === "string" ? args.url.replace(/^https?:\/\//, "").slice(0, 40) : "a web page"}…`;
+    case "update_todo": return "Updating the checklist…";
+    case "work_on_bot": return `Handing it to ${String(args.bot ?? "the bot")}'s chat…`;
     case "search_code": return "Searching the code…";
     case "run_command": return `Running ${typeof args.command === "string" ? `\`${args.command.slice(0, 50)}\`` : "a command"}…`;
     case "git": return typeof args.action === "string" && args.action.includes("push") ? "Pushing to GitHub…" : "Working with git…";
@@ -1381,3 +1423,68 @@ function describeCall(name: string, args: Record<string, unknown>): string {
   }
 }
 
+
+/** The summary of a tool call an automatic fix refused. */
+export const AUTOMATIC_REFUSAL_SUMMARY = "Not allowed in an automatic fix";
+/** What such a refusal says in the history of a later owner request. */
+const AUTOMATIC_LIMIT_NOTE = "(Refused by the limits of an automatic crash fix. Those limits don't apply now: the owner is asking, and every tool works.)";
+/** Tools whose arguments carry file contents. */
+const BIG_ARG_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "run_python", "run_command"]);
+/** Tools that write files: a cut-off call to one is written in parts instead. */
+const WRITE_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit"]);
+
+/** A tool call's arguments as an object (a ```json fence around them is fine), or null when they aren't one. */
+export function parseToolArguments(raw: string): Record<string, unknown> | null {
+  const text = (raw || "").trim() || "{}";
+  for (const candidate of [text, text.replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/, "$1")]) {
+    try {
+      const v = JSON.parse(candidate) as unknown;
+      if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
+    } catch { /* next */ }
+  }
+  return null;
+}
+
+/**
+ * Why a call's arguments can't be used: cut off (the answer hit its output
+ * limit) or not JSON. Nothing is run; the model is told how to do it instead.
+ */
+export function badArguments(name: string, raw: string, truncated: boolean, outputLimit: number): ToolResult {
+  if (truncated) {
+    const part = Math.max(2000, Math.floor(outputLimit * 2.5));
+    return {
+      ok: false,
+      summary: `${name} was cut off (too long for one answer) — nothing was run`,
+      output: `Your ${name} call was cut off after ${raw.length} characters: one answer can only be about ${outputLimit} tokens long, so its arguments never finished. Nothing was run and no file was changed.\n` +
+        (WRITE_TOOLS.has(name)
+          ? `Write it in parts instead: write_file with the first part (under ~${part} characters), then append_file with each next part (each under ~${part} characters). To change an existing file, edit only the lines that change (edit_file or multi_edit).`
+          : "Split the work into several shorter calls."),
+    };
+  }
+  return {
+    ok: false,
+    summary: `${name}: the arguments weren't valid JSON — nothing was run`,
+    output: `The arguments of your ${name} call weren't a valid JSON object (${raw.length} characters${raw ? `, ending with ${JSON.stringify(raw.slice(-60))}` : ""}). Nothing was run. Call it again with valid JSON arguments.`,
+  };
+}
+
+/** Text arguments that may be empty (an empty file, deleting text). */
+const MAY_BE_EMPTY = new Set(["content", "new_text", "message", "query", "folder"]);
+
+/** A call missing required arguments (it would only fail with a confusing error), or null when it has them all. */
+export function missingArguments(spec: ToolSpec | undefined, args: Record<string, unknown>): ToolResult | null {
+  if (!spec) return null;
+  const params = spec.function.parameters as { required?: string[]; properties?: Record<string, { type?: string }> };
+  const missing = (params.required ?? []).filter((k) => {
+    const v = args[k];
+    if (v === undefined || v === null) return true;
+    return params.properties?.[k]?.type === "string" && (typeof v !== "string" || (!v.trim() && !MAY_BE_EMPTY.has(k)));
+  });
+  if (!missing.length) return null;
+  const name = spec.function.name;
+  return {
+    ok: false,
+    summary: `${name}: missing ${missing.join(", ")} — nothing was run`,
+    output: `${name} needs ${(params.required ?? []).join(", ")}; this call had no usable ${missing.join(", ")}. Nothing was run. Call it again with every required argument.`,
+  };
+}

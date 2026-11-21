@@ -117,6 +117,9 @@ async function lastCheckup(db: Database, thread: string): Promise<{ data: Checku
 }
 
 async function checkOne(db: Database, project: typeof botProjects.$inferSelect, startAgent: (uuid: string) => void, incidents?: IncidentLedger): Promise<void> {
+  // Kojy is working on (or waiting on the owner for) a request in this chat: a check-up message now would
+  // become the "current request" in the middle of it. It's done at the next hourly look instead.
+  if (project.agentState !== "idle") return;
   const since = Date.now() - DAY;
   await db.update(botProjects).set({ lastCheckupAt: new Date() }).where(eq(botProjects.id, project.id));
 

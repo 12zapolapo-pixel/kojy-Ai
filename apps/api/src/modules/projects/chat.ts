@@ -15,6 +15,8 @@ export interface SecretCard { secrets: { name: string; description: string; alre
 export interface UiCard { panel?: string; openBot?: { kind: "python" | "javascript"; id: string; name: string } }
 /** "plan" cards: Kojy's plan before a bigger change, approved with a button. */
 export interface PlanCard { title?: string; steps?: string[]; rejected?: boolean }
+/** "todo" cards: Kojy's checklist for a long request (update_todo). */
+export interface TodoCard { items?: { step: string; done?: boolean }[] }
 
 /** Messages shown when a chat opens, and per "Load earlier messages". */
 const PAGE = 120;
@@ -47,7 +49,7 @@ export async function listThread(db: any, thread: string, afterId: number | unde
           content: r.role === "tool" ? r.content.slice(0, 3000) : r.content,
           summary: d.summary ?? null, ok: d.ok ?? null, tool: d.name ?? null,
           diff: typeof d.diff === "string" ? d.diff.slice(0, 6000) : null,
-          card: (d.card ?? null) as null | (SecretCard & UiCard & PlanCard),
+          card: (d.card ?? null) as null | (SecretCard & UiCard & PlanCard & TodoCard),
         };
       }),
   };
