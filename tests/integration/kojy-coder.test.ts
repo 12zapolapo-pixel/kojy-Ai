@@ -52,6 +52,11 @@ function answer(body: { messages: Msg[]; tools?: { function: { name: string } }[
     if (!results.length) return call("write_file", { path: "deny.py", content: "x = 1\n" });
     return say("Created deny.py.");
   }
+  if (/REVIEW/.test(task)) {
+    if (!results.length) return call("write_file", { path: "review.py", content: "def total(xs):\n    return sum(xs) / len(xs)\n" });
+    if (/Before you finish, review/.test(last.content ?? "") && results.length === 1) return call("edit_file", { path: "review.py", old_text: "    return sum(xs) / len(xs)", new_text: "    return sum(xs) / len(xs) if xs else 0" });
+    return say(results.length > 1 ? "Added total(), and it handles an empty list." : "Added total().");
+  }
   return say("Picked up where the fix left off.");
 }
 
@@ -125,6 +130,29 @@ describe("Kojy on a model that can only answer so much", () => {
     expect(all.some((r) => /don't have the tools/.test(r.content))).toBe(false); // never shown or kept
     expect(p.file("deny.py")).toBe("x = 1\n");
     expect(seen.some((s) => /Your last reply said you can't do this/.test(s.last.content ?? ""))).toBe(true);
+  });
+
+  test("before calling a request done, Kojy reviews its changes once and can still fix them", async () => {
+    const p = await project([{ role: "user", kind: "text", content: "REVIEW: add total() in review.py" }]);
+    seen.length = 0;
+    await p.agent.run(p.uuid);
+    const note = seen.find((x) => /Before you finish, review/.test(x.last.content ?? ""));
+    expect(note?.last.content).toMatch(/--- review\.py \(new file\)\n\+   1 def total\(xs\):/);
+    expect(p.file("review.py")).toContain("if xs else 0");
+    const texts = (await p.rows()).filter((r) => r.role === "assistant" && r.content).map((r) => r.content);
+    expect(texts).toEqual(["Added total(), and it handles an empty list."]); // the first "done" was held back, never shown
+    expect(seen.filter((x) => /Before you finish, review/.test(x.last.content ?? ""))).toHaveLength(1); // once per request
+  });
+
+  test("a lesson from a fix that was undone is kept once, for this bot", async () => {
+    const p = await project([]);
+    const row = { id: p.id, uuid: p.uuid, orgId: 990_001 };
+    const learn = (p.agent as unknown as { learn(project: unknown, note: string): Promise<void> }).learn.bind(p.agent);
+    const note = `An automatic fix for "KeyError @ on_chat ${p.uuid}" didn't hold.`;
+    await learn(row, note);
+    await learn(row, note);
+    const rows = (await pool.query("SELECT project_id FROM agent_memories WHERE content = $1", [note])).rows;
+    expect(rows).toEqual([{ project_id: p.id }]);
   });
 
   test("\"continue\" after a crash fix gets the owner's instructions and every tool", async () => {

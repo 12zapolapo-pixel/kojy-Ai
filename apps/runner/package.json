@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/boot.ts",
-    "build": "node ../../scripts/build-server.mjs src/boot.ts dist/boot.js --copy src/launcher.py=dist/launcher.py --copy src/botcheck.py=dist/botcheck.py --copy src/codecheck.py=dist/codecheck.py --copy src/hoststart.py=dist/hoststart.py --copy src/kojy_shell.py=dist/kojy_shell.py --copy src/shellrc.sh=dist/shellrc.sh --copy ../../packages/db/migrations=dist/migrations",
+    "build": "node ../../scripts/build-server.mjs src/boot.ts dist/boot.js --copy src/launcher.py=dist/launcher.py --copy src/botcheck.py=dist/botcheck.py --copy src/codecheck.py=dist/codecheck.py --copy src/discordtest.py=dist/discordtest.py --copy src/hoststart.py=dist/hoststart.py --copy src/kojy_shell.py=dist/kojy_shell.py --copy src/shellrc.sh=dist/shellrc.sh --copy ../../packages/db/migrations=dist/migrations",
     "start": "node dist/boot.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/"

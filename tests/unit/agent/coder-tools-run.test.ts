@@ -117,7 +117,7 @@ describe("running and checking code", () => {
     expect(r.ok).toBe(false);
     expect(r.output).toMatch(/main\.py:2: imports "discord", but no installed package provides it — add discord\.py to requirements\.txt/);
     expect(r.output).not.toMatch(/"helpers"|"ujson"|"os"/); // its own module, an optional import, the standard library
-    if (pyflakesPython) expect(r.output).toMatch(/main\.py:9:\d+:? undefined name 'nmae'/);
+    if (pyflakesPython) expect(r.output).toMatch(/main\.py:9:.*(undefined name 'nmae'|Undefined name `nmae`)/); // pyflakes or ruff, whichever is installed
   });
 
   it("check_code passes clean code", async () => {

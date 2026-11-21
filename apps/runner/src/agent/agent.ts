@@ -22,17 +22,18 @@
  * crash is worked on, after the request Kojy is busy with if there is one.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
-import { botHosts, botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
+import { agentMemories, botHosts, botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
 import { botHostProvider } from "@kojyai/shared/bothost";
-import { codeFingerprint, compareSnapshot, deleteSnapshot, fingerprintChanges, isStartCommand, listFiles, projectDir, readLogs, resolveInside, restoreSnapshot, snapshotProject } from "@kojyai/shared/projects";
+import { codeFingerprint, compareSnapshot, deleteSnapshot, extractSnapshot, lineDiff, fingerprintChanges, isStartCommand, listFiles, normalizeNote, projectDir, readLogs, resolveInside, restoreSnapshot, snapshotProject } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
-import { aiReadyAt, chat, configuredLanes, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ChatResult, type ToolCall, type ToolSpec } from "./groq.js";
+import { aiReadyAt, chat, configuredLanes, historyBudget, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ChatResult, type ToolCall, type ToolSpec } from "./groq.js";
 import type { GitService } from "../git.js";
 import { TOOL_SPECS, runTool, loadMemories, loadSecrets, projectCodeFiles, discordSecrets, type ToolContext, type ToolResult } from "./tools.js";
 import { diagnoseDiscord, isDiscordSetupError, type DiscordDiagnosis } from "./discord.js";
@@ -45,6 +46,7 @@ import { runCheckups } from "./checkup.js";
 import { FIXABLE, IncidentLedger, type Incident, type IncidentCategory, type IncidentPatch } from "../incidents.js";
 import { addRequirement, hasRequirement, isLocalModule, packageFor } from "../packages.js";
 import { checkFix, saveRegressionTest, type FixCheck, type FixEvent } from "./verifyFix.js";
+import { projectMap } from "./projectMap.js";
 import { CONNECTED_PREFIX } from "./botHealth.js";
 import { changesSinceGood, codeAround } from "./crashContext.js";
 import { AUTOMATED_KINDS, automaticRefusal, automaticTools, crashExcerpt, crashLocation, crashSignature, isNetworkFailure, lastException, normalizeError, type AutomatedKind } from "./autoFix.js";
@@ -53,7 +55,7 @@ const log = createLogger("agent");
 
 const MAX_STEPS = Number(process.env.AGENT_MAX_STEPS ?? 24);
 /** How many parts of MAX_STEPS one request may take before it asks the owner to continue. */
-const AUTO_PARTS = Number(process.env.AGENT_AUTO_PARTS ?? 4);
+const AUTO_PARTS = Number(process.env.AGENT_AUTO_PARTS ?? 8);
 /**
  * History sent with each step. At 3000 one file read pushed the previous one
  * out and Kojy kept re-reading the same file; much more than 8000 and
@@ -61,6 +63,8 @@ const AUTO_PARTS = Number(process.env.AGENT_AUTO_PARTS ?? 4);
  * best. A request too big for the AI that's free (Groq) is retried smaller.
  */
 const HISTORY_TOKENS = Number(process.env.AGENT_HISTORY_TOKENS ?? 8000);
+/** History sent when the AI that answers first has no per-minute token limit (Gemini, most gateways): it can take far more, so Kojy forgets less on long tasks. */
+const HISTORY_TOKENS_LARGE = Number(process.env.AGENT_HISTORY_TOKENS_LARGE ?? 24_000);
 /** A request cut off by a runner restart picks up again this long after boot (bots are back by then). */
 const RESUME_DELAY_MS = 20_000;
 /** …if it was still active this recently. */
@@ -168,6 +172,8 @@ interface Scope {
   setLabel?(label: string): void;
   /** Said to Kojy after a false "I can't" in this chat (none: such replies aren't checked). */
   capabilityNudge?: string;
+  /** Before the owner's request is called done: what Kojy changed in it, to review once (null: nothing to review, or already reviewed). */
+  review?(): string | null;
 }
 
 export const STUDIO_PREFIX = "studio-";
@@ -184,7 +190,7 @@ export class Agent {
   private watching = new Map<string, { snapshotId: string; signature: string; tail: string[]; files: Record<string, string>; incidentId: number | null; survived?: CrashFix["survived"]; timer: NodeJS.Timeout }>();
   private again = new Set<string>();
   /** Per running request: whether its undo snapshot was taken (shared by all its parts). */
-  private runShared = new Map<string, { snapshotted: boolean }>();
+  private runShared = new Map<string, { snapshotted: boolean; snapshotId?: string | undefined; reviewed?: boolean }>();
   /** Crashes that came in while Kojy was busy with the bot, by signature; fixed as soon as it's free. */
   private queuedCrash = new Map<string, Map<string, { streak: number; tail: string[]; context: CrashContext }>>();
   /** Every problem the bots had (shared with the supervisor). */
@@ -344,6 +350,8 @@ export class Agent {
       db: this.db, supervisor: this.supervisor, project, changedFiles: new Set(), git: this.git,
       get snapshotted() { return shared.snapshotted; },
       set snapshotted(v: boolean) { shared.snapshotted = v; },
+      get snapshotId() { return shared.snapshotId; },
+      set snapshotId(v: string | undefined) { shared.snapshotId = v; },
     };
     // What both the chat's and an automatic fix's instructions say about the project.
     const promptInput = async (): Promise<Parameters<typeof systemPrompt>[0]> => {
@@ -357,6 +365,7 @@ export class Agent {
       return {
         projectName: project.name, entrypoint: ctx.project.entrypoint, status: project.status, runsOn,
         secrets: secrets.map((x) => x.key), memories, fileCount: listFiles(project.uuid).filter((f) => !f.isDir).length,
+        map: projectMap(project.uuid),
       };
     };
     return {
@@ -366,6 +375,11 @@ export class Agent {
       fixSystem: async () => fixPrompt(await promptInput()),
       setState: async (state) => { await this.db.update(botProjects).set({ agentState: state }).where(eq(botProjects.id, project.id)); },
       setLabel: (label) => { ctx.label = label; },
+      review: () => {
+        if (!shared.snapshotId || shared.reviewed) return null;
+        shared.reviewed = true;
+        return reviewText(project.uuid, shared.snapshotId);
+      },
     };
   }
 
@@ -426,6 +440,8 @@ export class Agent {
     // A reply that wrongly said Kojy can't do it (held back, never shown or kept), and how many in a row.
     let denial: string | null = null;
     let denials = 0;
+    // Kojy's final answer, held back once while it reviews what it changed in this request.
+    let review: { draft: string; note: string } | null = null;
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
         if (signal.aborted) { await this.add(scope, "assistant", "Stopped.", "event"); outcome = "done"; ended = "stopped"; break; }
@@ -433,18 +449,20 @@ export class Agent {
 
         let answer: ChatResult | undefined;
         // Too big for the plan → try again with less history (twice).
-        for (let budget = HISTORY_TOKENS; !answer; budget = Math.floor(budget / 2)) {
+        const start = historyBudget(HISTORY_TOKENS, HISTORY_TOKENS_LARGE);
+        for (let budget = start; !answer; budget = Math.floor(budget / 2)) {
           try {
             answer = await chat({
               messages: [
                 ...await this.buildMessages(scope, budget, automated),
                 ...(denial !== null ? [{ role: "assistant" as const, content: denial }, { role: "user" as const, content: scope.capabilityNudge ?? CAPABILITY_NUDGE }] : []),
+                ...(review ? [{ role: "assistant" as const, content: review.draft }, { role: "user" as const, content: review.note }] : []),
                 ...(nudges ? [{ role: "user" as const, content: NUDGE }] : []),
               ], tools, signal,
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`, scope.orgId),
             });
           } catch (err) {
-            if (!(err instanceof RequestTooLargeError) || budget < HISTORY_TOKENS / 4) throw err;
+            if (!(err instanceof RequestTooLargeError) || budget < Math.min(start, HISTORY_TOKENS) / 4) throw err;
           }
         }
         const { message, truncated, outputLimit } = answer;
@@ -458,6 +476,13 @@ export class Agent {
           continue;
         }
         denial = null;
+        const draft = message.content ?? "";
+        if (!calls.length && !automated && !review && draft.trim() && !draft.trim().endsWith("?")) {
+          // Done with code changes: one look over them before telling the owner (bugs a test didn't catch).
+          const changes = scope.review?.();
+          if (changes) { review = { draft, note: REVIEW_NOTE + changes }; continue; }
+        }
+        review = null;
         await this.add(scope, "assistant", message.content ?? "", "text", calls.length ? { toolCalls: calls } : undefined);
         if (!calls.length) {
           if (nudges < MAX_NUDGES && announcesNextStep(message.content ?? "")) { nudges++; continue; }
@@ -880,6 +905,21 @@ export class Agent {
     else this.drainCrashQueue(uuid);
   }
 
+  /**
+   * A lesson Kojy keeps from its own failure (a fix that was undone), in its
+   * memory for this bot: the next attempt — and every later request — sees
+   * it, so the same thing isn't tried again. Never twice the same.
+   */
+  private async learn(project: ProjectRow, note: string): Promise<void> {
+    try {
+      const rows = await this.db.select({ content: agentMemories.content }).from(agentMemories).where(eq(agentMemories.orgId, project.orgId));
+      if (rows.some((r) => normalizeNote(r.content) === normalizeNote(note))) return;
+      await this.db.insert(agentMemories).values({ orgId: project.orgId, projectId: project.id, content: note.slice(0, 300) });
+    } catch (err) {
+      log.warn({ err, uuid: project.uuid }, "Could not save a lesson");
+    }
+  }
+
   /** A tool context for KojyAI's own checks (no undo snapshots: the fix took its own). */
   private gateContext(project: ProjectRow): ToolContext {
     return { db: this.db, supervisor: this.supervisor, project, snapshotted: true, changedFiles: new Set(), git: this.git };
@@ -967,6 +1007,7 @@ export class Agent {
     await this.undoCode(uuid, fix.snapshotId!, "Before undoing an automatic fix that failed KojyAI's checks");
     // The old code runs again (a bot held for its fix stays held: the next attempt follows).
     if (!this.supervisorHeld(uuid) && this.supervisor.isRunning(uuid)) await this.supervisor.handle(uuid, "restart").catch(() => undefined);
+    await this.learn(project, `An automatic fix for "${fix.signature.slice(0, 140)}" failed KojyAI's checks (${failure.slice(0, 120)}) and was undone — that approach doesn't work here.`);
     const key = `${uuid}|${fix.signature}`;
     const failures = (this.failedChecks.get(key) ?? 0) + 1;
     this.failedChecks.set(key, failures);
@@ -1283,6 +1324,7 @@ export class Agent {
       `↶ The automatic fix didn't hold (${why}), so I put the code back as it was before it, and I'm starting a new fix that takes this into account. ` +
       "The code with the earlier fix is saved in Undo.", "event");
     await recordWork(this.db, thread, project.id, "error").catch(() => undefined);
+    await this.learn(project, `An automatic fix for "${w.signature.slice(0, 140)}" didn't hold (${why}) and was undone — look for the real cause instead of repeating it.`);
     const title = `Kojy undid its fix for ${project.name}`;
     await notifyUser(this.db, project.ownerId, "bot_error", title, `The automatic fix didn't hold (${why}). The code is back to how it was before it, and Kojy is working on a new fix.`, `/studio/p/${uuid}`);
     void sendAlert(`↶ ${title}: ${why}.`);
@@ -1487,4 +1529,34 @@ export function missingArguments(spec: ToolSpec | undefined, args: Record<string
     summary: `${name}: missing ${missing.join(", ")} — nothing was run`,
     output: `${name} needs ${(params.required ?? []).join(", ")}; this call had no usable ${missing.join(", ")}. Nothing was run. Call it again with every required argument.`,
   };
+}
+
+/** Said before the owner's request is called done (the changes follow). */
+const REVIEW_NOTE = "[app] Before you finish, review what you changed in this request (below) like a careful reviewer: a bug, a case you missed (None, empty, a wrong type, a user who isn't there), something left half-done, a name that doesn't exist, a change you didn't test. " +
+  "If you find a problem, fix it now with the tools and test again. If it's all good, reply with your final short summary for the owner — don't mention this review.\n";
+
+/** What changed since the request's undo point, as diffs from then to now, for the review (null when nothing). */
+export function reviewText(uuid: string, snapshotId: string): string | null {
+  const tmp = mkdtempSync(path.join(tmpdir(), "kojy-review-"));
+  try {
+    const { files, more } = compareSnapshot(uuid, snapshotId, 15);
+    if (!files.length) return null;
+    extractSnapshot(uuid, snapshotId, tmp);
+    const read = (p: string) => { try { return readFileSync(p, "utf8"); } catch { return ""; } };
+    const parts: string[] = [];
+    for (const f of files) {
+      const then = read(path.join(tmp, f.path));
+      const now = read(path.join(projectDir(uuid), f.path));
+      // compareSnapshot looks back from now: "added" there means Kojy deleted it, "removed" that Kojy created it.
+      if (f.change === "added") { parts.push(`--- ${f.path} (deleted)`); continue; }
+      if (f.change === "removed") { parts.push(`--- ${f.path} (new file)\n${now.split("\n").map((l, i) => `+${String(i + 1).padStart(4)} ${l}`).join("\n")}`); continue; }
+      parts.push(`--- ${f.path} (changed)\n${lineDiff(then, now, 2, 4000)?.text ?? "(too big to show)"}`);
+    }
+    const body = parts.join("\n").slice(0, 8000);
+    return `\`\`\`diff\n${body}${more ? `\n… and ${more} more files` : ""}\n\`\`\``;
+  } catch {
+    return null;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
