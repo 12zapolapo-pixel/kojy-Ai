@@ -542,6 +542,17 @@ function MessageView({ m, projectId, onResolved, onPanel, onOpenBot, onDraft }: 
     // App events ("secrets saved", "code restored"): shown small, without the AI-facing instructions.
     return <p className="text-center text-[11px] text-ink-3">{m.content.replace(/ (Test them|Restart the bot|Read it again|Files you read|Go ahead|Stop and).*$/, "")}</p>;
   }
+  if (m.kind === "todo" && m.card?.items?.length) {
+    const items = m.card.items;
+    return (
+      <div className="border border-line-strong rounded-lg px-3 py-2 text-xs">
+        <p className="text-ink-3 mb-1">Kojy's checklist · {items.filter((t) => t.done).length} of {items.length} done</p>
+        <ul className="space-y-0.5">
+          {items.map((t, i) => <li key={i} className={t.done ? "text-ink-3 line-through" : "text-ink-2"}>{t.done ? "☑" : "☐"} {t.step}</li>)}
+        </ul>
+      </div>
+    );
+  }
   if (m.kind === "plan" && m.card && projectId) return <PlanCardView m={m} projectId={projectId} onResolved={onResolved} onDraft={onDraft} />;
   if (m.kind === "secret_request" && m.card && projectId) return <SecretCard m={m} projectId={projectId} onResolved={onResolved} />;
   if (m.role === "tool") {

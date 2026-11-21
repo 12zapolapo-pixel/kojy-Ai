@@ -95,7 +95,7 @@ FROM ${NODE_IMAGE} AS runner
 # git, less, nano and procps are for the owner's shell and the Git panel
 # (apps/runner/src/terminal.ts, git.ts).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv python3-dev build-essential ca-certificates acl libcap2-bin git less nano procps \
+ && apt-get install -y --no-install-recommends python3 python3-venv python3-dev python3-pyflakes build-essential ca-certificates acl libcap2-bin git less nano procps \
  && (apt-get install -y --no-install-recommends setpriv || true) \
  && rm -rf /var/lib/apt/lists/*
 # V-01 bot sandbox: each project's Python code runs as its own user (see
@@ -128,7 +128,7 @@ COPY --from=build /src/apps/web/dist /srv
 # builds this. Started by scripts/allinone.mjs; see docs/DEPLOY_RAILWAY.md.
 FROM ${NODE_IMAGE} AS allinone
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates python3 python3-venv python3-dev build-essential acl libcap2-bin git less nano procps \
+ && apt-get install -y --no-install-recommends curl ca-certificates python3 python3-venv python3-dev python3-pyflakes build-essential acl libcap2-bin git less nano procps \
  && (apt-get install -y --no-install-recommends setpriv || true) \
  && install -d /usr/share/postgresql-common/pgdg \
  && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \

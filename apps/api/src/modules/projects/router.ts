@@ -374,10 +374,13 @@ export const projectsRouter = router({
       const [row] = await ctx.db.select().from(projectMessages)
         .where(and(eq(projectMessages.id, input.messageId), eq(projectMessages.thread, `project:${project.id}`), eq(projectMessages.kind, "plan"))).limit(1);
       if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "That plan is gone" });
-      const data = (row.data ?? {}) as { card?: { title?: string; resolved?: boolean } };
+      const data = (row.data ?? {}) as { card?: { title?: string; steps?: string[]; resolved?: boolean } };
       if (data.card?.resolved) return { success: true };
       await ctx.db.update(projectMessages).set({ data: { ...data, card: { ...data.card, resolved: true } } }).where(eq(projectMessages.id, row.id));
-      await addToThread(ctx.db, `project:${project.id}`, project.id, "user", "event", `The owner approved the plan "${data.card?.title ?? ""}". Go ahead and build it.`);
+      // The steps go with the approval, so Kojy has the plan even when the chat window no longer shows it.
+      const steps = (data.card?.steps ?? []).map((st, i) => `${i + 1}. ${st}`).join("\n");
+      await addToThread(ctx.db, `project:${project.id}`, project.id, "user", "event",
+        `The owner approved the plan "${data.card?.title ?? ""}". Go ahead and build it${steps ? `:\n${steps}` : "."}`);
       await control(project.uuid, "agent");
       return { success: true };
     }),

@@ -11,7 +11,7 @@ import { and, desc, eq, ilike, inArray, or } from "drizzle-orm";
 import type { Database } from "@kojyai/db";
 import { agentWorkLog, projectMessages } from "@kojyai/db/schema";
 import type { ToolSpec } from "./groq.js";
-import { requestIndex } from "./taskMemory.js";
+import { deniesCapability, requestIndex } from "./taskMemory.js";
 
 export type WorkStatus = "done" | "waiting_for_owner" | "in_progress" | "paused" | "stopped" | "error";
 
@@ -125,7 +125,9 @@ export function formatEntry(e: Pick<LogEntry, "status" | "request" | "summary" |
   const more = e.files.length > (short ? 5 : 30) ? ` (+${e.files.length - (short ? 5 : 30)} more)` : "";
   const parts = [`${day(e.updatedAt)} UTC · ${e.status} · "${clip(e.request.replace(/\s+/g, " "), short ? 100 : 400)}"`];
   if (files) parts.push(`files: ${files}${more}`);
-  if (e.summary) parts.push(`result: ${clip(e.summary.replace(/\s+/g, " "), short ? 160 : 600)}`);
+  // A request Kojy ended by wrongly saying it couldn't do it: that reply isn't repeated as its "result".
+  if (e.summary && deniesCapability(e.summary)) parts.push("result: not done — Kojy wrongly said it couldn't (it has the tools for it)");
+  else if (e.summary) parts.push(`result: ${clip(e.summary.replace(/\s+/g, " "), short ? 160 : 600)}`);
   return parts.join(" → ");
 }
 

@@ -45,6 +45,8 @@ const PYTHON_BIN  = process.env.PYTHON_BIN ?? "python3";
 export const LAUNCHER = path.join(path.dirname(new URL(import.meta.url).pathname), "launcher.py");
 /** check_code's loader check (see botcheck.py). */
 export const BOTCHECK = path.join(path.dirname(new URL(import.meta.url).pathname), "botcheck.py");
+/** check_code's missing-package finder (codecheck.py). */
+export const CODECHECK = path.join(path.dirname(new URL(import.meta.url).pathname), "codecheck.py");
 /** What a bot host runs (uploaded as kojy_start.py, see hoststart.py). */
 export const HOSTSTART = path.join(path.dirname(new URL(import.meta.url).pathname), "hoststart.py");
 const LOG_DIR     = path.join(PROJECTS_DIR, ".logs");

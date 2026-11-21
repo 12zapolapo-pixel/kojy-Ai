@@ -39,8 +39,10 @@ export const STUDIO_TOOL_SPECS: ToolSpec[] = [
   fn("server_status", "Server health: services, memory, disk, running bots, last backup."),
   fn("control_bot", "Start, stop or restart a bot by name (or 'all').",
     { bot: str("bot name, or 'all'"), action: { type: "string", enum: ["start", "stop", "restart"] } }, ["bot", "action"]),
-  fn("open_bot", "Show the owner a button that opens a bot's own chat (for coding, fixing or setting it up).",
+  fn("open_bot", "Show the owner a button that opens a bot's own chat.",
     { bot: str("bot name") }, ["bot"]),
+  fn("work_on_bot", "Hand a change, fix or setup of an existing bot to Kojy in that bot's own chat, where it has every coding tool; it starts right away and the owner gets a button to watch. Pass the owner's request in full.",
+    { bot: str("bot name"), request: str("what to do, in the owner's words plus useful detail") }, ["bot", "request"]),
   fn("create_bot", "Create a new Python bot and start building it in its own chat (Kojy writes, tests and starts it there). Use when the owner asks for a new bot. If a starter template fits, pass it: the bot then works right away and only the changes need coding.",
     { name: str("short bot name"), description: str("what the bot should do, in the owner's words plus useful detail"),
       template: { type: "string", enum: BOT_TEMPLATES.map((t) => t.id), description: BOT_TEMPLATES.map((t) => `${t.id}: ${t.description}`).join(" · ") } },
@@ -149,6 +151,28 @@ export async function runStudioTool(name: string, args: Record<string, unknown>,
         const [b] = findBots(await allBots(ctx), String(args.bot ?? ""));
         if (!b) return { ok: false, output: `No bot called "${args.bot}".`, summary: `No bot "${args.bot}"` };
         return { ok: true, output: `The owner now has a button to open ${b.name}'s chat.`, summary: `Open ${b.name}`, cardKind: "ui", card: { openBot: { kind: b.kind, id: b.uuid, name: b.name } } };
+      }
+
+      case "work_on_bot": {
+        const request = String(args.request ?? "").trim().slice(0, 4000);
+        if (!request) return { ok: false, output: "Say what Kojy should do in that bot's chat.", summary: "No request" };
+        const matches = findBots(await allBots(ctx), String(args.bot ?? ""));
+        if (matches.length !== 1) {
+          return { ok: false, output: matches.length ? `"${args.bot}" matches ${matches.map((b) => b.name).join(", ")} — use the exact name.` : `No bot called "${args.bot}".`, summary: `Which bot? "${args.bot}"` };
+        }
+        const b = matches[0]!;
+        const content = `(Asked in the Studio chat) ${request}`;
+        if (b.kind === "python") {
+          await ctx.db.insert(projectMessages).values({ thread: `project:${b.id}`, projectId: b.id, role: "user", kind: "text", content });
+          ctx.startBotChat(b.uuid);
+        } else {
+          await ctx.db.insert(projectMessages).values({ thread: `bot:${b.id}`, projectId: 0, role: "user", kind: "text", content });
+          ctx.startBotChat(`jsbot-${b.uuid}`);
+        }
+        return {
+          ok: true, output: `Kojy is working on it in ${b.name}'s chat now; the owner has a button to open it and watch.`,
+          summary: `Started on it in ${b.name}'s chat`, cardKind: "ui", card: { openBot: { kind: b.kind, id: b.uuid, name: b.name } },
+        };
       }
 
       case "create_bot": {

@@ -106,6 +106,58 @@ export function announcesNextStep(text: string): boolean {
   const tail = t.slice(-300).replace(/\blet me know\b/gi, "");
   return /\b(let'?s|let me|i will|i'll|i am going to|i'm going to|going to now|next,? i)\b/i.test(tail);
 }
+// ── false "I can't" ──────────────────────────────────────────────────────────
+
+/** How many times in a row a reply that wrongly says Kojy can't do it is held back and asked again. */
+export const MAX_DENIALS = 2;
+
+const DENIAL: RegExp[] = [
+  // "I don't have the ability / tools / access …", "I lack the capability …"
+  /\b(?:i|we)\s+(?:currently\s+|really\s+|unfortunately\s+)?(?:do not|don['’]t|cannot|can['’]?t|can not|have no|lack)\s+(?:have\s+)?(?:the\s+|any\s+|a\s+)?(?:direct\s+|necessary\s+|required\s+)?(?:ability|abilities|capabilit(?:y|ies)|tools?|access|permissions?|means)\b/i,
+  // "I'm unable to write files", "I am not able to run commands"
+  /\b(?:i['’]m|i am)\s+(?:currently\s+|unfortunately\s+)?(?:unable|not able)\s+to\s+(?:directly\s+)?(?:write|create|edit|modify|change|update|run|execute|access|save|code|build|make|apply|install|read|use)\b/i,
+  // "I can't edit the files", "I cannot run commands"
+  /\b(?:i|we)\s+(?:cannot|can['’]?t|can not)\s+(?:directly\s+|actually\s+)?(?:write|create|edit|modify|change|update|run|execute|access|save|apply|install|read|touch|code)\s+(?:the\s+|your\s+|any\s+|these\s+|this\s+)?(?:files?|code|commands?|bot['’]?s?\s+(?:code|files)|terminal|shell|scripts?|programs?|changes?|edits?|packages?)\b/i,
+  /\b(?:beyond|outside(?: of)?)\s+(?:my|the scope of my)\s+(?:capabilities|abilities|tools|access)\b/i,
+  /\bas an ai\b[^.]{0,60}\b(?:can['’]?t|cannot|unable|don['’]t have)\b/i,
+  // Handing the work back: "you'll need to paste this yourself", "copy it in manually"
+  /\byou(?:['’]ll| will)?\s+(?:need|have)\s+to\s+(?:paste|copy|add|apply|put|insert|make|create|do|edit)\s+(?:it|this|that|these|them|the (?:code|changes?|file|snippet|lines))\b[^.]{0,40}\b(?:yourself|manually|by hand)\b/i,
+  /\bdon['’]t have (?:a |the |any )?(?:tool|way|function) (?:to|for)\b/i,
+];
+
+/**
+ * Things only the owner can do; a reply about these is right to say Kojy
+ * can't (a portal switch, a secret's value, an account, a payment).
+ */
+const OWNER_ONLY = /developer portal|discord\.com\/developers|portal|highrise (?:app|settings|room settings)|room settings|moderator|your account|password|log ?in to your|billing|payment|credit card|secret value|token value|api key from|your phone|your computer|captcha/i;
+
+/**
+ * A reply with no tool call that tells the owner Kojy can't do it, has no
+ * tools, access or ability, or that they should paste the code in
+ * themselves. In a bot's chat that's (almost) never true: the agent then
+ * holds the reply back and tells Kojy what it has. One about something only
+ * the owner can do (a Developer Portal switch, a secret value) isn't counted.
+ */
+export function deniesCapability(text: string): boolean {
+  const t = text.trim();
+  if (!t || OWNER_ONLY.test(t)) return false;
+  return DENIAL.some((re) => re.test(t));
+}
+
+/** Sent after a false "I can't" in a bot's chat (not stored; the reply that said it isn't kept). */
+export const CAPABILITY_NUDGE =
+  "[app] Your last reply said you can't do this, or don't have the tools or access for it. That isn't right: in this chat your tools work. " +
+  "You can read, write and edit the bot's files (read_file, write_file, append_file, edit_file, multi_edit), run shell commands and Python in its folder (run_command, run_python), " +
+  "install packages (requirements.txt then check_code, or pip with run_command), check and test code (check_code, test_in_room, run_saved_tests), " +
+  "start, stop or restart it (bot_control), read its logs (get_logs), use git, and read web pages (fetch_url). " +
+  "Do what the owner asked now by calling the right tool; don't describe it and don't ask the owner to do it. " +
+  "Only if it truly needs something only the owner can do (a switch in Discord's Developer Portal or in Highrise, a secret's value, a payment), say exactly what and why.";
+
+/** The same, for the Studio chat. */
+export const STUDIO_CAPABILITY_NUDGE =
+  "[app] Your last reply said you can't do this. In the Studio chat you can create bots (create_bot), start, stop or restart them (control_bot), " +
+  "and hand any change, fix or setup of a bot's code to Kojy in that bot's own chat with work_on_bot — it has every coding tool there. Do that now instead of saying you can't.";
+
 export function continuesAutomatically(outcome: PartOutcome, part: number, maxParts: number, aborted: boolean): boolean {
   return outcome === "limit" && !aborted && part + 1 < maxParts;
 }

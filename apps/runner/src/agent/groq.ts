@@ -2,13 +2,15 @@
  * AI client for the coder AI: OpenAI-compatible chat with tool calls.
  * OWNERSHIP: apps/runner/src/agent
  *
- * Providers, in the order they are tried:
- *   1. Mistral (MISTRAL_API_KEY; models from MISTRAL_MODELS, default
- *      mistral-large-4 then mistral-large-2512 = Mistral Large 3).
+ * Providers, in the order they are tried (AGENT_LANE_ORDER changes it, e.g.
+ * "openai,gemini,mistral,groq" to try a paid model first):
+ *   1. Mistral (MISTRAL_API_KEY; models from MISTRAL_MODELS).
  *   2. Gemini (Google AI Studio, OpenAI-compatible endpoint). Every key is
  *      tried with every model: keys come from AGENT_API_KEY and
  *      AGENT_API_KEYS (comma-separated), models from GEMINI_MODELS.
- *   3. Groq (optional, GROQ_API_KEY): the main and fast models, paced to the
+ *   3. Gateways (LiteLLM, free providers, OpenAI, DeepSeek), each switched
+ *      on by its key and model list — see GATEWAYS.
+ *   4. Groq (optional, GROQ_API_KEY): the main and fast models, paced to the
  *      free plan's per-minute token budget.
  *
  * Each (key, model) pair is a "lane". A lane that hits its limit (429), fails
@@ -16,10 +18,20 @@
  * lane is tried straight away, so one exhausted key never stops the work.
  * Keys are never logged.
  *
+ * Output room: every step asks each AI for as much output as its plan
+ * allows, up to AGENT_MAX_OUTPUT_TOKENS (8192 by default: a whole file in one
+ * tool call). The old fixed ~2,000 tokens cut every bigger write_file off in
+ * the middle of its arguments; the agent then ran it with none and Kojy ended
+ * up telling the owner it "didn't have the tools". An answer cut off at its
+ * limit (finish_reason "length") is asked again with more room where the
+ * plan allows; otherwise it comes back marked `truncated`, so a cut-off call
+ * is never run and the model is told to write in parts.
+ *
  * GEMINI_BASE_URL / GROQ_BASE_URL can point at any OpenAI-compatible server
  * (used by tests).
  */
 
+import { createHash, randomBytes } from "node:crypto";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("agent-ai");
@@ -70,7 +82,21 @@ const GROQ_SMART = process.env.AGENT_MODEL ?? process.env.GROQ_MODEL_SMART ?? "o
 const GROQ_FAST = process.env.AGENT_FALLBACK_MODEL ?? process.env.GROQ_MODEL_FAST ?? "openai/gpt-oss-20b";
 const TOKENS_PER_MINUTE = Number(process.env.AGENT_TOKENS_PER_MINUTE ?? 7500);
 /** One AI call (headers and body) gives up after this; the next AI is tried. */
-const REQUEST_TIMEOUT_MS = Number(process.env.AGENT_REQUEST_TIMEOUT_MS ?? 120_000);
+const REQUEST_TIMEOUT_MS = Number(process.env.AGENT_REQUEST_TIMEOUT_MS ?? 180_000);
+
+/** The most output one step asks for: room for a whole file in one tool call. */
+const MAX_OUTPUT_TOKENS = Math.max(256, Number(process.env.AGENT_MAX_OUTPUT_TOKENS) || 8192);
+/** An AI that can't give a request at least this much output isn't used for it: its answer would be cut off. */
+const MIN_OUTPUT_TOKENS = Math.max(64, Number(process.env.AGENT_MIN_OUTPUT_TOKENS) || 1024);
+/** Gemini counts its thinking as output: this much extra room on top (its plan isn't paced by tokens). */
+const THINKING_TOKENS = Math.max(0, Number(process.env.AGENT_THINKING_TOKENS ?? 4096));
+/** The most output an answer that was cut off is asked again with. */
+const RETRY_OUTPUT_TOKENS = Math.max(MAX_OUTPUT_TOKENS, Number(process.env.AGENT_RETRY_OUTPUT_TOKENS) || 32_768);
+/** What a gateway's models may be asked for unless <NAME>_MAX_OUTPUT_TOKENS says otherwise (many cap output at 8K). */
+const GATEWAY_OUTPUT_TOKENS = 8192;
+
+/** Provider names (lower case) in the order to try them; unlisted ones follow in the usual order. */
+const LANE_ORDER = (process.env.AGENT_LANE_ORDER ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 
 /**
  * More models through OpenAI-compatible endpoints, each switched on by its
@@ -79,16 +105,21 @@ const REQUEST_TIMEOUT_MS = Number(process.env.AGENT_REQUEST_TIMEOUT_MS ?? 120_00
  *   <NAME>_MODELS       models to use, comma-separated, best first
  *   <NAME>_BASE_URL     the endpoint (required for LiteLLM; the others have a default)
  *   <NAME>_TOKENS_PER_MINUTE  the plan's per-minute token budget (optional)
- * LiteLLM is a self-hosted router to 100+ providers; the others are providers
- * with free plans. They're tried after Gemini and before Groq.
+ *   <NAME>_MAX_OUTPUT_TOKENS  the most output its models give per answer (optional)
+ * LiteLLM is a self-hosted router to 100+ providers; Cerebras … GonkaRouter
+ * have free plans; OpenAI and DeepSeek are paid (OPENAI_API_KEY is also the
+ * website's chat key: Kojy only uses it once OPENAI_MODELS is set). They're
+ * tried after Gemini and before Groq unless AGENT_LANE_ORDER says otherwise.
  */
-export const GATEWAYS: { name: string; label: string; base?: string }[] = [
+export const GATEWAYS: { name: string; label: string; base?: string; maxOutput?: number }[] = [
   { name: "LITELLM", label: "LiteLLM" },
   { name: "CEREBRAS", label: "Cerebras", base: "https://api.cerebras.ai/v1" },
   { name: "SAMBANOVA", label: "SambaNova", base: "https://api.sambanova.ai/v1" },
   { name: "GITHUB_MODELS", label: "GitHub Models", base: "https://models.github.ai/inference" },
   { name: "OPENROUTER", label: "OpenRouter", base: "https://openrouter.ai/api/v1" },
   { name: "GONKAROUTER", label: "GonkaRouter", base: "https://api.gonkarouter.io/v1" },
+  { name: "OPENAI", label: "OpenAI", base: "https://api.openai.com/v1", maxOutput: 16_384 },
+  { name: "DEEPSEEK", label: "DeepSeek", base: "https://api.deepseek.com/v1" },
 ];
 
 interface Lane {
@@ -99,6 +130,10 @@ interface Lane {
   maxRequestTokens: number;
   /** The plan's tokens-per-minute budget (Infinity: limited by cooldowns only). */
   tokensPerMinute: number;
+  /** The most output tokens this lane's model may be asked for in one answer. */
+  maxOutput: number;
+  /** The model's thinking counts as output (Gemini): it gets THINKING_TOKENS more room. */
+  thinks: boolean;
   /** 1-based number of the key within its provider, for display only. */
   keyNo: number;
   /** "gemini", "mistral", "groq", or a gateway's name in lower case ("litellm", "cerebras"…). */
@@ -115,35 +150,71 @@ function buildLanes(): Lane[] {
   // can't take a request over its tokens-per-minute limit at all.
   const gemini = GEMINI_MODELS.flatMap((model) =>
     GEMINI_KEYS.map((key, i): Lane => ({
-      id: `gemini:${model}:${i}`, order: 0, maxRequestTokens: Infinity, tokensPerMinute: Infinity, keyNo: i + 1, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
+      id: `gemini:${model}:${i}`, order: 0, maxRequestTokens: Infinity, tokensPerMinute: Infinity, maxOutput: RETRY_OUTPUT_TOKENS, thinks: true,
+      keyNo: i + 1, provider: "gemini", model, key, base: GEMINI_BASE, label: `Gemini ${model} (key ${i + 1})`,
     })),
   );
   const mistral = MISTRAL_KEY
     ? MISTRAL_MODELS.map((model): Lane => ({
-        id: `mistral:${model}`, order: 0, maxRequestTokens: MISTRAL_TOKENS_PER_MINUTE, tokensPerMinute: MISTRAL_TOKENS_PER_MINUTE, keyNo: 1, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
+        id: `mistral:${model}`, order: 0, maxRequestTokens: MISTRAL_TOKENS_PER_MINUTE, tokensPerMinute: MISTRAL_TOKENS_PER_MINUTE, maxOutput: RETRY_OUTPUT_TOKENS, thinks: false,
+        keyNo: 1, provider: "mistral", model, key: MISTRAL_KEY, base: MISTRAL_BASE, label: `Mistral ${model}`,
       }))
     : [];
-  const gateways = GATEWAYS.flatMap(({ name, label, base: defaultBase }): Lane[] => {
+  const gateways = GATEWAYS.flatMap(({ name, label, base: defaultBase, maxOutput }): Lane[] => {
     const key = process.env[`${name}_API_KEY`];
     const base = (process.env[`${name}_BASE_URL`] || defaultBase || "").trim().replace(/\/$/, "");
     const models = (process.env[`${name}_MODELS`] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     if (!usable(key) || !base || !models.length) return [];
     const perMinute = Number(process.env[`${name}_TOKENS_PER_MINUTE`]) || Infinity;
+    const output = Number(process.env[`${name}_MAX_OUTPUT_TOKENS`]) || maxOutput || GATEWAY_OUTPUT_TOKENS;
     return models.map((model): Lane => ({
-      id: `${name.toLowerCase()}:${model}`, order: 0, maxRequestTokens: perMinute, tokensPerMinute: perMinute, keyNo: 1,
+      id: `${name.toLowerCase()}:${model}`, order: 0, maxRequestTokens: perMinute, tokensPerMinute: perMinute, maxOutput: output, thinks: false, keyNo: 1,
       provider: name.toLowerCase(), model, key: key.trim(), base, label: `${label} ${model}`,
     }));
   });
-  if (!GROQ_KEY) return [...mistral, ...gemini, ...gateways];
-  const groqModels = [...new Set([GROQ_SMART, GROQ_FAST])];
+  const groqModels = GROQ_KEY ? [...new Set([GROQ_SMART, GROQ_FAST])] : [];
   const groq = groqModels.map((model): Lane => ({
-    id: `groq:${model}`, order: 0, maxRequestTokens: TOKENS_PER_MINUTE, tokensPerMinute: TOKENS_PER_MINUTE, keyNo: 1, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
+    id: `groq:${model}`, order: 0, maxRequestTokens: TOKENS_PER_MINUTE, tokensPerMinute: TOKENS_PER_MINUTE, maxOutput: RETRY_OUTPUT_TOKENS, thinks: false,
+    keyNo: 1, provider: "groq", model, key: GROQ_KEY, base: GROQ_BASE, label: `Groq ${model}`,
   }));
-  return [...mistral, ...gemini, ...gateways, ...groq];
+  return orderLanes([...mistral, ...gemini, ...gateways, ...groq], LANE_ORDER);
+}
+
+/** Lanes of the providers named in `order` first, in that order; the rest keep their usual order after them. */
+export function orderLanes<T extends { provider: string }>(lanes: T[], order: string[]): T[] {
+  if (!order.length) return lanes;
+  const rank = (l: T) => { const i = order.indexOf(l.provider); return i < 0 ? order.length : i; };
+  return lanes.map((l, i) => ({ l, i })).sort((a, b) => rank(a.l) - rank(b.l) || a.i - b.i).map((x) => x.l);
 }
 
 const LANES = buildLanes();
 LANES.forEach((l, i) => { l.order = i; });
+
+/** Output limits learned from a model's own error ("max_tokens must be ≤ 8192"), per lane. */
+const learnedCap = new Map<string, number>();
+
+/**
+ * How many output tokens to ask `lane` for, for a request of `input` tokens
+ * that wants `want` (more after a cut-off answer: `boost`). As much as the
+ * plan's per-minute budget leaves, never more than the model's own limit. 0:
+ * the lane can't give this request enough room (it isn't used for it).
+ */
+export function outputFor(lane: Pick<Lane, "maxRequestTokens" | "maxOutput" | "thinks"> & { id?: string }, input: number, want: number, boost = 0): number {
+  const room = lane.maxRequestTokens - input; // Infinity for lanes paced by cooldowns only
+  const cap = Math.min(lane.maxOutput, (lane.id ? learnedCap.get(lane.id) : undefined) ?? Infinity);
+  const out = Math.floor(Math.min(Math.max(want, boost) + (lane.thinks ? THINKING_TOKENS : 0), cap, room));
+  return out >= Math.min(MIN_OUTPUT_TOKENS, want) ? out : 0;
+}
+
+/**
+ * The output limit an error says a model has ("max_tokens must be less than
+ * or equal to 8192", "supports at most 4096 completion tokens"): the largest
+ * number in it below what was asked for. null when it names none.
+ */
+export function maxTokensFromError(text: string, asked: number): number | null {
+  const nums = (text.match(/\d{3,7}/g) ?? []).map(Number).filter((n) => n >= 256 && n < asked);
+  return nums.length ? Math.max(...nums) : null;
+}
 
 /** Rough size of a request: ~4 characters per token. */
 export const estimateTokens = (text: string) => Math.ceil(text.length / 4);
@@ -183,7 +254,7 @@ let lastMistralAt = 0;
  */
 const DUMMY_SIGNATURE = "skip_thought_signature_validator";
 export function prepareMessages(provider: string, messages: ChatMessage[]): ChatMessage[] {
-  return messages.map((m) => {
+  const out = messages.map((m) => {
     if (m.role !== "assistant" || !m.tool_calls?.length) return m;
     const tool_calls = m.tool_calls.map((c): ToolCall => {
       if (provider === "gemini") {
@@ -196,6 +267,114 @@ export function prepareMessages(provider: string, messages: ChatMessage[]): Chat
     });
     return { ...m, tool_calls };
   });
+  return provider === "mistral" ? forMistral(out) : out;
+}
+
+const BASE62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+/** Mistral only takes tool-call ids of exactly 9 letters and digits; other models' ids are mapped (the same id always maps the same way). */
+export function mistralToolId(id: string): string {
+  if (/^[A-Za-z0-9]{9}$/.test(id)) return id;
+  const h = createHash("sha256").update(id).digest();
+  let s = "";
+  for (let i = 0; i < 9; i++) s += BASE62[h[i]! % 62];
+  return s;
+}
+
+/**
+ * Mistral refuses a history with another model's tool-call ids ("must be
+ * a-z, A-Z, 0-9, with a length of 9") and a user turn straight after a tool
+ * result (after a pause for the owner's secrets or plan approval). Both are
+ * fixed in the copy sent to it; the saved chat isn't changed.
+ */
+function forMistral(messages: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "user" && out[out.length - 1]?.role === "tool") out.push({ role: "assistant", content: "OK." });
+    if (m.role === "assistant" && m.tool_calls?.length) out.push({ ...m, tool_calls: m.tool_calls.map((c) => ({ ...c, id: mistralToolId(c.id) })) });
+    else if (m.role === "tool" && m.tool_call_id) out.push({ ...m, tool_call_id: mistralToolId(m.tool_call_id) });
+    else out.push(m);
+  }
+  return out;
+}
+
+const newCallId = () => `call_${randomBytes(9).toString("base64url").replace(/[-_]/g, "x")}`;
+
+/**
+ * Tool calls as every provider's answer may carry them, made uniform: a name
+ * is required, arguments are a JSON string (some send an object), and every
+ * call has its own id (some send none, or the same one twice).
+ */
+export function normalizeToolCalls(raw: unknown): ToolCall[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ToolCall[] = [];
+  const ids = new Set<string>();
+  for (const c of raw) {
+    if (!c || typeof c !== "object") continue;
+    const call = c as Partial<ToolCall> & { function?: { name?: unknown; arguments?: unknown } };
+    const name = typeof call.function?.name === "string" ? call.function.name.trim() : "";
+    if (!name) continue;
+    const args = call.function?.arguments;
+    let id = typeof call.id === "string" && call.id.trim() ? call.id : newCallId();
+    if (ids.has(id)) id = newCallId();
+    ids.add(id);
+    out.push({ ...(call as ToolCall), id, type: "function", function: { name, arguments: typeof args === "string" ? args : JSON.stringify(args ?? {}) } });
+  }
+  return out;
+}
+
+const tryJson = (s: string): unknown => { try { return JSON.parse(s.trim()); } catch { return undefined; } };
+
+/**
+ * Tool calls a model wrote into its text instead of the tool_calls field —
+ * what some self-hosted and gateway models do when their server isn't set up
+ * to parse them (`<tool_call>{…}</tool_call>`, `<function=name>{…}</function>`,
+ * `[TOOL_CALLS][…]`, DeepSeek's markers, or an answer that is only
+ * `{"name": …, "arguments": …}`). Only names of tools this request offered
+ * count. Returns them with the text that's left (null when nothing is).
+ */
+export function textToolCalls(text: string, names: Set<string>): { calls: ToolCall[]; text: string | null } {
+  const calls: ToolCall[] = [];
+  const take = (name: unknown, args: unknown): boolean => {
+    if (typeof name !== "string" || !names.has(name.trim())) return false;
+    const a = typeof args === "string" ? args : JSON.stringify(args ?? {});
+    calls.push({ id: newCallId(), type: "function", function: { name: name.trim(), arguments: a } });
+    return true;
+  };
+  const fromObject = (v: unknown): boolean => {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+    const o = v as Record<string, unknown>;
+    const fnObj = o.function && typeof o.function === "object" ? o.function as Record<string, unknown> : null;
+    return take(o.name ?? o.tool ?? fnObj?.name, o.arguments ?? o.parameters ?? o.args ?? o.input ?? fnObj?.arguments ?? {});
+  };
+  let rest = text
+    .replace(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g, (m, body: string) => (fromObject(tryJson(body)) ? "" : m))
+    .replace(/<function=([\w.-]+)>\s*(\{[\s\S]*?\})\s*(?:<\/function>|$)/g, (m, name: string, body: string) => {
+      const args = tryJson(body);
+      return args !== undefined && take(name, args) ? "" : m;
+    })
+    .replace(/\[TOOL_CALLS\]\s*(\[[\s\S]*\])/g, (m, body: string) => {
+      const list = tryJson(body);
+      return Array.isArray(list) && list.map(fromObject).some(Boolean) ? "" : m;
+    })
+    .replace(/<｜tool▁call▁begin｜>[\s\S]*?<｜tool▁sep｜>\s*([\w.-]+)\s*```(?:json)?\s*([\s\S]*?)```\s*<｜tool▁call▁end｜>/g, (m, name: string, body: string) => {
+      const args = tryJson(body);
+      return args !== undefined && take(name, args) ? "" : m;
+    })
+    .replace(/<｜tool▁calls?▁(?:begin|end)｜>/g, "");
+  if (!calls.length) {
+    // The whole answer is one call written as JSON (perhaps fenced).
+    const whole = /^\s*(?:```(?:json)?\s*)?(\{[\s\S]*\})\s*(?:```)?\s*$/.exec(text);
+    if (whole && fromObject(tryJson(whole[1]!))) rest = "";
+  }
+  if (!calls.length) return { calls, text };
+  rest = rest.trim();
+  return { calls, text: rest || null };
+}
+
+/** Whether a tool call's arguments are a complete JSON object (a cut-off answer leaves them unfinished). */
+export function argumentsParse(args: string): boolean {
+  const v = tryJson(args || "{}");
+  return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
 // ─── Usage for the chat's "AI models" circle ──────────────────────────────────
@@ -296,6 +475,7 @@ export function googleQuota(text: string): { daily: boolean; noFreeTier: boolean
 export interface ChatOptions {
   messages: ChatMessage[];
   tools: ToolSpec[];
+  /** The most output this step needs (default AGENT_MAX_OUTPUT_TOKENS); each AI gets up to what its plan allows. */
   maxTokens?: number;
   /** Called while waiting on rate limits, so the chat can say so. */
   onWait?: (seconds: number, why: string) => void;
@@ -323,19 +503,42 @@ export function contentText(content: unknown): string | null {
 }
 
 const TOO_LARGE = /context_length|context length|maximum context|too large|too long|exceeds the maximum number of tokens/i;
+/** An error about the output limit itself (not the request's size). */
+const OUTPUT_LIMIT = /max_(?:completion_)?tokens|max_output_tokens|maxOutputTokens/i;
+const CUT_OFF = /^(?:length|max_tokens|max_output_tokens)$/i;
 
-export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; model: string }> {
+export interface ChatResult {
+  message: ChatMessage;
+  model: string;
+  /**
+   * The answer stopped at its output limit (finish_reason "length"): a tool
+   * call in it may be cut off — its arguments then don't parse (argumentsParse).
+   */
+  truncated: boolean;
+  /** The output limit (tokens) the answering AI had for this step. */
+  outputLimit: number;
+}
+
+export async function chat(opts: ChatOptions): Promise<ChatResult> {
   if (LANES.length === 0) {
-    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter/GonkaRouter key and model list in the server's .env.");
+    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter/GonkaRouter/OpenAI/DeepSeek key and model list in the server's .env.");
   }
-  const maxTokens = opts.maxTokens ?? Number(process.env.AGENT_MAX_OUTPUT_TOKENS ?? 1200);
-  const size = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools)) + maxTokens;
+  const want = Math.max(1, opts.maxTokens ?? MAX_OUTPUT_TOKENS);
+  const input = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools));
+  const toolNames = new Set(opts.tools.map((t) => t.function.name));
   let badRequests = 0;
   /** Lanes that rejected this particular request (a content problem, not the lane's fault). */
   const skip = new Set<string>();
   /** Lanes this request turned out to be too large for. */
   const tooBig = new Set<string>();
-  const fits = (l: Lane) => size <= l.maxRequestTokens && !tooBig.has(l.id);
+  /** Lanes asked again with more output room after a cut-off answer (once each): the room asked for. */
+  const boosted = new Map<string, number>();
+  /** Lanes whose output limit was corrected from their own error during this request (once each). */
+  const capFixed = new Set<string>();
+  const outOf = (l: Lane) => outputFor(l, input, want, boosted.get(l.id) ?? 0);
+  /** What the request counts against a lane's per-minute budget: what's sent plus the output asked for. */
+  const sizeOf = (l: Lane) => input + outOf(l);
+  const fits = (l: Lane) => outOf(l) > 0 && !tooBig.has(l.id);
   let firstRejection = "";
 
   /** Each lane gets a couple of tries per request; waiting for one doesn't use them up. */
@@ -348,11 +551,11 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
 
     const now = Date.now();
-    const lane = LANES.find((l) => !skip.has(l.id) && fits(l) && readyAt(l, size) <= now);
+    const lane = LANES.find((l) => !skip.has(l.id) && fits(l) && readyAt(l, sizeOf(l)) <= now);
     if (!lane) {
       // Lanes that could take this request once their cooldown or minute budget allows.
       const later = LANES.filter((l) => !skip.has(l.id) && fits(l));
-      const soonest = later.length ? Math.min(...later.map((l) => readyAt(l, size))) - now : Infinity;
+      const soonest = later.length ? Math.min(...later.map((l) => readyAt(l, sizeOf(l)))) - now : Infinity;
       // A lane free right now that's only too small for it (Groq): a shorter history goes at once.
       const smallerNow = LANES.some((l) => !skip.has(l.id) && !fits(l) && !isCooling(l));
       // Waiting for a lane that takes the whole chat beats cutting it — but only
@@ -383,13 +586,14 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
       lastMistralAt = Date.now();
     }
 
+    const out = outOf(lane);
     const body: Record<string, unknown> = {
       model: lane.model,
       messages: prepareMessages(lane.provider, opts.messages),
-      tools: opts.tools,
-      tool_choice: "auto",
-      temperature: 0.2,
-      max_tokens: maxTokens + 800, // headroom for reasoning tokens
+      ...(opts.tools.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
+      // OpenAI's current models only take max_completion_tokens, and its
+      // reasoning models only their default temperature.
+      ...(lane.provider === "openai" ? { max_completion_tokens: out } : { temperature: 0.2, max_tokens: out }),
     };
     if (lane.provider === "groq") body.reasoning_effort = "medium";
 
@@ -410,34 +614,69 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
     if (!res) continue;
     if (Number.isFinite(lane.tokensPerMinute)) {
       const list = recent.get(lane.id) ?? [];
-      list.push({ at: Date.now(), tokens: size });
+      list.push({ at: Date.now(), tokens: sizeOf(lane) });
       recent.set(lane.id, list);
     }
 
     if (res.ok) {
-      type Completion = { choices?: { message: { content?: unknown; tool_calls?: ToolCall[] } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      type Completion = { choices?: { message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
       // The body can time out or be cut off too.
       const data = await (res.json() as Promise<Completion>).catch((): null => {
         if (opts.signal?.aborted) throw new AiUnavailableError("Stopped.");
         return null;
       });
       if (!data) { cool(lane, 60_000, `${lane.label} sent an incomplete answer`, "unavailable"); continue; }
-      const message = data.choices?.[0]?.message;
-      if (!message) { cool(lane, 30_000, `${lane.label} returned an empty answer`); continue; }
+      const choice = data.choices?.[0];
+      const raw = choice?.message;
+      if (!raw) { cool(lane, 30_000, `${lane.label} returned an empty answer`); continue; }
       recordUsage(lane, { req: 1, tokensIn: data.usage?.prompt_tokens ?? 0, tokensOut: data.usage?.completion_tokens ?? 0 });
-      const content = contentText(message.content);
-      const toolCalls = message.tool_calls?.length ? message.tool_calls : undefined;
-      if (!content?.trim() && !toolCalls) {
+      let content = contentText(raw.content);
+      let toolCalls = normalizeToolCalls(raw.tool_calls);
+      if (!toolCalls.length && content && toolNames.size) {
+        // A model whose server doesn't parse tool calls writes them as text: they're still calls.
+        const found = textToolCalls(content, toolNames);
+        if (found.calls.length) {
+          log.info({ lane: lane.label, calls: found.calls.length }, "Tool calls written as text — taken as calls");
+          toolCalls = found.calls;
+          content = found.text;
+        }
+      }
+      const cutOff = CUT_OFF.test(String(choice?.finish_reason ?? ""));
+      const broken = toolCalls.some((c) => !argumentsParse(c.function.arguments));
+      if (cutOff && (broken || (!content?.trim() && !toolCalls.length)) && !boosted.has(lane.id)) {
+        // Cut off at its output limit (a long file, or thinking that used it all up): the same AI again, with more room.
+        boosted.set(lane.id, out * 2);
+        if (outOf(lane) >= out * 1.25) {
+          log.info({ lane: lane.label, from: out, to: outOf(lane) }, "Answer was cut off at its output limit — asking again with more room");
+          attempt--;
+          continue;
+        }
+      }
+      if (!content?.trim() && !toolCalls.length) {
         // Nothing to say or do (e.g. it only "thought"): another model may do better.
         skip.add(lane.id);
         firstRejection ||= `${lane.label} answered with nothing`;
         log.warn({ lane: lane.label }, `${lane.label} answered with nothing — trying the next AI`);
         continue;
       }
-      return { message: { role: "assistant", content, ...(toolCalls ? { tool_calls: toolCalls } : {}) }, model: lane.model };
+      if (cutOff) log.warn({ lane: lane.label, outputLimit: out, brokenCalls: broken }, "Answer was cut off at its output limit");
+      return {
+        message: { role: "assistant", content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) },
+        model: lane.model, truncated: cutOff, outputLimit: out,
+      };
     }
 
     const text = await res.text().catch(() => "");
+    if ((res.status === 400 || res.status === 422) && OUTPUT_LIMIT.test(text) && !capFixed.has(lane.id)) {
+      // The model's own limit on output is lower than asked ("max_tokens must be ≤ 8192"): kept for next time, and asked again now.
+      const cap = maxTokensFromError(text, out);
+      if (cap) {
+        capFixed.add(lane.id);
+        learnedCap.set(lane.id, cap);
+        log.warn({ lane: lane.label, cap }, `${lane.label} takes at most ${cap} output tokens — asking again with that`);
+        if (outOf(lane) > 0) { attempt--; continue; }
+      }
+    }
     if (res.status === 413 || ((res.status === 400 || res.status === 422) && TOO_LARGE.test(text))) {
       // Too big for this lane (Groq's per-minute size, a context window); a bigger one may take it.
       tooBig.add(lane.id);
@@ -487,6 +726,7 @@ export async function chat(opts: ChatOptions): Promise<{ message: ChatMessage; m
 export function _resetAiStateForTests(): void {
   coolUntil.clear();
   recent.clear();
+  learnedCap.clear();
 }
 
 /**
