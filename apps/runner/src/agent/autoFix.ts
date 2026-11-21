@@ -40,7 +40,7 @@ export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
  * tools, smaller requests, more AI keys that can take them.
  */
 export const AUTOMATIC_RUN_TOOLS = new Set([
-  "list_files", "read_file", "search_code", "edit_file", "multi_edit", "write_file", "append_file", "check_code", "test_in_room", "run_saved_tests",
+  "list_files", "read_file", "search_code", "edit_file", "multi_edit", "write_file", "append_file", "check_code", "test_in_room", "test_discord", "run_saved_tests",
   "get_logs", "bot_control", "find_env_vars", "find_emotes", "discord_check", "work_log", "search_chat",
 ]);
 

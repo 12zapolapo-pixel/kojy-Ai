@@ -737,6 +737,18 @@ export function aiReadyAt(size = 6000): number | null {
   return Math.min(...(fit.length ? fit : LANES).map((l) => readyAt(l, size)));
 }
 
+/**
+ * How much history to send: `large` when the AI that would answer first now
+ * has no per-minute token limit (Gemini, most gateways — they take far
+ * longer chats), else `small` (Mistral's and Groq's free plans). A request
+ * that turns out too big is cut down by the agent as before.
+ */
+export function historyBudget(small: number, large: number): number {
+  const now = Date.now();
+  const first = LANES.find((l) => readyAt(l, small) <= now);
+  return first && !Number.isFinite(first.maxRequestTokens) ? Math.max(small, large) : small;
+}
+
 /** Which lanes are configured (for the health check and tests). */
 export function configuredLanes(): string[] {
   return LANES.map((l) => l.label);

@@ -19,7 +19,7 @@ import {
   pickMemories, normalizeNote, lineDiff, listSnapshots, restoreSnapshot,
 } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
-import { BOTCHECK, CODECHECK, LAUNCHER } from "../supervisor.js";
+import { BOTCHECK, CODECHECK, DISCORDTEST, LAUNCHER } from "../supervisor.js";
 import { runRoomTest, normalizeEvents, chatToEvents, ROOM_EVENT_TYPES, type RoomEvent } from "./mockRoom.js";
 import { grantDir, sandboxUid, spawnAs } from "../sandbox.js";
 import type { ToolSpec } from "./groq.js";
@@ -48,6 +48,8 @@ export interface ToolContext {
   label?: string;
   /** The Git panel's operations (run as the bot's sandbox user). */
   git?: GitService | undefined;
+  /** The undo point this request's first change took (for self-review and undo_changes). */
+  snapshotId?: string | undefined;
 }
 
 export interface ToolResult {
@@ -88,7 +90,8 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("move_file", "Move or rename a file or folder inside the project.", { from: str("current path"), to: str("new path") }, ["from", "to"]),
   fn("delete_file", "Delete a file.", { path: str("file path") }, ["path"]),
   fn("undo_changes", "Put the code back as it was before your changes in this request (the current code stays in Undo too). For when an approach went wrong."),
-  fn("check_code", "Install requirements.txt changes, compile every .py file, find imports no installed package provides and names used but never defined, and load the bot's entrypoint. Shows each problem with its file and line."),
+  fn("check_code", "Install requirements.txt changes, compile every .py file, find imports no installed package provides, names used but never defined and other sure bugs (ruff), warn about code that blocks the bot (time.sleep in async code…), and load the bot's entrypoint. Shows each problem with its file and line. fix=true first removes unused imports and tidies what ruff can fix safely.",
+    { fix: { type: "boolean", description: "let ruff fix what it safely can first (unused imports, needless f-strings)" } }),
   fn("test_in_room", "Run a copy of the bot for a few seconds in a fake Highrise room (real room and data are untouched) and return what the bot did and any errors. Use `chat` for simple tests (user 'tester' says the lines); use `events` to test whispers, tips, emotes, joins, leaves or several users. Set moderator=false to check how the bot behaves without moderator rights.",
     {
       chat: { type: "array", items: { type: "string" }, description: "lines 'tester' says, e.g. [\"!help\", \"hi bot\"]" },
@@ -104,6 +107,12 @@ export const TOOL_SPECS: ToolSpec[] = [
       expect: { type: "array", items: { type: "string" }, description: "texts the bot's replies/actions must contain, e.g. [\"Welcome\", \"emote-wave\"]; the test fails if one is missing" },
       seconds: { type: "integer" },
     }),
+  fn("test_discord", "Test a Discord bot (discord.py) without connecting to Discord: runs a copy of it with a fake token against a fake server, calls its slash commands (/name, or 'group sub' for groups) and prefix commands with fake users, and shows what it replied (text, embeds, ephemeral) and any errors with tracebacks. Permission checks aren't run. Use it after every change to a Discord bot.",
+    {
+      steps: { type: "array", description: "up to 12, in order, e.g. [{slash:'config set', args:{setting:'lang'}, user:'amy'}, {command:'!hello there'}]",
+        items: { type: "object", properties: { slash: str("slash command name, e.g. 'ping' or 'config set'"), args: { type: "object", description: "its options by name" }, command: str("a prefix command as typed, e.g. '!hello there'"), user: str("who uses it (default tester)") } } },
+      expect: { type: "array", items: { type: "string" }, description: "texts the bot's replies must contain; the test fails if one is missing" },
+    }, ["steps"]),
   fn("save_test", "Keep a test that passed so it can be run again after later changes (regression test). Same events/chat/moderator as test_in_room, plus expect (texts the bot must say or do) and a short name. Saving under an existing name replaces it.",
     {
       name: str("short name, e.g. 'greets new people'"),
@@ -163,7 +172,27 @@ export function hiddenMethods(out: string): string[] {
  * provides (codecheck.py, in the bot's environment) and names used but never
  * defined (pyflakes, when the runner has it). One line per problem.
  */
-async function staticProblems(uid: number, python: string, work: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+/** ruff, the Python linter (installed in the runner image); KOJY_RUFF points elsewhere. */
+const RUFF = () => process.env.KOJY_RUFF ?? "ruff";
+/** Sure bugs (the check fails) and risky code (a warning): undefined names, syntax, pylint errors; mutable defaults, loop closures, blocking calls in async code. */
+const RUFF_ERRORS = ["F821", "F822", "F823", "F632", "F7", "E9", "PLE"];
+const RUFF_WARNINGS = ["B006", "B023", "B018", "ASYNC"];
+
+/** ruff's findings, or null when ruff isn't installed. */
+async function ruffFindings(uid: number, work: string, env: NodeJS.ProcessEnv): Promise<{ errors: string[]; warnings: string[] } | null> {
+  const r = await runCapture(uid, RUFF(), ["check", "--isolated", "--no-cache", "--output-format", "concise", "--select", [...RUFF_ERRORS, ...RUFF_WARNINGS].join(","), "--exclude", "venv,.venv,data", "."], work, { PATH: env.PATH, HOME: work }, 60_000);
+  if (r.code === -1 || /ENOENT|not found|No such file/.test(r.out) && !/:\d+:\d+:/.test(r.out)) return null;
+  const errors: string[] = [], warnings: string[] = [];
+  for (const line of r.out.split("\n")) {
+    const m = /^(.+?):(\d+):(\d+): ([A-Z]+\d+) (.*)$/.exec(line.trim());
+    if (!m) continue;
+    const text = `- ${m[1]!.replace(/^\.\//, "")}:${m[2]}: ${m[5]} (${m[4]})`;
+    (RUFF_ERRORS.some((c) => m[4]!.startsWith(c)) ? errors : warnings).push(text);
+  }
+  return { errors, warnings };
+}
+
+async function staticProblems(uid: number, python: string, work: string, env: NodeJS.ProcessEnv, warnings: string[] = []): Promise<string[]> {
   const out: string[] = [];
   const imports = await runCapture(uid, python, [CODECHECK], work, env, 60_000);
   for (const line of imports.out.split("\n")) {
@@ -172,6 +201,8 @@ async function staticProblems(uid: number, python: string, work: string, env: No
     const pip = packageFor(m[1]!);
     out.push(`- ${m[2]}: imports "${m[1]}", but no installed package provides it — ${pip ? `add ${pip} to requirements.txt` : "add the package that provides it to requirements.txt (check its name on PyPI with fetch_url), or fix the import"}.`);
   }
+  const ruff = await ruffFindings(uid, work, env);
+  if (ruff) { out.push(...ruff.errors); warnings.push(...ruff.warnings); return out.slice(0, 30); }
   const flakes = await runCapture(uid, process.env.PYTHON_BIN ?? "python3", ["-m", "pyflakes", "."], work, { PATH: env.PATH, HOME: work }, 60_000);
   if (!/No module named pyflakes/.test(flakes.out)) {
     for (const line of flakes.out.split("\n")) {
@@ -180,6 +211,82 @@ async function staticProblems(uid: number, python: string, work: string, env: No
     }
   }
   return out.slice(0, 30);
+}
+
+/** What starts a program entrypoint ("run: python main.py" → ["main.py"], "run: python -m bot" → ["-m", "bot"]); null if it isn't Python. */
+export function pythonTarget(entrypoint: string): string[] | null {
+  if (!isStartCommand(entrypoint)) return null;
+  const words = entrypoint.replace(/^\s*run:\s*/i, "").trim().split(/\s+/);
+  const py = words.findIndex((w) => /(^|\/)python(3(\.\d+)?)?$/.test(w));
+  const rest = py >= 0 ? words.slice(py + 1) : words;
+  if (rest[0] === "-m" && rest[1]) return ["-m", rest[1], ...rest.slice(2)];
+  const file = rest.findIndex((w) => w.endsWith(".py"));
+  return file >= 0 ? rest.slice(file) : null;
+}
+
+interface DiscordEvent { kind: string; step?: number; where?: string; content?: string; embeds?: string[]; ephemeral?: boolean; error?: string; note?: string; known?: string[]; slash?: string[]; prefix?: string[]; view?: string; file?: boolean }
+
+/** test_discord: the bot's commands against a fake Discord (discordtest.py), in a copy of the project. */
+async function discordTest(ctx: ToolContext, args: Args): Promise<ToolResult> {
+  const target = pythonTarget(ctx.project.entrypoint);
+  if (!target) return { ok: false, output: "test_discord runs Discord bots started with a command like run: python main.py (set_entrypoint).", summary: "Can't test: not a Python program" };
+  const steps = (Array.isArray(args.steps) ? args.steps : []).slice(0, 12).map((x) => {
+    const o = (x ?? {}) as Args;
+    return { ...(s(o.slash) ? { slash: s(o.slash).replace(/^\//, "") } : {}), ...(s(o.command) ? { command: s(o.command) } : {}), ...(o.args && typeof o.args === "object" ? { args: o.args } : {}), user: (s(o.user) || "tester").slice(0, 32) };
+  }).filter((x) => x.slash || x.command);
+  if (!steps.length) return { ok: false, output: "Give steps: [{slash:'ping'}] or [{command:'!hello'}].", summary: "Can't test: no steps" };
+  const uuid = ctx.project.uuid;
+  const dir = projectDir(uuid);
+  const python = await ctx.supervisor.ensureVenv(uuid, dir, ctx.project.id);
+  const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
+  // Never the real token: the fake Discord doesn't need one, and the bot must not log in a second time.
+  Object.assign(env, { DISCORD_TOKEN: "kojy-test-token", DISCORD_BOT_TOKEN: "kojy-test-token", KOJY_DISCORD_TEST: JSON.stringify({ steps }) });
+  delete env.KOJY_ENTRY;
+  const uid = sandboxUid(ctx.project.id);
+  const work = mkdtempSync(path.join(tmpdir(), "kojy-discord-"));
+  try {
+    cpSync(dir, work, { recursive: true, filter: (src) => !/[/\\](\.git|node_modules|__pycache__)$/.test(src) });
+    grantDir(work, uid);
+    const r = await runCapture(uid, python, [DISCORDTEST, ...target], work, { ...env, HOME: work }, 45_000);
+    const events = r.out.split("\n").filter((l) => l.startsWith("KOJY_EVENT ")).map((l) => { try { return JSON.parse(l.slice(11)) as DiscordEvent; } catch { return null; } }).filter((e): e is DiscordEvent => !!e);
+    return judgeDiscord(steps, events, r.out, cleanExpect(args.expect));
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+/** The test's events as a readable report, with a verdict. */
+export function judgeDiscord(steps: { slash?: string; command?: string; user: string }[], events: DiscordEvent[], raw: string, expect: string[]): ToolResult {
+  const ready = events.find((e) => e.kind === "ready");
+  const startErrors = events.filter((e) => e.kind === "error" && (e.step ?? -1) < 0).map((e) => e.error ?? "");
+  const lines: string[] = [];
+  const said: string[] = [];
+  let errors = startErrors.length;
+  steps.forEach((st, i) => {
+    const mine = events.filter((e) => e.step === i);
+    lines.push(`${st.slash ? `/${st.slash}` : st.command} (as ${st.user}):`);
+    if (!mine.length) lines.push("  (did nothing)");
+    for (const e of mine) {
+      if (e.kind === "sent") {
+        const text = [e.content, ...(e.embeds ?? []).map((x) => `[embed] ${x}`), e.view ? `[buttons: ${e.view}]` : "", e.file ? "[file]" : ""].filter(Boolean).join(" ");
+        said.push(text);
+        lines.push(`  ${e.where === "reply" ? "replied" : e.where === "followup" ? "followed up" : e.where === "dm" ? "sent a DM" : e.where === "edit" ? "edited" : "sent"}${e.ephemeral ? " (only they see it)" : ""}: ${text}`);
+      } else if (e.kind === "note") lines.push(`  note: ${e.note}`);
+      else if (e.kind === "error") { errors++; lines.push(`  ERROR: ${e.error}${e.known ? `\n  (its commands: ${e.known.join(", ")})` : ""}`); }
+    }
+  });
+  const missing = missingExpectations(said, expect);
+  const ok = !!ready && errors === 0 && missing.length === 0;
+  const verdict = !ready ? "The bot never got as far as its commands." : errors ? "The bot ran, but there were errors." : missing.length ? "The bot ran without errors, but didn't say everything expected." : "The bot ran without errors.";
+  const output = [
+    verdict,
+    ready ? `Commands it has: slash ${ready.slash?.map((x) => `/${x}`).join(", ") || "none"}; prefix ${ready.prefix?.join(", ") || "none"}` : "",
+    startErrors.length ? `While starting:\n${startErrors.join("\n")}` : "",
+    lines.join("\n"),
+    missing.length ? `Expected but not seen:\n${missing.map((m) => `- ${m}`).join("\n")}` : "",
+    !ready ? `Console (last lines):\n${raw.split("\n").filter((l) => !l.startsWith("KOJY_EVENT")).slice(-25).join("\n")}` : "",
+  ].filter(Boolean).join("\n\n");
+  return { ok, output: clip(output, 8000), summary: `Tested in a fake Discord: ${ok ? "no errors" : !ready ? "didn't start" : errors ? `${errors} error${errors > 1 ? "s" : ""}` : `${missing.length} expectation${missing.length > 1 ? "s" : ""} not met`}, ${said.length} replies` };
 }
 
 const clip = (s: string, max = 6000) => (s.length > max ? `${s.slice(0, max)}\n… (${s.length - max} more characters)` : s);
@@ -237,7 +344,7 @@ export function searchInWorker(pattern: string, files: { rel: string; abs: strin
 function ensureSnapshot(ctx: ToolContext): void {
   if (ctx.snapshotted) return;
   const label = ctx.label?.replace(/\s+/g, " ").trim();
-  snapshotProject(ctx.project.uuid, label ? `Before Kojy: ${label.length > 100 ? `${label.slice(0, 100)}…` : label}` : "Before the coder AI's changes");
+  ctx.snapshotId = snapshotProject(ctx.project.uuid, label ? `Before Kojy: ${label.length > 100 ? `${label.slice(0, 100)}…` : label}` : "Before the coder AI's changes").id;
   ctx.snapshotted = true;
 }
 
@@ -492,7 +599,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 
       case "undo_changes": {
         if (!ctx.snapshotted) return { ok: true, output: "You haven't changed any files in this request, so there's nothing to undo.", summary: "Nothing to undo" };
-        const snap = listSnapshots(uuid).find((x) => x.reason.startsWith("Before Kojy") || x.reason === "Before the coder AI's changes");
+        const snap = (ctx.snapshotId ? listSnapshots(uuid).find((x) => x.id === ctx.snapshotId) : undefined)
+          ?? listSnapshots(uuid).find((x) => x.reason.startsWith("Before Kojy") || x.reason === "Before the coder AI's changes");
         if (!snap) return { ok: false, output: "The undo point for this request is gone.", summary: "Undo point missing" };
         snapshotProject(uuid, "Before Kojy undid its own changes");
         const n = restoreSnapshot(uuid, snap.id);
@@ -535,19 +643,30 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         }
         const env = await ctx.supervisor.botEnv(ctx.project, python, dir);
         const uid = sandboxUid(ctx.project.id);
+        let fixed = "";
+        if (args.fix === true) {
+          // ruff's safe fixes, on the real files (with an undo point): unused imports, f-strings with nothing in them.
+          ensureSnapshot(ctx);
+          grantDir(dir, uid);
+          const f = await runCapture(uid, RUFF(), ["check", "--isolated", "--no-cache", "--fix", "--select", "F401,F541", "--exclude", "venv,.venv,data", "."], dir, { PATH: env.PATH, HOME: dir }, 60_000);
+          const n = /Found \d+ errors? \((\d+) fixed/.exec(f.out)?.[1] ?? /(\d+) fixed/.exec(f.out)?.[1];
+          fixed = f.code === -1 ? "(ruff isn't installed here, so nothing was tidied.) " : n ? `ruff tidied ${n} thing${n === "1" ? "" : "s"} (unused imports and the like). ` : "";
+        }
         const work = mkdtempSync(path.join(tmpdir(), "kojy-check-"));
         try {
           cpSync(dir, work, { recursive: true, filter: (src) => !/[/\\](\.git|node_modules|__pycache__|data)$/.test(src) });
           grantDir(work, uid);
           const compile = await runCapture(uid, python, ["-m", "compileall", "-q", "-x", "(^|/)(\\.|venv|node_modules)", "."], work, env, 60_000);
           if (compile.code !== 0) return { ok: false, output: clip(`Syntax errors:\n${compile.out}`), summary: "Code check: syntax errors" };
-          const problems = await staticProblems(uid, python, work, env);
+          const warnings: string[] = [];
+          const problems = await staticProblems(uid, python, work, env, warnings);
+          const warn = warnings.length ? `\nWarnings (not failures, but worth fixing — blocking calls freeze the bot):\n${warnings.slice(0, 15).join("\n")}` : "";
           if (problems.length) {
-            return { ok: false, output: clip(`All files compile, but these would fail when the code runs:\n${problems.join("\n")}`), summary: `Code check: ${problems.length} problem${problems.length === 1 ? "" : "s"} found` };
+            return { ok: false, output: clip(`${fixed}All files compile, but these would fail when the code runs:\n${problems.join("\n")}${warn}`), summary: `Code check: ${problems.length} problem${problems.length === 1 ? "" : "s"} found` };
           }
           const entry = ctx.project.entrypoint;
-          if (!entry) return { ok: true, output: "All files compile, every import is installed and no undefined names were found. No entrypoint set yet (use set_entrypoint).", summary: "Code check: compiles (no entrypoint yet)" };
-          if (isStartCommand(entry)) return { ok: true, output: `All files compile, every import is installed and no undefined names were found. The bot starts with a command (${entry}): test its pieces with run_python, then start it with bot_control.`, summary: "Code check passed" };
+          if (!entry) return { ok: true, output: `${fixed}All files compile, every import is installed and no sure bugs were found. No entrypoint set yet (use set_entrypoint).${warn}`, summary: "Code check: compiles (no entrypoint yet)" };
+          if (isStartCommand(entry)) return { ok: true, output: `${fixed}All files compile, every import is installed and no sure bugs were found. The bot starts with a command (${entry}): test it with test_discord (a Discord bot) or run_python, then start it with bot_control.${warn}`, summary: warnings.length ? `Code check passed (${warnings.length} warning${warnings.length === 1 ? "" : "s"})` : "Code check passed" };
           const imp = await runCapture(uid, python, [BOTCHECK, entry], work, env, 60_000);
           if (!imp.out.includes("IMPORT_OK")) return { ok: false, output: clip(`Importing ${entry} failed:\n${imp.out}`), summary: "Code check: the bot fails to load" };
           const hidden = hiddenMethods(imp.out);
@@ -558,20 +677,23 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
               summary: `Code check: ${hidden.length} placeholder method(s) hide real ones`,
             };
           }
-          return { ok: true, output: `All files compile and ${entry} loads.`, summary: "Code check passed" };
+          return { ok: true, output: `${fixed}All files compile and ${entry} loads.${warn}`, summary: warnings.length ? `Code check passed (${warnings.length} warning${warnings.length === 1 ? "" : "s"})` : "Code check passed" };
         } finally {
           rmSync(work, { recursive: true, force: true });
         }
       }
 
       case "test_in_room": {
-        if (isStartCommand(ctx.project.entrypoint)) return { ok: false, output: "This bot isn't a Highrise bot (it starts with a command), so the fake Highrise room can't run it. Test it with run_command instead.", summary: "Not a Highrise bot" };
+        if (isStartCommand(ctx.project.entrypoint)) return { ok: false, output: "This bot isn't a Highrise bot (it starts with a command), so the fake Highrise room can't run it. A Discord bot: test it with test_discord; anything else: run_python.", summary: "Not a Highrise bot" };
         const chat = (Array.isArray(args.chat) ? args.chat : []).map(String).slice(0, 8);
         const events = normalizeEvents(args.events);
         const scenario = events.length ? events : chatToEvents(chat, args.join === true);
         const t = await roomTest(ctx, { events: scenario, expect: cleanExpect(args.expect), moderator: args.moderator !== false, ...(typeof args.seconds === "number" ? { seconds: args.seconds } : {}) });
         return t;
       }
+
+      case "test_discord":
+        return await discordTest(ctx, args);
 
       case "save_test": {
         const name = s(args.name).trim().slice(0, 80);
