@@ -149,8 +149,8 @@ describe("tool calls, whatever shape a provider sends", () => {
 
   it("AGENT_LANE_ORDER puts the named providers first", async () => {
     const ai = await client({});
-    const lanes = [{ provider: "mistral" }, { provider: "gemini" }, { provider: "openai" }, { provider: "groq" }];
-    expect(ai.orderLanes(lanes, ["openai", "gemini"]).map((l) => l.provider)).toEqual(["openai", "gemini", "mistral", "groq"]);
+    const lanes = [{ provider: "mistral" }, { provider: "gemini" }, { provider: "openrouter" }, { provider: "groq" }];
+    expect(ai.orderLanes(lanes, ["openrouter", "gemini"]).map((l) => l.provider)).toEqual(["openrouter", "gemini", "mistral", "groq"]);
     expect(ai.orderLanes(lanes, [])).toBe(lanes);
   });
 });

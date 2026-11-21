@@ -3,12 +3,12 @@
  * OWNERSHIP: apps/runner/src/agent
  *
  * Providers, in the order they are tried (AGENT_LANE_ORDER changes it, e.g.
- * "openai,gemini,mistral,groq" to try a paid model first):
+ * "gemini,mistral,groq"). Every one has a free plan: Kojy never needs a paid key.
  *   1. Mistral (MISTRAL_API_KEY; models from MISTRAL_MODELS).
  *   2. Gemini (Google AI Studio, OpenAI-compatible endpoint). Every key is
  *      tried with every model: keys come from AGENT_API_KEY and
  *      AGENT_API_KEYS (comma-separated), models from GEMINI_MODELS.
- *   3. Gateways (LiteLLM, free providers, OpenAI, DeepSeek), each switched
+ *   3. Gateways (LiteLLM and providers with free plans), each switched
  *      on by its key and model list — see GATEWAYS.
  *   4. Groq (optional, GROQ_API_KEY): the main and fast models, paced to the
  *      free plan's per-minute token budget.
@@ -106,10 +106,9 @@ const LANE_ORDER = (process.env.AGENT_LANE_ORDER ?? "").split(",").map((s) => s.
  *   <NAME>_BASE_URL     the endpoint (required for LiteLLM; the others have a default)
  *   <NAME>_TOKENS_PER_MINUTE  the plan's per-minute token budget (optional)
  *   <NAME>_MAX_OUTPUT_TOKENS  the most output its models give per answer (optional)
- * LiteLLM is a self-hosted router to 100+ providers; Cerebras … GonkaRouter
- * have free plans; OpenAI and DeepSeek are paid (OPENAI_API_KEY is also the
- * website's chat key: Kojy only uses it once OPENAI_MODELS is set). They're
- * tried after Gemini and before Groq unless AGENT_LANE_ORDER says otherwise.
+ * LiteLLM is a self-hosted router to 100+ providers; the others are providers
+ * with free plans. They're tried after Gemini and before Groq unless
+ * AGENT_LANE_ORDER says otherwise.
  */
 export const GATEWAYS: { name: string; label: string; base?: string; maxOutput?: number }[] = [
   { name: "LITELLM", label: "LiteLLM" },
@@ -118,8 +117,6 @@ export const GATEWAYS: { name: string; label: string; base?: string; maxOutput?:
   { name: "GITHUB_MODELS", label: "GitHub Models", base: "https://models.github.ai/inference" },
   { name: "OPENROUTER", label: "OpenRouter", base: "https://openrouter.ai/api/v1" },
   { name: "GONKAROUTER", label: "GonkaRouter", base: "https://api.gonkarouter.io/v1" },
-  { name: "OPENAI", label: "OpenAI", base: "https://api.openai.com/v1", maxOutput: 16_384 },
-  { name: "DEEPSEEK", label: "DeepSeek", base: "https://api.deepseek.com/v1" },
 ];
 
 interface Lane {
@@ -521,7 +518,7 @@ export interface ChatResult {
 
 export async function chat(opts: ChatOptions): Promise<ChatResult> {
   if (LANES.length === 0) {
-    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter/GonkaRouter/OpenAI/DeepSeek key and model list in the server's .env.");
+    throw new AiUnavailableError("The coder AI needs an AI key: set AGENT_API_KEY or AGENT_API_KEYS (Gemini keys from aistudio.google.com/apikey), MISTRAL_API_KEY, GROQ_API_KEY, or a LiteLLM/Cerebras/SambaNova/GitHub Models/OpenRouter/GonkaRouter key and model list in the server's .env.");
   }
   const want = Math.max(1, opts.maxTokens ?? MAX_OUTPUT_TOKENS);
   const input = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools));
@@ -591,9 +588,8 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
       model: lane.model,
       messages: prepareMessages(lane.provider, opts.messages),
       ...(opts.tools.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
-      // OpenAI's current models only take max_completion_tokens, and its
-      // reasoning models only their default temperature.
-      ...(lane.provider === "openai" ? { max_completion_tokens: out } : { temperature: 0.2, max_tokens: out }),
+      temperature: 0.2,
+      max_tokens: out,
     };
     if (lane.provider === "groq") body.reasoning_effort = "medium";
 
