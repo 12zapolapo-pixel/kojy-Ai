@@ -24,7 +24,7 @@ import path from "node:path";
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import type { Database } from "@kojyai/db";
 import { botProjects, projectSecrets } from "@kojyai/db/schema";
-import { decryptApiKey } from "@kojyai/shared/crypto";
+import { decryptApiKey, radioToken } from "@kojyai/shared/crypto";
 import { ActivityRecorder, notifyUser, sendAlert } from "@kojyai/db";
 import { createLogger } from "./logger.js";
 import { grantDir, grantDirOnce, sandboxUid, spawnAs, type Sandboxed } from "./sandbox.js";
@@ -418,6 +418,12 @@ export class Supervisor {
   async secrets(project: ProjectRow): Promise<Record<string, string>> {
     const rows = await this.db.select().from(projectSecrets).where(eq(projectSecrets.projectId, project.id));
     const out: Record<string, string> = {};
+    // KojyAI Radio: where the bot's own station is and the key to queue songs on it.
+    const site = process.env.FRONTEND_URL?.trim().replace(/\/$/, "");
+    if (site && project.uuid) {
+      try { out.KOJY_RADIO_URL = `${site}/api/radio/${project.uuid}`; out.KOJY_RADIO_TOKEN = radioToken(project.uuid); }
+      catch { /* no ENCRYPTION_KEY: no radio */ }
+    }
     for (const s of rows) {
       try { out[s.key] = decryptApiKey(s.valueVault); }
       catch { this.console(project.uuid, "system", `Secret ${s.key} could not be decrypted (was ENCRYPTION_KEY changed?).`); }
