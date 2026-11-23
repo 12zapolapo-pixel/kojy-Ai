@@ -115,3 +115,16 @@ describe("the bot's radio key", () => {
     expect(crypto.checkRadioToken("11111111-1111-4111-8111-111111111111", undefined)).toBe(false);
   });
 });
+
+describe("matching requests", () => {
+  it("only queues a song whose title or artist has every word asked for", async () => {
+    const { strictMatches } = await import("../../../apps/api/src/modules/radio/jamendo.js");
+    const t = (title: string, artist: string) => ({ id: title, title, artist, audio: "x", seconds: 1, requestedBy: null });
+    const found = [t("Blinding Destiny", "Revalvers"), t("Blinding Lights", "Speedsound"), t("Shape Of Water", "Luiza_D")];
+    expect(strictMatches("blinding lights", found).map((x) => x.artist)).toEqual(["Speedsound"]);
+    expect(strictMatches("Blinding Lights by Speedsound", found)).toHaveLength(1);
+    expect(strictMatches("shape of you", found)).toEqual([]);
+    expect(strictMatches("the weeknd", found)).toEqual([]);
+    expect(strictMatches("Café Música", [t("Cafe Musica", "Ana")])).toHaveLength(1);
+  });
+});
