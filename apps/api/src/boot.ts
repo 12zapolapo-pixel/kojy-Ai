@@ -43,6 +43,7 @@ import { resolveClientIp, getTrustedProxies } from "./utils/clientIp.js";
 import { connectDB } from "./db/client.js";
 import { connectRedis } from "./utils/redis.js";
 import { handleStripeWebhook } from "./modules/billing/webhook.js";
+import { radioRoutes } from "./modules/radio/routes.js";
 
 
 const log = createLogger("boot");
@@ -262,6 +263,10 @@ app.use(
 // Settings the website needs at runtime (public by design: a browser DSN
 // only lets someone send error reports to the project).
 app.get("/client-config", (c) => c.json({ sentryDsn: (process.env.SENTRY_DSN_WEB || process.env.SENTRY_DSN || "").trim() || null }));
+
+// KojyAI Radio: a bot's own radio station for its Highrise room (public
+// playlist and stream; requests need the bot's radio key).
+app.route("/radio", radioRoutes);
 
 // Health check — used by load balancer and k8s readiness probe
 app.get("/health", async (c) => {
