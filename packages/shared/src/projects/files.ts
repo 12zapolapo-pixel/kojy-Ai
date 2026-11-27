@@ -473,6 +473,22 @@ export function extractSnapshot(uuid: string, id: string, dest: string): void {
   }
 }
 
+/** Writes the last version of the code that ran fine into `dest` (code only); false when none was kept. */
+export function extractKnownGood(uuid: string, dest: string): boolean {
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  if (!existsSync(file)) return false;
+  const files = unzipSync(readFileSync(file));
+  delete files[".kojy-known-good.json"];
+  const root = path.resolve(dest);
+  for (const [rel, data] of Object.entries(files)) {
+    const target = path.resolve(root, rel);
+    if (!target.startsWith(root + path.sep)) continue; // never outside dest
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, data);
+  }
+  return true;
+}
+
 /** One file as an Undo snapshot holds it. */
 export function snapshotFile(uuid: string, id: string, rel: string): KeptFile {
   if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");

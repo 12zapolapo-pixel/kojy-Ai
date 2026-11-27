@@ -98,8 +98,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 python3-venv python3-dev python3-pyflakes build-essential ca-certificates acl libcap2-bin git less nano procps \
  && (apt-get install -y --no-install-recommends setpriv || true) \
  && rm -rf /var/lib/apt/lists/*
-# ruff (Kojy's check_code): a fast Python linter, pinned, in its own small environment.
-RUN python3 -m venv /opt/kojy-tools && /opt/kojy-tools/bin/pip install --no-cache-dir ruff==0.8.4 && ln -s /opt/kojy-tools/bin/ruff /usr/local/bin/ruff
+# ruff (Kojy's check_code, lint_code, format_code) and mypy (type_check), pinned, in their own small environment.
+RUN python3 -m venv /opt/kojy-tools && /opt/kojy-tools/bin/pip install --no-cache-dir ruff==0.8.4 mypy==1.13.0 \
+ && ln -s /opt/kojy-tools/bin/ruff /usr/local/bin/ruff && ln -s /opt/kojy-tools/bin/mypy /usr/local/bin/mypy
 # V-01 bot sandbox: each project's Python code runs as its own user (see
 # apps/runner/src/sandbox.ts). The helper is setpriv with only the two
 # capabilities needed to switch user, executable by the "node" group alone —
@@ -140,8 +141,9 @@ RUN apt-get update \
  # 17 can back up both Postgres 16 and 17 servers.
  && apt-get install -y --no-install-recommends postgresql-client-17 \
  && rm -rf /var/lib/apt/lists/*
-# ruff (Kojy's check_code): a fast Python linter, pinned, in its own small environment.
-RUN python3 -m venv /opt/kojy-tools && /opt/kojy-tools/bin/pip install --no-cache-dir ruff==0.8.4 && ln -s /opt/kojy-tools/bin/ruff /usr/local/bin/ruff
+# ruff (Kojy's check_code, lint_code, format_code) and mypy (type_check), pinned, in their own small environment.
+RUN python3 -m venv /opt/kojy-tools && /opt/kojy-tools/bin/pip install --no-cache-dir ruff==0.8.4 mypy==1.13.0 \
+ && ln -s /opt/kojy-tools/bin/ruff /usr/local/bin/ruff && ln -s /opt/kojy-tools/bin/mypy /usr/local/bin/mypy
 COPY --from=caddy:2 /usr/bin/caddy /usr/bin/caddy
 # V-01 bot sandbox: each project's Python code runs as its own user (see
 # apps/runner/src/sandbox.ts). The helper is setpriv with only the two

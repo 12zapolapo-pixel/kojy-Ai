@@ -329,6 +329,16 @@ const tryJson = (s: string): unknown => { try { return JSON.parse(s.trim()); } c
  * `{"name": …, "arguments": …}`). Only names of tools this request offered
  * count. Returns them with the text that's left (null when nothing is).
  */
+/**
+ * The tool a refused answer tried to call that wasn't sent, when it's one that
+ * may be added (Groq: "attempted to call tool 'x' which was not in request.tools").
+ */
+export function missingToolIn(errorText: string, sent: ToolSpec[], more: ToolSpec[]): ToolSpec | null {
+  const name = /(?:attempted to call tool|tool|function)\s*['"`]?([A-Za-z_][\w-]{0,63})['"`]?\s*(?:which )?(?:was |is )?not (?:in request\.tools|found|available|defined|declared)/i.exec(errorText)?.[1];
+  if (!name || sent.some((t) => t.function.name === name)) return null;
+  return more.find((t) => t.function.name === name) ?? null;
+}
+
 export function textToolCalls(text: string, names: Set<string>): { calls: ToolCall[]; text: string | null } {
   const calls: ToolCall[] = [];
   const take = (name: unknown, args: unknown): boolean => {
@@ -472,6 +482,12 @@ export function googleQuota(text: string): { daily: boolean; noFreeTier: boolean
 export interface ChatOptions {
   messages: ChatMessage[];
   tools: ToolSpec[];
+  /**
+   * Tools that weren't sent but may be added on demand: a model that calls
+   * one (a server like Groq then refuses the whole answer, or the model
+   * writes the call as text) gets it added and is asked again.
+   */
+  moreTools?: ToolSpec[];
   /** The most output this step needs (default AGENT_MAX_OUTPUT_TOKENS); each AI gets up to what its plan allows. */
   maxTokens?: number;
   /** Called while waiting on rate limits, so the chat can say so. */
@@ -522,8 +538,11 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
   }
   const want = Math.max(1, opts.maxTokens ?? MAX_OUTPUT_TOKENS);
   const input = estimateTokens(JSON.stringify(opts.messages)) + estimateTokens(JSON.stringify(opts.tools));
-  const toolNames = new Set(opts.tools.map((t) => t.function.name));
+  /** The tools sent; grows when the model calls one of opts.moreTools. */
+  let tools = opts.tools;
+  const toolNames = new Set([...opts.tools, ...(opts.moreTools ?? [])].map((t) => t.function.name));
   let badRequests = 0;
+  let toolsAdded = 0;
   /** Lanes that rejected this particular request (a content problem, not the lane's fault). */
   const skip = new Set<string>();
   /** Lanes this request turned out to be too large for. */
@@ -587,7 +606,7 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
     const body: Record<string, unknown> = {
       model: lane.model,
       messages: prepareMessages(lane.provider, opts.messages),
-      ...(opts.tools.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
+      ...(tools.length ? { tools, tool_choice: "auto" } : {}),
       temperature: 0.2,
       max_tokens: out,
     };
@@ -688,6 +707,14 @@ export async function chat(opts: ChatOptions): Promise<ChatResult> {
       else if (DAILY.test(text)) cool(lane, 60 * 60_000, `${lane.label} is out of quota`, "out_of_quota");
       // Mistral's limits are per minute: a 429 means its minute is used up.
       else cool(lane, Math.min(65, Number(res.headers.get("retry-after")) || (lane.provider === "mistral" ? 60 : 30)) * 1000, `${lane.label} is rate limited`, "rate_limited");
+      continue;
+    }
+    const unloaded = res.status === 400 ? missingToolIn(text, tools, opts.moreTools ?? []) : null;
+    if (unloaded && toolsAdded++ < 3) {
+      // It called a tool that wasn't sent (only some are, to keep requests small): send that one too and ask again.
+      tools = [...tools, unloaded];
+      log.info({ lane: lane.label, tool: unloaded.function.name }, "The model called a tool that wasn't sent — adding it and asking again");
+      attempt--;
       continue;
     }
     if (res.status === 400 && /tool_use_failed|failed_generation/i.test(text) && badRequests++ < 2) {

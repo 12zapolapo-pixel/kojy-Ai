@@ -4,6 +4,7 @@ inspects an installed library's real API.
   codeintel.py outline <file>      classes, functions and methods with line ranges and signatures
   codeintel.py symbol <name>       where a name is defined and where it is used, in every .py file under .
   codeintel.py inspect <target>    the API of a module, class or function (imports it: run in the bot's venv)
+  codeintel.py metrics [path]      per-function complexity/length/nesting, duplicated code, code nothing uses (JSON)
   codeintel.py rename <old> <new> [folder]   every use of a name renamed (code only, never strings or comments), as JSON
 
 Plain text out, one finding per line, so the model can read it directly.
@@ -307,6 +308,148 @@ def rename(old, new, folder="."):
     print(json.dumps(out))
 
 
+BRANCHES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.IfExp, ast.ExceptHandler, ast.With, ast.AsyncWith, ast.Assert)
+
+
+def complexity(fn):
+    """McCabe-style: 1 + decisions (branches, boolean operators, comprehension ifs, match cases)."""
+    n = 1
+    for node in ast.walk(fn):
+        if node is not fn and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, BRANCHES) and not isinstance(node, (ast.With, ast.AsyncWith)):
+            n += 1
+        elif isinstance(node, ast.BoolOp):
+            n += len(node.values) - 1
+        elif isinstance(node, ast.comprehension):
+            n += len(node.ifs)
+        elif isinstance(node, getattr(ast, "match_case", ())):
+            n += 1
+    return n
+
+
+BLOCKS = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith)
+
+
+def nesting(node, depth=0):
+    """Deepest block nesting; an elif is the same depth as its if."""
+    deepest = depth
+    elifs = set()
+    if isinstance(node, ast.If) and len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
+        elifs.add(id(node.orelse[0]))
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if id(child) in elifs:
+            deepest = max(deepest, nesting(child, depth))
+            continue
+        d = depth + 1 if isinstance(child, BLOCKS) else depth
+        deepest = max(deepest, nesting(child, d))
+    return deepest
+
+
+class _Anon(ast.NodeTransformer):
+    """Local names, arguments and the function's own name made anonymous: a copy with renamed variables looks the same."""
+
+    def visit_Name(self, node):
+        return ast.copy_location(ast.Name(id="_", ctx=node.ctx), node)
+
+    def visit_arg(self, node):
+        node.arg = "_"
+        node.annotation = None
+        return node
+
+
+def shape(fn):
+    """A function's structure without its names (copied code with renamed variables has the same shape)."""
+    import copy
+    body = copy.deepcopy(fn.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]  # the docstring
+    mod = _Anon().visit(ast.Module(body=body, type_ignores=[]))
+    args = _Anon().visit(copy.deepcopy(fn.args))
+    return ast.dump(args, annotate_fields=False) + ast.dump(mod, annotate_fields=False)
+
+
+KEEP = re.compile(r"^(on_[a-z_]+|test_\w+|setup|setup_hook|main|run|__\w+__)$")
+
+
+def metrics(target="."):
+    files = [target] if os.path.isfile(target) else [os.path.normpath(os.path.join(target, f)) if target != "." else f for f in py_files(target)]
+    funcs, defined, referenced, windows = [], {}, set(), {}
+    bodies, shapes, long_files = {}, {}, []
+    total_lines = 0
+    for rel in files:
+        tree, src = parse(rel)
+        if isinstance(tree, Exception):
+            continue
+        total_lines += len(src)
+        if len(src) > 800:
+            long_files.append(f"{rel} ({len(src)} lines)")
+        parents = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+            if isinstance(node, ast.Name):
+                referenced.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                referenced.add(node.attr)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for a in node.names:
+                    referenced.add(a.name.split(".")[-1])
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.isidentifier():
+                referenced.add(node.value)  # getattr(self, "name"), __all__
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = parents.get(node)
+                name = f"{owner.name}.{node.name}" if isinstance(owner, ast.ClassDef) else node.name
+                length = (node.end_lineno or node.lineno) - node.lineno + 1
+                args = [a for a in node.args.args + node.args.kwonlyargs + node.args.posonlyargs if a.arg not in ("self", "cls")]
+                funcs.append({"file": rel, "line": node.lineno, "name": name, "complexity": complexity(node), "length": length,
+                              "nesting": nesting(node), "params": len(args), "async": isinstance(node, ast.AsyncFunctionDef)})
+                if length >= 5:
+                    key = ast.dump(ast.Module(body=node.body, type_ignores=[]), annotate_fields=False)
+                    bodies.setdefault(key, []).append(f"{rel}:{node.lineno} {name}")
+                    shapes.setdefault(shape(node), []).append(f"{rel}:{node.lineno} {name}")
+                decorated = bool(node.decorator_list)
+                if not decorated and not KEEP.match(node.name):
+                    defined.setdefault(node.name, []).append(f"{rel}:{node.lineno} {name}")
+            elif isinstance(node, ast.ClassDef) and not node.decorator_list:
+                bases = {ast.unparse(b) for b in node.bases}
+                if not any("Bot" in b or "Cog" in b or "TestCase" in b or "Model" in b for b in bases):
+                    defined.setdefault(node.name, []).append(f"{rel}:{node.lineno} class {node.name}")
+        # Duplicated stretches of 6 meaningful lines.
+        lines = [(i + 1, l.strip()) for i, l in enumerate(src) if l.strip() and not l.strip().startswith("#")]
+        for i in range(len(lines) - 5):
+            chunk = "\n".join(l for _, l in lines[i:i + 6])
+            if len(chunk) < 120:
+                continue
+            windows.setdefault(chunk, []).append((rel, lines[i][0]))
+    # A name defined but referenced nowhere (by name, attribute or string) is probably unused.
+    unused = []
+    for name, places in defined.items():
+        if name not in referenced:
+            unused.extend(places)
+    dupes, seen = [], set()
+    for chunk, places in windows.items():
+        uniq = sorted(set(places))
+        if len(uniq) < 2:
+            continue
+        key = tuple(uniq[:2])
+        near = any((p[0], p[1] - d) in seen for p in uniq for d in range(1, 6))
+        for p in uniq:
+            seen.add(p)
+        if not near:
+            dupes.append([f"{f}:{l}" for f, l in uniq[:4]])
+    same_bodies = [v for v in bodies.values() if len(v) > 1]
+    exact = {tuple(v) for v in same_bodies}
+    # The same code with only names changed (and not already an exact copy).
+    similar = [v for v in shapes.values() if len(v) > 1 and tuple(v) not in exact]
+    print(json.dumps({"files": len(files), "lines": total_lines, "functions": funcs, "unused": unused[:40],
+                      "duplicates": dupes[:15], "same_functions": same_bodies[:10], "similar_functions": similar[:10],
+                      "long_files": long_files[:10]}))
+
+
 def main():
     if len(sys.argv) < 3:
         print("usage: codeintel.py outline|symbol|inspect <arg>")
@@ -316,6 +459,8 @@ def main():
         outline(arg)
     elif mode == "symbol":
         symbol(arg)
+    elif mode == "metrics":
+        metrics(arg)
     elif mode == "rename":
         if len(sys.argv) < 4 or not sys.argv[3].isidentifier() or keyword.iskeyword(sys.argv[3]):
             print(json.dumps({"error": "the new name must be a valid Python name"}))

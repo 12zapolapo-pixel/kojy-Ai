@@ -66,7 +66,7 @@ describe("every Python change is parsed at once", () => {
     const r = await run("edit_file", { path: "tmp.py", old_text: "return 1", new_text: "return (1" });
     expect(r.ok).toBe(true);
     expect(r.output).toMatch(/⚠ tmp\.py doesn't parse now \(line \d+: .*\)/);
-    expect(r.summary).toMatch(/syntax error/);
+    expect(r.summary).toMatch(/needs a fix/);
     const fixed = await run("edit_file", { path: "tmp.py", old_text: "return (1", new_text: "return 1" });
     expect(fixed.output).not.toMatch(/doesn't parse/);
   });

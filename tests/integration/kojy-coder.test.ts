@@ -166,7 +166,8 @@ describe("Kojy on a model that can only answer so much", () => {
     const req = seen[0]!;
     expect(req.system).toMatch(/Your tools work/);
     expect(req.system).not.toMatch(/KojyAI started you to fix a problem/);
-    expect(req.tools).toEqual(expect.arrayContaining(["run_command", "run_python", "git", "fetch_url"]));
+    // The owner's tools (locked in automatic fixes), and load_tools for the rest (git and others load when asked for).
+    expect(req.tools).toEqual(expect.arrayContaining(["run_command", "run_python", "fetch_url", "load_tools"]));
     expect(req.system).toMatch(/CONTINUE_CHECK/); // the crash is still the task being worked on
   });
 });
