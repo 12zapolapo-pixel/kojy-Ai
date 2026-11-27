@@ -50,7 +50,30 @@ export function searchTracks(clientId: string, query: string, limit = 5): Promis
   return get({ client_id: clientId, search: query.slice(0, 100), limit: String(limit), order: "relevance" });
 }
 
+/** Popular tracks with every one of these style tags ("rock", "chill lofi"); none when they aren't styles. */
+export function styleTracks(clientId: string, query: string, limit = 10): Promise<Track[]> {
+  return get({ client_id: clientId, tags: query.toLowerCase().slice(0, 60), limit: String(limit), order: "popularity_month" });
+}
+
 /** This week's popular tracks: the station's mix when nobody has asked for anything. */
 export function popularTracks(clientId: string, limit = 50): Promise<Track[]> {
   return get({ client_id: clientId, limit: String(limit), order: "popularity_week" });
+}
+
+const STOP = new Set(["the", "a", "an", "by", "of", "and", "feat", "ft", "song", "music", "by"]);
+const words = (text: string) => text.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean);
+
+/**
+ * The tracks that really match what someone asked for: every word they
+ * typed (beyond little ones like "the") is in the title or the artist.
+ * Jamendo's search always answers with something, and for a famous song
+ * that something is a different song with a similar name.
+ */
+export function strictMatches(query: string, tracks: Track[]): Track[] {
+  const wanted = words(query).filter((w) => !STOP.has(w));
+  if (!wanted.length) return [];
+  return tracks.filter((t) => {
+    const have = new Set(words(`${t.title} ${t.artist}`));
+    return wanted.every((w) => have.has(w));
+  });
 }

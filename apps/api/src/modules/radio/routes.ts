@@ -20,7 +20,7 @@ import { and, eq } from "drizzle-orm";
 import { checkRadioToken, decryptApiKey } from "@kojyai/shared/crypto";
 import { db, schema } from "../../db/client.js";
 import { createLogger } from "../../utils/logger.js";
-import { popularTracks, searchTracks, type Track } from "./jamendo.js";
+import { popularTracks, searchTracks, strictMatches, styleTracks, type Track } from "./jamendo.js";
 import { MAX_QUEUE, Station, streamListener } from "./station.js";
 
 const log = createLogger("radio");
@@ -166,10 +166,24 @@ radioRoutes.post("/:uuid/request", async (c) => {
   const query = typeof input.query === "string" ? input.query.trim().slice(0, 100) : "";
   if (!query) return c.json({ error: "Say what to play, e.g. !play chill lofi" }, 400);
   let found: Track[];
-  try { found = await searchTracks(clientId, query, 1); }
+  try { found = await searchTracks(clientId, query, 10); }
   catch (err) { log.warn({ station: uuid, err: (err as Error).message }, "Jamendo search failed"); return c.json({ error: "The music library didn't answer — try again." }, 502); }
-  if (!found.length) return c.json({ error: `No song found for "${query}".` }, 404);
-  const track = { ...found[0]!, requestedBy: typeof input.user === "string" ? input.user.slice(0, 40) : null };
+  // Only a real match is queued; otherwise say so (famous songs aren't in the free library).
+  let matches = strictMatches(query, found);
+  if (!matches.length && /^[\p{L}\p{N} -]{2,40}$/u.test(query)) {
+    // Not a song or artist name — maybe a style ("rock", "chill lofi"): a popular song in it.
+    const styled = await styleTracks(clientId, query).catch(() => [] as Track[]);
+    if (styled.length) matches = [styled[Math.floor(Math.random() * Math.min(styled.length, 10))]!];
+  }
+  if (!matches.length) {
+    const close = found.slice(0, 2).map((t) => `${t.title} — ${t.artist}`);
+    return c.json({
+      error: `"${query}" isn't in the free music library (it has independent artists, not chart hits).` +
+        (close.length ? ` Closest: ${close.join(" / ")}` : ""),
+      suggestions: found.slice(0, 2).map(describe),
+    }, 404);
+  }
+  const track = { ...matches[0]!, requestedBy: typeof input.user === "string" ? input.user.slice(0, 40) : null };
   const result = stationFor(uuid).request(track);
   if ("error" in result) return c.json({ error: result.error, track: describe(track) }, 409);
   return c.json({ track: describe(track), position: result.position, max: MAX_QUEUE });
