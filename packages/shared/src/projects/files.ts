@@ -361,6 +361,22 @@ export function saveKnownGood(uuid: string): boolean {
   return true;
 }
 
+/** A file as a saved version holds it: absent, or there (text null when it isn't text). */
+export type KeptFile = { exists: false } | { exists: true; text: string | null };
+
+const keptFile = (zipFile: string, rel: string): KeptFile => {
+  const got = unzipSync(readFileSync(zipFile), { filter: (f) => f.name === rel })[rel];
+  if (!got) return { exists: false };
+  return { exists: true, text: got.includes(0) ? null : strFromU8(got) };
+};
+
+/** One file as it was in the last version that ran fine; null when no such version was kept. */
+export function knownGoodFile(uuid: string, rel: string): KeptFile | null {
+  const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
+  if (!existsSync(file)) return null;
+  try { return keptFile(file, rel); } catch { return null; }
+}
+
 /** When the last version that ran fine was kept, and its fingerprint; null when there's none. */
 export function knownGood(uuid: string): { savedAt: number; fingerprint: Record<string, string> } | null {
   const file = path.join(KNOWN_GOOD_DIR, `${uuid}.zip`);
@@ -455,6 +471,14 @@ export function extractSnapshot(uuid: string, id: string, dest: string): void {
     mkdirSync(path.dirname(target), { recursive: true });
     writeFileSync(target, readFileSync(path.join(live, f.path)));
   }
+}
+
+/** One file as an Undo snapshot holds it. */
+export function snapshotFile(uuid: string, id: string, rel: string): KeptFile {
+  if (!/^\d+$/.test(id)) throw new ProjectFileError("Invalid snapshot id");
+  const file = path.join(SNAPSHOT_DIR, uuid, `${id}.zip`);
+  if (!existsSync(file)) throw new ProjectFileError("That snapshot no longer exists");
+  return keptFile(file, rel);
 }
 
 /** Removes one snapshot (e.g. one taken before a change that never happened). */
