@@ -469,6 +469,8 @@ export class Agent {
                 ...(review ? [{ role: "assistant" as const, content: review.draft }, { role: "user" as const, content: review.note }] : []),
                 ...(nudges ? [{ role: "user" as const, content: NUDGE }] : []),
               ], tools, signal,
+              // Tools not sent this step, added on demand if the model calls one anyway.
+              ...(smartTools ? { moreTools: [...allTools, LOAD_TOOLS_SPEC].filter((t) => !tools.includes(t)) } : {}),
               onWait: (sec, why) => void this.progress(uuid, `Waiting ${sec}s (${why})…`, scope.orgId),
             });
           } catch (err) {

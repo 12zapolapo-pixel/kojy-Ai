@@ -9,7 +9,7 @@
  * - trace_error: the newest traceback in the console, with the code around
  *   every step of it that is in the bot's own files, the failing line marked.
  * - run_unit_tests: runs the bot's own tests (pytest when installed, else a
- *   built-in runner), in a copy of the project, without its secrets.
+ *   built-in runner), in a copy of the project, with placeholder values for its secrets.
  * - add_package: looks a package up on PyPI (or maps an import name to its
  *   package), writes it into requirements.txt and installs it; puts the file
  *   back if pip fails.
@@ -38,6 +38,7 @@ import { fetchPublic } from "./webFetch.js";
 import { untrusted } from "./prompt.js";
 import { projectFrames } from "./crashContext.js";
 import { packageFor } from "../packages.js";
+import { placeholderSecrets } from "./perfTools.js";
 
 type Args = Record<string, unknown>;
 const s = (v: unknown) => (typeof v === "string" ? v : "");
@@ -271,7 +272,8 @@ export async function runDevTool(name: string, args: Args, ctx: ToolContext, h: 
       try {
         cpSync(dir, work, { recursive: true, filter: (src) => !/[/\\](\.git|node_modules|__pycache__|venv|\.venv)$/.test(src) });
         grantDir(work, uid);
-        const env = { PATH: process.env.PATH, HOME: work, PYTHONPATH: work, PYTHONDONTWRITEBYTECODE: "1", KOJY_TEST: "1" };
+        // Placeholder values for its secrets: tests never get the real ones, and code that reads them on import still loads.
+        const env = { ...await placeholderSecrets(ctx), PATH: process.env.PATH, HOME: work, PYTHONPATH: work, PYTHONDONTWRITEBYTECODE: "1", KOJY_TEST: "1" };
         const match = s(args.match).replace(/[^\w -]/g, "").slice(0, 60);
         const probe = (await h.runCapture(uid, python, ["-c", "import pytest\ntry:\n import pytest_asyncio\n print('ASYNC_OK')\nexcept ImportError:\n print('NO_ASYNC')"], work, env, 20_000));
         const hasPytest = probe.code === 0;

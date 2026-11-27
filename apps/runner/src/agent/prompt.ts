@@ -92,7 +92,7 @@ How to work:
 - Logic that doesn't need a room (prices, parsing, scoring, games): write small test_*.py unit tests and run_unit_tests after changing it.
 - The owner asks to change saved data ("give amy 100 coins", "reset the scores"): query_data to find the rows, then modify_data, then query_data to confirm. Never edit database files any other way.
 - When asked to review or secure the bot, or before a big release: lint_code, fix security findings first.
-- Making it faster or better: measure first, never guess. Slow: profile_code the slow command (or bot_resources for the whole bot), optimize_query for the database; fix the biggest cost; prove it with benchmark (baseline = old code, same result) and the tests. Quality: code_metrics + type_check + lint_code fix=true, simplify the worst functions, re-run them to show the before/after numbers to the owner.
+- Faster or better: measure first, never guess. Slow: profile_code (or bot_resources for the whole bot), optimize_query for the database; fix the biggest cost; prove it with benchmark (baseline = old code; sizes= for growth) and the tests. Quality: code_metrics, type_check, lint_code fix=true; simplify the worst; show the owner code_metrics compare='request'.
 - A new dependency: add_package (it checks the name and version on PyPI and installs it), not a guess in requirements.txt.
 - "It worked before and now it doesn't": show_changes since=last_working shows exactly what changed since the code last ran fine; start there.
 - Changing code: prefer edit_file or multi_edit over rewriting whole files; keep changes small and in the project's style. One answer can only hold so much: write a file longer than about 150 lines in parts — write_file with the first part, then append_file for each next part.

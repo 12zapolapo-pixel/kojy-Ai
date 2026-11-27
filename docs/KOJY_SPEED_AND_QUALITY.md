@@ -21,16 +21,19 @@ the SDK reference only for Highrise bots, Discord guidance only for others).
 | Request | Tools sent | Tokens per step (instructions + tools) |
 |---|---|---|
 | All tools, old instructions | 59 | ~11,500 |
-| "hi, how are you?" | 22 | 5,832 |
-| "add a !dance command" | 23 | 5,924 |
-| "the bot crashed, fix it" | 27 | 6,410 |
-| "give amy 100 coins" | 26 | 6,386 |
-| "add a weather command using an API" | 25 | 6,260 |
-| "set up my discord bot token" | 30 | 6,779 |
-| "make the bot faster and clean up the code" | 41 | 8,167 |
+| "hi, how are you?" | 22 | 5,821 |
+| "add a !dance command" | 23 | 5,913 |
+| "the bot crashed, fix it" | 27 | 6,399 |
+| "give amy 100 coins" | 26 | 6,403 |
+| "add a weather command using an API" | 25 | 6,249 |
+| "set up my discord bot token" | 30 | 6,768 |
+| "make the bot faster and clean up the code" | 32 | 7,256 |
 
-Instructions: 3,794 → 2,830 tokens (2,633 for a Discord bot). Everyday
-requests are **44–49% smaller** and fit under Groq's 7,500 with room for the
+Instructions: 3,794 → 2,819 tokens (2,622 for a Discord bot). Group words
+match whole words only ("ram" in "program" or "fix" in "prefix" load
+nothing), and a model that calls a tool that wasn't sent gets it added and
+is asked again on the same AI instead of losing the free lane. Everyday
+requests are **41–49% smaller** and fit under Groq's 7,500 with room for the
 chat; the broad quality request goes to the bigger lanes.
 `AGENT_ALL_TOOLS=1` sends every tool again. Automatic crash fixes keep their
 own small set.
@@ -61,17 +64,33 @@ and measured again.
 
 | Measured | Before | After |
 |---|---|---|
-| Leaderboard (3,000 players) | 194.7 ms | 0.10 ms — **1,834× faster**, same result |
-| 100 tip lookups (20,000 rows) | 49.4 ms | 0.44 ms — **111× faster** (index) |
+| Leaderboard (3,000 players) | 198.5 ms | 0.10 ms — **1,818× faster**, same result |
+| 100 tip lookups (20,000 rows) | 51.3 ms | 0.47 ms — **110× faster** (index) |
+| One tip lookup, measured by optimize_query itself | 415.9 µs | 4.2 µs — **98× faster** |
 | Times a chat command froze the event loop | 1 | **0** |
 | Queries reading every row | 2 | **0** |
 | Quality score | 83 | **97** |
 | Average / worst complexity | 3.5 / 13 | **2.0 / 4** |
 | Duplicated code | 2 | **0** |
-| Probably unused functions | 4 | **2** (the new command handlers, reached through a table) |
+| Probably unused functions | 4 | **2** (`bonus` and `report`: really never called in the sample) |
 | Lint findings (security) | 3 (1) | **0 (0)** |
-| Type errors | 2 | **0** |
+| Type checker: likely bugs (+ type-hint notes) | 1 (+1) | **0 (+0)** |
 
 The `!coins` command still takes ~164 ms in both, on purpose: the cooldown
 stayed, but it now waits with `await asyncio.sleep`, so the bot answers
 everyone else meanwhile instead of freezing.
+
+## 4. Round 7: the same tools, sharpened
+
+Found by reading round 6's own output, not just its tests:
+
+| Tool | Upgrade |
+|---|---|
+| tool loading | whole-word group words; an unsent tool the model calls is added and asked again; "clean up" loads one group, not two |
+| `profile_code` | **hottest lines** of the bot's code (CPU sampling, e.g. "97% on shop.py:8"); slow library calls traced to the bot line that made them ("time.sleep 120 ms — from shop.py:11 cooldown"); `repeat` for quick handlers; asyncio's own wrapper and debug bookkeeping no longer crowd the list |
+| `benchmark` | samples taken in turns (drift hits both alike); "faster" judged against the measured noise; peak memory of each version; **`sizes`**: how time grows with data — measured n^2.06 (quadratic) vs n^1.02 (linear) on a test |
+| `code_metrics` | **`compare='request'` / `'last_working'`**: before → after numbers built in; copies with renamed variables found; files over 800 lines flagged |
+| `type_check` | cache kept per bot (re-checks after a fix are fast); likely bugs kept apart from type-hint notes, each kind explained |
+| `optimize_query` | index columns ordered equality → sort → range; **time per query before → after**; `tune=true`: WAL mode + planner statistics (+ VACUUM when stopped); each query planned on the database that has its tables; tables under 500 rows aren't called slow; refuses to change the local copy of a bot on an outside host and gives the startup-code lines instead |
+| `bot_resources` | samples every second (average and peak CPU); **memory change since the last check**, with "GROWING" when it climbs |
+| all code-running tools | placeholder values for the bot's secrets, so modules that read `os.environ` on import load — the real secrets are never used |

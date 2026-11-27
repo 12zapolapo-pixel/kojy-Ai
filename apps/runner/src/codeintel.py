@@ -348,19 +348,44 @@ def nesting(node, depth=0):
     return deepest
 
 
+class _Anon(ast.NodeTransformer):
+    """Local names, arguments and the function's own name made anonymous: a copy with renamed variables looks the same."""
+
+    def visit_Name(self, node):
+        return ast.copy_location(ast.Name(id="_", ctx=node.ctx), node)
+
+    def visit_arg(self, node):
+        node.arg = "_"
+        node.annotation = None
+        return node
+
+
+def shape(fn):
+    """A function's structure without its names (copied code with renamed variables has the same shape)."""
+    import copy
+    body = copy.deepcopy(fn.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]  # the docstring
+    mod = _Anon().visit(ast.Module(body=body, type_ignores=[]))
+    args = _Anon().visit(copy.deepcopy(fn.args))
+    return ast.dump(args, annotate_fields=False) + ast.dump(mod, annotate_fields=False)
+
+
 KEEP = re.compile(r"^(on_[a-z_]+|test_\w+|setup|setup_hook|main|run|__\w+__)$")
 
 
 def metrics(target="."):
     files = [target] if os.path.isfile(target) else [os.path.normpath(os.path.join(target, f)) if target != "." else f for f in py_files(target)]
     funcs, defined, referenced, windows = [], {}, set(), {}
-    bodies = {}
+    bodies, shapes, long_files = {}, {}, []
     total_lines = 0
     for rel in files:
         tree, src = parse(rel)
         if isinstance(tree, Exception):
             continue
         total_lines += len(src)
+        if len(src) > 800:
+            long_files.append(f"{rel} ({len(src)} lines)")
         parents = {}
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
@@ -385,6 +410,7 @@ def metrics(target="."):
                 if length >= 5:
                     key = ast.dump(ast.Module(body=node.body, type_ignores=[]), annotate_fields=False)
                     bodies.setdefault(key, []).append(f"{rel}:{node.lineno} {name}")
+                    shapes.setdefault(shape(node), []).append(f"{rel}:{node.lineno} {name}")
                 decorated = bool(node.decorator_list)
                 if not decorated and not KEEP.match(node.name):
                     defined.setdefault(node.name, []).append(f"{rel}:{node.lineno} {name}")
@@ -416,8 +442,12 @@ def metrics(target="."):
         if not near:
             dupes.append([f"{f}:{l}" for f, l in uniq[:4]])
     same_bodies = [v for v in bodies.values() if len(v) > 1]
+    exact = {tuple(v) for v in same_bodies}
+    # The same code with only names changed (and not already an exact copy).
+    similar = [v for v in shapes.values() if len(v) > 1 and tuple(v) not in exact]
     print(json.dumps({"files": len(files), "lines": total_lines, "functions": funcs, "unused": unused[:40],
-                      "duplicates": dupes[:15], "same_functions": same_bodies[:10]}))
+                      "duplicates": dupes[:15], "same_functions": same_bodies[:10], "similar_functions": similar[:10],
+                      "long_files": long_files[:10]}))
 
 
 def main():

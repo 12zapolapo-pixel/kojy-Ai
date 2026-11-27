@@ -293,7 +293,7 @@ describe("before and after, on a slow and messy bot", () => {
     out.eventLoopBlocks = num(/BLOCKED THE EVENT LOOP (\d+)/, prof.output) || 0;
     const metrics = await run("code_metrics", {});
     out.qualityScore = num(/Quality score (\d+)\/100/, metrics.output);
-    out.avgComplexity = num(/Average complexity (\d+\.\d)/, metrics.output);
+    out.avgComplexity = num(/Average complexity (\d+(?:\.\d+)?)\./, metrics.output);
     out.maxComplexity = num(/Most complex:\n- [^\n]*complexity (\d+)/, metrics.output);
     out.duplicates = (metrics.output.match(/^- .* = /gm) ?? []).length + (/Duplicated code/.test(metrics.output) ? 1 : 0);
     out.unused = (/Probably unused[^\n]*\n((?:- .*\n?)*)/.exec(metrics.output)?.[1] ?? "").split("\n").filter(Boolean).length;
@@ -304,7 +304,7 @@ describe("before and after, on a slow and messy bot", () => {
     }
     if (hasMypy) {
       const types = await run("type_check", { path: "bot.py" });
-      out.typeErrors = num(/(\d+) type error/, types.output) || 0;
+      out.typeErrors = num(/(\d+) likely bugs?/, types.output) || 0;
     }
     const plans = await run("optimize_query", {});
     out.queriesScanningEveryRow = num(/Query plans: (\d+) of/, plans.summary);
@@ -336,7 +336,7 @@ describe("before and after, on a slow and messy bot", () => {
     // The slow query: the index optimize_query suggested.
     const idx = await run("optimize_query", { create_index: true });
     expect(idx.ok).toBe(true);
-    report.indexes = idx.output.split("\n").filter((l) => l.startsWith("CREATE INDEX"));
+    report.indexes = idx.output.split("\n").filter((l) => l.startsWith("Created ") || l.startsWith("Time per run") || / → .*faster/.test(l));
 
     const { out: after } = await measure("after");
     expect(after.eventLoopBlocks).toBe(0);
@@ -364,14 +364,14 @@ describe("the tools' own checks", () => {
     expect((await run("optimize_query", { sql: "DROP TABLE tips" })).ok).toBe(false);
     const { queriesInCode, indexColumns, fullScans } = await import("../../../apps/runner/src/agent/perfTools.js");
     expect(queriesInCode('db.execute("SELECT a FROM t WHERE b = ?", (x,))\ndb.execute(f"UPDATE t SET a = 1 WHERE id = {i}")')).toEqual(["SELECT a FROM t WHERE b = ?", "UPDATE t SET a = 1 WHERE id = ?"]);
-    expect(indexColumns("SELECT * FROM tips WHERE sender = ? AND amount > 5 ORDER BY ts DESC LIMIT 5", ["sender", "amount", "ts"])).toEqual(["sender", "amount", "ts"]);
+    expect(indexColumns("SELECT * FROM tips WHERE sender = ? AND amount > 5 ORDER BY ts DESC LIMIT 5", ["sender", "amount", "ts"])).toEqual(["sender", "ts", "amount"]);
     expect(fullScans(["SCAN tips", "SCAN players USING INDEX idx", "SEARCH t USING INDEX i (a=?)"])).toEqual(["tips"]);
   });
 
   it("bot_resources reads a real process's CPU and memory", async () => {
     const r = await run("bot_resources", {});
     expect(r.ok).toBe(true);
-    expect(r.output).toMatch(/CPU [\d.]+% of one core \(over 3s\), memory [\d.]+ MB, \d+ threads/);
+    expect(r.output).toMatch(/over 5s: CPU [\d.]+% of one core on average \(peak [\d.]+%\), memory [\d.]+ MB \([\d.]+ MB at the start\), \d+ threads/);
   });
 
   it("profile_code and benchmark refuse what they can't run", async () => {
