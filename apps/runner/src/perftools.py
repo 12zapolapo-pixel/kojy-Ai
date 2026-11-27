@@ -353,15 +353,24 @@ def growth(points):
     return k, label
 
 
+def quartiles(v):
+    """Lower quartile, median, upper quartile of a variant's samples (min/median/max when there are few)."""
+    if len(v.samples) >= 4:
+        q = statistics.quantiles(v.samples, n=4)
+        return q[0], v.median, q[2]
+    return min(v.samples), v.median, max(v.samples)
+
+
 def verdict(old, new):
+    """Faster (or slower) only when it's at least 5% and the middle halves of the two sets of timings don't overlap."""
     ratio = old.median / new.median if new.median else float("inf")
-    noise = max(old.noise, new.noise)
-    margin = max(0.05, 2 * noise)
-    if ratio >= 1 + margin:
-        return ratio, f"the new version is {ratio:.1f}× faster"
-    if ratio <= 1 / (1 + margin):
-        return ratio, f"the new version is {1 / ratio:.1f}× SLOWER"
-    return ratio, f"no real difference (within the noise of ±{margin * 100:.0f}%)"
+    (o1, _, o3), (n1, _, n3) = quartiles(old), quartiles(new)
+    spread = max(old.noise, new.noise) * 50
+    if ratio >= 1.05 and o1 > n3:
+        return ratio, f"the new version is {ratio:.2f}× faster" if ratio < 2 else f"the new version is {ratio:.1f}× faster"
+    if ratio <= 1 / 1.05 and n1 > o3:
+        return ratio, f"the new version is {1 / ratio:.2f}× SLOWER" if ratio > 0.5 else f"the new version is {1 / ratio:.1f}× SLOWER"
+    return ratio, f"no real difference (the timings overlap; runs vary ±{spread:.0f}%)"
 
 
 def benchmark(spec):

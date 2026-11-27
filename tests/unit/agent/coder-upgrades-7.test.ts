@@ -190,7 +190,7 @@ describe("profile_code", () => {
 describe("benchmark", () => {
   it("calls the same code no real difference, and says which uses less memory", async () => {
     const same = await run("benchmark", { setup: "data = list(range(2000))", baseline: "result = sum(data)", code: "result = sum(data)", seconds: 0.5 });
-    expect(same.output).toMatch(/RESULT: no real difference \(within the noise of ±\d+%\)/);
+    expect(same.output).toMatch(/RESULT: no real difference \(the timings overlap; runs vary ±\d+%\)/);
     const mem = await run("benchmark", { setup: "data = list(range(20000))", baseline: "result = len([x * 2 for x in data])", code: "result = sum(1 for x in data)", seconds: 0.5 });
     expect(mem.output).toMatch(/Memory: the new version uses [\d.]+× less/);
     expect(mem.output).toMatch(/Same `result` from both: yes/);
