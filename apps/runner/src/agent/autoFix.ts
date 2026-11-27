@@ -29,6 +29,8 @@ export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
   run_python: "running Python scripts",
   git: "using git (pushing or pulling)",
   fetch_url: "reading web pages",
+  web_search: "searching the web",
+  replace_in_files: "replacing text across files",
   move_file: "moving or renaming files",
   undo_changes: "undoing changes (KojyAI undoes a fix that doesn't hold by itself)",
 };
@@ -42,6 +44,7 @@ export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
 export const AUTOMATIC_RUN_TOOLS = new Set([
   "list_files", "read_file", "search_code", "edit_file", "multi_edit", "write_file", "append_file", "check_code", "test_in_room", "test_discord", "run_saved_tests",
   "get_logs", "bot_control", "find_env_vars", "find_emotes", "discord_check", "work_log", "search_chat",
+  "find_symbol", "inspect_package",
 ]);
 
 /** The tool specs an automatic run gets. */

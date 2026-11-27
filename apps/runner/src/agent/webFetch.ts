@@ -87,8 +87,8 @@ export function htmlToText(html: string): string {
 
 export interface FetchedPage { url: string; status: number; contentType: string; text: string; clipped: boolean }
 
-/** Reads a public page as text. `allow` decides which resolved addresses are fine (tests only). */
-export async function fetchPublic(raw: string, allow: (ip: string) => boolean = (ip) => !isPrivateAddress(ip)): Promise<FetchedPage> {
+/** Reads a public page as text. `allow` decides which resolved addresses are fine (tests only); `opts.raw` keeps the page's HTML as it came (web_search reads its links). */
+export async function fetchPublic(raw: string, allow: (ip: string) => boolean = (ip) => !isPrivateAddress(ip), opts: { raw?: boolean } = {}): Promise<FetchedPage> {
   let url = raw.trim();
   for (let hop = 0; ; hop++) {
     const problem = urlProblem(url);
@@ -119,6 +119,7 @@ export async function fetchPublic(raw: string, allow: (ip: string) => boolean = 
     const contentType = String(res.headers["content-type"] ?? "").toLowerCase();
     if (contentType && !/text\/|json|xml|javascript/.test(contentType)) throw new Error(`That address isn't a text page (${contentType.split(";")[0]}).`);
     let text = res.body.toString("utf8");
+    if (opts.raw) return { url, status: res.status, contentType: contentType.split(";")[0] ?? "", text, clipped: false };
     if (/html/.test(contentType) || /^\s*<(!doctype html|html)/i.test(text)) text = htmlToText(text);
     else if (/json/.test(contentType)) {
       const pypi = /(^|\.)pypi\.org$/i.test(u.hostname) ? summarizePypi(text) : null;

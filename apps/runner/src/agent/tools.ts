@@ -34,6 +34,7 @@ import { diagnoseDiscord, type CodeFile } from "./discord.js";
 import { applyEdit, applyEdits } from "./editing.js";
 import { fetchPublic } from "./webFetch.js";
 import { packageFor } from "../packages.js";
+import { CODE_TOOL_SPECS, runCodeTool } from "./codeTools.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -75,10 +76,10 @@ const str = (description: string) => ({ type: "string", description });
 
 export const TOOL_SPECS: ToolSpec[] = [
   fn("list_files", "List the project's files (path and size). Optionally only under a folder.", { folder: str("e.g. highrise_bot") }),
-  fn("read_file", "Read a text file with line numbers. Read big files in parts (max 200 lines per call).",
-    { path: str("file path"), start_line: { type: "integer" }, end_line: { type: "integer" } }, ["path"]),
+  fn("read_file", "Read a text file with line numbers. Read big files in parts (max 200 lines per call; outline_file shows where things are first). paths reads up to 5 small files at once (their first 150 lines each).",
+    { path: str("file path"), start_line: { type: "integer" }, end_line: { type: "integer" }, paths: { type: "array", items: { type: "string" }, description: "several files at once instead of path" } }),
   fn("search_code", "Search all text files for a regular expression (or plain text with literal=true); returns file:line matches.",
-    { pattern: str("regex, e.g. def on_chat|os.environ"), folder: str("optional folder"), literal: { type: "boolean", description: "search for the exact text, not a regex" } }, ["pattern"]),
+    { pattern: str("regex, e.g. def on_chat|os.environ"), folder: str("optional folder"), literal: { type: "boolean", description: "search for the exact text, not a regex" }, context: { type: "integer", description: "lines to show around each match, 0-3 (default 0)" } }, ["pattern"]),
   fn("edit_file", "Replace a piece of text in a file — the best way to change code. old_text must match exactly once (a copy that's only off in whitespace or indentation is still found); replace_all changes every match.",
     { path: str("file path"), old_text: str("exact current text"), new_text: str("replacement (empty deletes it)"), replace_all: { type: "boolean" } }, ["path", "old_text", "new_text"]),
   fn("multi_edit", "Several edit_file replacements in ONE file at once, in order; all of them apply or none do.",
@@ -152,6 +153,7 @@ export const TOOL_SPECS: ToolSpec[] = [
     { note: str("one sentence"), scope: { type: "string", enum: ["project", "all"] } }, ["note"]),
   fn("update_todo", "Your checklist for a bigger request: each step and whether it's done. The owner sees it, and it stays in your instructions while you work, so a long task never loses track. Send the whole list every time.",
     { items: { type: "array", items: { type: "object", properties: { step: str("a short step"), done: { type: "boolean" } }, required: ["step"] } } }, ["items"]),
+  ...CODE_TOOL_SPECS,
 ];
 
 const TEXT_EXT = /\.(py|txt|md|json|ya?ml|toml|ini|cfg|env|example|js|ts|html|css|sh)$|(^|\/)(Dockerfile|Procfile|requirements[^/]*)$/i;
@@ -320,21 +322,30 @@ const SEARCH_WORKER = `
 const { parentPort, workerData } = require("node:worker_threads");
 const { readFileSync } = require("node:fs");
 const re = new RegExp(workerData.pattern, "i");
+const ctx = workerData.context || 0;
+const max = ctx ? 25 : 50;
 const hits = [];
 for (const f of workerData.files) {
   let text;
   try { text = readFileSync(f.abs, "utf8"); } catch { continue; }
   const lines = text.split("\\n");
-  for (let i = 0; i < lines.length && hits.length < 50; i++) {
-    if (re.test(lines[i])) hits.push(f.rel + ":" + (i + 1) + ": " + lines[i].trim().slice(0, 160));
+  let shownTo = -1;
+  for (let i = 0; i < lines.length && hits.length < max; i++) {
+    if (!re.test(lines[i])) continue;
+    if (!ctx) { hits.push(f.rel + ":" + (i + 1) + ": " + lines[i].trim().slice(0, 160)); continue; }
+    const from = Math.max(0, i - ctx, shownTo + 1), to = Math.min(lines.length - 1, i + ctx);
+    const block = [];
+    for (let j = from; j <= to; j++) block.push(f.rel + ":" + (j + 1) + (j === i ? ": " : "- ") + lines[j].slice(0, 160));
+    hits.push((from > shownTo + 1 && shownTo >= 0 ? "--\\n" : "") + block.join("\\n"));
+    shownTo = to;
   }
-  if (hits.length >= 50) break;
+  if (hits.length >= max) break;
 }
 parentPort.postMessage(hits);`;
 
-export function searchInWorker(pattern: string, files: { rel: string; abs: string }[]): Promise<string[] | "timeout"> {
+export function searchInWorker(pattern: string, files: { rel: string; abs: string }[], context = 0): Promise<string[] | "timeout"> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(SEARCH_WORKER, { eval: true, workerData: { pattern, files }, resourceLimits: { maxOldGenerationSizeMb: 128 } });
+    const worker = new Worker(SEARCH_WORKER, { eval: true, workerData: { pattern, files, context: Math.min(Math.max(Math.trunc(context) || 0, 0), 3) }, resourceLimits: { maxOldGenerationSizeMb: 128 } });
     const timer = setTimeout(() => { void worker.terminate(); resolve("timeout"); }, SEARCH_TIMEOUT_MS);
     worker.once("message", (hits: string[]) => { clearTimeout(timer); void worker.terminate(); resolve(hits); });
     worker.once("error", (err) => { clearTimeout(timer); reject(err); });
@@ -515,6 +526,11 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       case "read_file": {
+        if (Array.isArray(args.paths) && args.paths.length && !s(args.path)) {
+          const paths = args.paths.map(String).slice(0, 5);
+          const parts = await Promise.all(paths.map((p) => runTool("read_file", { path: p, end_line: 150 }, ctx)));
+          return { ok: parts.every((p) => p.ok), output: clip(parts.map((p) => p.output).join("\n\n"), 16_000), summary: `Read ${paths.length} files (${paths.join(", ").slice(0, 80)})` };
+        }
         const rel = cleanRelPath(s(args.path));
         const file = resolveInside(uuid, rel);
         if (!existsSync(file)) return { ok: false, output: `No such file: ${rel}`, summary: `Couldn't find ${rel}` };
@@ -534,7 +550,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         const targets = listFiles(uuid)
           .filter((f) => !f.isDir && TEXT_EXT.test(f.path) && f.size <= MAX_EDIT_BYTES && (!folder || f.path.startsWith(folder)))
           .map((f) => ({ rel: f.path, abs: path.join(dir, f.path) }));
-        const hits = await searchInWorker(pattern, targets);
+        const hits = await searchInWorker(pattern, targets, Number(args.context) || 0);
         if (hits === "timeout") return { ok: false, output: `The search took over ${SEARCH_TIMEOUT_MS / 1000}s and was stopped. Use a simpler pattern (avoid nested repeats like (a+)+).`, summary: "Search stopped (too slow)" };
         return { ok: true, output: hits.join("\n") || "No matches.", summary: `Searched for “${pattern.slice(0, 40)}” (${hits.length} matches)` };
       }
@@ -1043,8 +1059,11 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         return { ok: true, output: "Saved.", summary: `Remembered: ${note}` };
       }
 
-      default:
+      default: {
+        const code = await runCodeTool(name, args, ctx, { runCapture, ensureSnapshot });
+        if (code) return code;
         return { ok: false, output: `Unknown tool ${name}`, summary: `Unknown tool ${name}` };
+      }
     }
   } catch (err) {
     const message = err instanceof ProjectFileError ? err.message : `Tool error: ${(err as Error).message}`;

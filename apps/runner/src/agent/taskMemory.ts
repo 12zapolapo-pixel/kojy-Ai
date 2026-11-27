@@ -149,7 +149,7 @@ export const CAPABILITY_NUDGE =
   "[app] Your last reply said you can't do this, or don't have the tools or access for it. That isn't right: in this chat your tools work. " +
   "You can read, write and edit the bot's files (read_file, write_file, append_file, edit_file, multi_edit), run shell commands and Python in its folder (run_command, run_python), " +
   "install packages (requirements.txt then check_code, or pip with run_command), check and test code (check_code, test_in_room, run_saved_tests), " +
-  "start, stop or restart it (bot_control), read its logs (get_logs), use git, and read web pages (fetch_url). " +
+  "start, stop or restart it (bot_control), read its logs (get_logs), use git, search the web and read pages (web_search, fetch_url), and understand code (outline_file, find_symbol, inspect_package, show_changes). " +
   "Do what the owner asked now by calling the right tool; don't describe it and don't ask the owner to do it. " +
   "Only if it truly needs something only the owner can do (a switch in Discord's Developer Portal or in Highrise, a secret's value, a payment), say exactly what and why.";
 

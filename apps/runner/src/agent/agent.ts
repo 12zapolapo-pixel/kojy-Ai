@@ -22,19 +22,19 @@
  * crash is worked on, after the request Kojy is busy with if there is one.
  */
 
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import type { Redis } from "ioredis";
 import { notifyUser, sendAlert, type Database } from "@kojyai/db";
 import { agentMemories, botHosts, botProjects, bots, projectMessages, projectSecrets } from "@kojyai/db/schema";
 import { botHostProvider } from "@kojyai/shared/bothost";
-import { codeFingerprint, compareSnapshot, deleteSnapshot, extractSnapshot, lineDiff, fingerprintChanges, isStartCommand, listFiles, normalizeNote, projectDir, readLogs, resolveInside, restoreSnapshot, snapshotProject } from "@kojyai/shared/projects";
+import { codeFingerprint, compareSnapshot, deleteSnapshot, fingerprintChanges, isStartCommand, listFiles, normalizeNote, projectDir, readLogs, resolveInside, restoreSnapshot, snapshotProject } from "@kojyai/shared/projects";
 import type { Supervisor } from "../supervisor.js";
 import { createLogger } from "../logger.js";
 import { aiReadyAt, chat, configuredLanes, historyBudget, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ChatResult, type ToolCall, type ToolSpec } from "./groq.js";
 import type { GitService } from "../git.js";
+import { changesSince } from "./codeTools.js";
 import { TOOL_SPECS, runTool, loadMemories, loadSecrets, projectCodeFiles, discordSecrets, type ToolContext, type ToolResult } from "./tools.js";
 import { diagnoseDiscord, isDiscordSetupError, type DiscordDiagnosis } from "./discord.js";
 import { systemPrompt, fixPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
@@ -71,9 +71,9 @@ const RESUME_DELAY_MS = 20_000;
 const RESUME_WITHIN_MS = 30 * 60_000;
 
 /** Tools that only look at something: an older result is outdated once the same look is repeated. */
-const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat", "query_data", "room_activity"]);
+const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "outline_file", "find_symbol", "inspect_package", "show_changes", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat", "query_data", "room_activity"]);
 /** …and these, whatever their arguments: the newest always says more. */
-const NEWEST_WINS = new Set(["get_logs", "check_code"]);
+const NEWEST_WINS = new Set(["get_logs", "check_code", "show_changes"]);
 
 function canonicalArgs(args: string): string {
   try {
@@ -1442,6 +1442,12 @@ function describeCall(name: string, args: Record<string, unknown>): string {
     case "update_todo": return "Updating the checklist…";
     case "work_on_bot": return `Handing it to ${String(args.bot ?? "the bot")}'s chat…`;
     case "search_code": return "Searching the code…";
+    case "outline_file": return `Outlining${p}…`;
+    case "find_symbol": return `Finding ${typeof args.name === "string" ? args.name.slice(0, 40) : "a name"} in the code…`;
+    case "inspect_package": return `Looking up ${typeof args.target === "string" ? args.target.slice(0, 40) : "a library"}…`;
+    case "show_changes": return "Looking at what changed…";
+    case "replace_in_files": return "Replacing across files…";
+    case "web_search": return `Searching the web for ${typeof args.query === "string" ? `“${args.query.slice(0, 40)}”` : "it"}…`;
     case "run_command": return `Running ${typeof args.command === "string" ? `\`${args.command.slice(0, 50)}\`` : "a command"}…`;
     case "git": return typeof args.action === "string" && args.action.includes("push") ? "Pushing to GitHub…" : "Working with git…";
     case "check_code": return "Checking the code (may install packages)…";
@@ -1471,7 +1477,7 @@ export const AUTOMATIC_REFUSAL_SUMMARY = "Not allowed in an automatic fix";
 /** What such a refusal says in the history of a later owner request. */
 const AUTOMATIC_LIMIT_NOTE = "(Refused by the limits of an automatic crash fix. Those limits don't apply now: the owner is asking, and every tool works.)";
 /** Tools whose arguments carry file contents. */
-const BIG_ARG_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "run_python", "run_command"]);
+const BIG_ARG_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "run_python", "run_command", "replace_in_files"]);
 /** Tools that write files: a cut-off call to one is written in parts instead. */
 const WRITE_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit"]);
 
@@ -1537,26 +1543,5 @@ const REVIEW_NOTE = "[app] Before you finish, review what you changed in this re
 
 /** What changed since the request's undo point, as diffs from then to now, for the review (null when nothing). */
 export function reviewText(uuid: string, snapshotId: string): string | null {
-  const tmp = mkdtempSync(path.join(tmpdir(), "kojy-review-"));
-  try {
-    const { files, more } = compareSnapshot(uuid, snapshotId, 15);
-    if (!files.length) return null;
-    extractSnapshot(uuid, snapshotId, tmp);
-    const read = (p: string) => { try { return readFileSync(p, "utf8"); } catch { return ""; } };
-    const parts: string[] = [];
-    for (const f of files) {
-      const then = read(path.join(tmp, f.path));
-      const now = read(path.join(projectDir(uuid), f.path));
-      // compareSnapshot looks back from now: "added" there means Kojy deleted it, "removed" that Kojy created it.
-      if (f.change === "added") { parts.push(`--- ${f.path} (deleted)`); continue; }
-      if (f.change === "removed") { parts.push(`--- ${f.path} (new file)\n${now.split("\n").map((l, i) => `+${String(i + 1).padStart(4)} ${l}`).join("\n")}`); continue; }
-      parts.push(`--- ${f.path} (changed)\n${lineDiff(then, now, 2, 4000)?.text ?? "(too big to show)"}`);
-    }
-    const body = parts.join("\n").slice(0, 8000);
-    return `\`\`\`diff\n${body}${more ? `\n… and ${more} more files` : ""}\n\`\`\``;
-  } catch {
-    return null;
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
+  return changesSince(uuid, snapshotId);
 }
