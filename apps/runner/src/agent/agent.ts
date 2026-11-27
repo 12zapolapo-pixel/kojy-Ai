@@ -35,9 +35,10 @@ import { createLogger } from "../logger.js";
 import { aiReadyAt, chat, configuredLanes, historyBudget, estimateTokens, AiUnavailableError, RequestTooLargeError, type ChatMessage, type ChatResult, type ToolCall, type ToolSpec } from "./groq.js";
 import type { GitService } from "../git.js";
 import { changesSince } from "./codeTools.js";
+import { LOAD_TOOLS_SPEC, groupsFor, loadToolsResult, selectTools } from "./toolsets.js";
 import { TOOL_SPECS, runTool, loadMemories, loadSecrets, projectCodeFiles, discordSecrets, type ToolContext, type ToolResult } from "./tools.js";
 import { diagnoseDiscord, isDiscordSetupError, type DiscordDiagnosis } from "./discord.js";
-import { systemPrompt, fixPrompt, studioPrompt, jsBotPrompt, untrusted } from "./prompt.js";
+import { systemPrompt, fixPrompt, studioPrompt, jsBotPrompt, untrusted, projectKind } from "./prompt.js";
 import { taskMemory, taskMemoryPrompt, continuesAutomatically, requestIndex, announcesNextStep, deniesCapability, MAX_NUDGES, MAX_DENIALS, NUDGE, CAPABILITY_NUDGE, STUDIO_CAPABILITY_NUDGE, APP_NOTE_KINDS, type PartOutcome } from "./taskMemory.js";
 import { MEMORY_TOOL_NAMES, MEMORY_TOOL_SPECS, recentWork, recentWorkPrompt, recordWork, runMemoryTool, type WorkStatus } from "./workLog.js";
 import { STUDIO_TOOL_SPECS, runStudioTool, studioSnapshot, type StudioContext } from "./studioTools.js";
@@ -71,7 +72,7 @@ const RESUME_DELAY_MS = 20_000;
 const RESUME_WITHIN_MS = 30 * 60_000;
 
 /** Tools that only look at something: an older result is outdated once the same look is repeated. */
-const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "outline_file", "find_symbol", "inspect_package", "show_changes", "trace_error", "lint_code", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat", "query_data", "room_activity"]);
+const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "outline_file", "find_symbol", "inspect_package", "show_changes", "trace_error", "lint_code", "code_metrics", "type_check", "bot_resources", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat", "query_data", "room_activity"]);
 /** …and these, whatever their arguments: the newest always says more. */
 const NEWEST_WINS = new Set(["get_logs", "check_code", "show_changes", "trace_error"]);
 
@@ -174,6 +175,8 @@ interface Scope {
   capabilityNudge?: string;
   /** Before the owner's request is called done: what Kojy changed in it, to review once (null: nothing to review, or already reviewed). */
   review?(): string | null;
+  /** The bot's entrypoint now (bot chats only): what kind of bot it is decides some core tools. */
+  entrypoint?(): string;
 }
 
 export const STUDIO_PREFIX = "studio-";
@@ -371,6 +374,7 @@ export class Agent {
     return {
       key, thread: `project:${project.id}`, projectId: project.id, orgId: project.orgId, tools: TOOL_SPECS, capabilityNudge: CAPABILITY_NUDGE,
       runTool: (name, args) => runTool(name, args, ctx),
+      entrypoint: () => ctx.project.entrypoint,
       system: async () => systemPrompt(await promptInput()),
       fixSystem: async () => fixPrompt(await promptInput()),
       setState: async (state) => { await this.db.update(botProjects).set({ agentState: state }).where(eq(botProjects.id, project.id)); },
@@ -430,11 +434,15 @@ export class Agent {
     let aiUnavailable = false;
     // Every chat can look back at its own work log and earlier messages. An
     // automatic fix gets only the tools fixing code takes (smaller requests).
-    const tools = automated ? automaticTools([...scope.tools, ...MEMORY_TOOL_SPECS]) : [...scope.tools, ...MEMORY_TOOL_SPECS];
-    const runTool = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
-      MEMORY_TOOL_NAMES.has(name) ? runMemoryTool(name, args, { db: this.db, thread: scope.thread }) : scope.runTool(name, args);
+    const allTools = automated ? automaticTools([...scope.tools, ...MEMORY_TOOL_SPECS]) : [...scope.tools, ...MEMORY_TOOL_SPECS];
+    // A bot's chat sends only the tools this request needs (toolsets.ts); AGENT_ALL_TOOLS=1 sends all of them.
+    const smartTools = !automated && scope.tools === TOOL_SPECS && process.env.AGENT_ALL_TOOLS !== "1";
+    const loaded = new Set<string>();
+    const runTool = async (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
+      name === "load_tools" ? loadToolsResult(args, loaded)
+      : MEMORY_TOOL_NAMES.has(name) ? runMemoryTool(name, args, { db: this.db, thread: scope.thread }) : scope.runTool(name, args);
 
-    const specs = new Map(tools.map((t) => [t.function.name, t]));
+    const specs = new Map([...allTools, LOAD_TOOLS_SPEC].map((t) => [t.function.name, t]));
     // Kojy said what it would do next but didn't do it: told to go on (a few times in a row at most).
     let nudges = 0;
     // A reply that wrongly said Kojy can't do it (held back, never shown or kept), and how many in a row.
@@ -452,9 +460,11 @@ export class Agent {
         const start = historyBudget(HISTORY_TOKENS, HISTORY_TOKENS_LARGE);
         for (let budget = start; !answer; budget = Math.floor(budget / 2)) {
           try {
+            const history = await this.buildMessages(scope, budget, automated);
+            const tools = smartTools ? toolsForStep(allTools, history, loaded, projectKind(scope.entrypoint?.() ?? "")) : allTools;
             answer = await chat({
               messages: [
-                ...await this.buildMessages(scope, budget, automated),
+                ...history,
                 ...(denial !== null ? [{ role: "assistant" as const, content: denial }, { role: "user" as const, content: scope.capabilityNudge ?? CAPABILITY_NUDGE }] : []),
                 ...(review ? [{ role: "assistant" as const, content: review.draft }, { role: "user" as const, content: review.note }] : []),
                 ...(nudges ? [{ role: "user" as const, content: NUDGE }] : []),
@@ -1400,6 +1410,20 @@ export function normalizeTurns(msgs: ChatMessage[]): ChatMessage[] {
 }
 
 /**
+ * The tools for one step of a bot's chat: the core set, the groups the
+ * owner's last two messages are about (so "continue" or "yes do it" keeps
+ * them), groups loaded with load_tools, and every tool already called in the
+ * history this step sees.
+ */
+export function toolsForStep(all: ToolSpec[], history: ChatMessage[], loaded: Set<string>, kind: "new" | "highrise" | "program" = "new"): ToolSpec[] {
+  const asked = history.filter((m) => m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[app]")).slice(-2).map((m) => m.content as string).join("\n");
+  const used = history.flatMap((m) => (m.role === "assistant" ? (m.tool_calls ?? []).map((c) => c.function.name) : []));
+  // A Highrise bot never needs the fake Discord, nor a Discord bot the fake Highrise room (unless asked for).
+  const skip = kind === "highrise" ? ["test_discord"] : kind === "program" ? ["test_in_room"] : [];
+  return selectTools(all, groupsFor(asked), used, skip, loaded);
+}
+
+/**
  * Every tool call must be answered right after it, so: results move up next
  * to their call, a message the owner sent mid-step moves after the results,
  * and a call left unanswered (runner restarted mid-step) is dropped.
@@ -1459,6 +1483,13 @@ function describeCall(name: string, args: Record<string, unknown>): string {
     case "http_request": return `Calling ${typeof args.url === "string" ? args.url.replace(/^https?:\/\//, "").slice(0, 40) : "an API"}…`;
     case "lint_code": return "Reviewing the code…";
     case "call_function": return `Calling ${typeof args.function === "string" ? args.function.slice(0, 40) : "a function"}…`;
+    case "profile_code": return "Profiling…";
+    case "benchmark": return "Timing it…";
+    case "code_metrics": return "Measuring the code…";
+    case "type_check": return "Checking types…";
+    case "optimize_query": return args.create_index === true ? "Adding database indexes…" : "Checking the database queries…";
+    case "bot_resources": return "Measuring the bot's CPU and memory…";
+    case "load_tools": return "Loading more tools…";
     case "web_search": return `Searching the web for ${typeof args.query === "string" ? `“${args.query.slice(0, 40)}”` : "it"}…`;
     case "run_command": return `Running ${typeof args.command === "string" ? `\`${args.command.slice(0, 50)}\`` : "a command"}…`;
     case "git": return typeof args.action === "string" && args.action.includes("push") ? "Pushing to GitHub…" : "Working with git…";
@@ -1489,7 +1520,7 @@ export const AUTOMATIC_REFUSAL_SUMMARY = "Not allowed in an automatic fix";
 /** What such a refusal says in the history of a later owner request. */
 const AUTOMATIC_LIMIT_NOTE = "(Refused by the limits of an automatic crash fix. Those limits don't apply now: the owner is asking, and every tool works.)";
 /** Tools whose arguments carry file contents. */
-const BIG_ARG_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "run_python", "run_command", "replace_in_files", "edit_lines", "http_request", "call_function"]);
+const BIG_ARG_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "run_python", "run_command", "replace_in_files", "edit_lines", "http_request", "call_function", "benchmark", "profile_code"]);
 /** Tools that write files: a cut-off call to one is written in parts instead. */
 const WRITE_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "edit_lines"]);
 

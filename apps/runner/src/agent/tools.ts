@@ -37,6 +37,7 @@ import { packageFor } from "../packages.js";
 import { CODE_TOOL_SPECS, runCodeTool } from "./codeTools.js";
 import { DEV_TOOL_SPECS, runDevTool, syntaxNote } from "./devTools.js";
 import { OPS_TOOL_SPECS, runOpsTool, startupReport } from "./opsTools.js";
+import { PERF_TOOL_SPECS, runPerfTool } from "./perfTools.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -158,6 +159,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   ...CODE_TOOL_SPECS,
   ...DEV_TOOL_SPECS,
   ...OPS_TOOL_SPECS,
+  ...PERF_TOOL_SPECS,
 ];
 
 const TEXT_EXT = /\.(py|txt|md|json|ya?ml|toml|ini|cfg|env|example|js|ts|html|css|sh)$|(^|\/)(Dockerfile|Procfile|requirements[^/]*)$/i;
@@ -1071,7 +1073,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 
       default: {
         const helpers = { runCapture, ensureSnapshot };
-        const code = await runCodeTool(name, args, ctx, helpers) ?? await runDevTool(name, args, ctx, helpers) ?? await runOpsTool(name, args, ctx, helpers);
+        const code = await runCodeTool(name, args, ctx, helpers) ?? await runDevTool(name, args, ctx, helpers) ?? await runOpsTool(name, args, ctx, helpers) ?? await runPerfTool(name, args, ctx, helpers);
         if (code) return code;
         return { ok: false, output: `Unknown tool ${name}`, summary: `Unknown tool ${name}` };
       }

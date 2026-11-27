@@ -39,6 +39,9 @@ export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
   modify_data: "changing the bot's saved data",
   http_request: "sending web requests",
   call_function: "running the bot's functions",
+  profile_code: "profiling code",
+  benchmark: "timing code",
+  optimize_query: "changing the database",
   move_file: "moving or renaming files",
   undo_changes: "undoing changes (KojyAI undoes a fix that doesn't hold by itself)",
 };

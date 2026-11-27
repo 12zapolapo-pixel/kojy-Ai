@@ -49,6 +49,8 @@ export const BOTCHECK = path.join(path.dirname(new URL(import.meta.url).pathname
 export const CODECHECK = path.join(path.dirname(new URL(import.meta.url).pathname), "codecheck.py");
 /** test_discord's fake Discord (discordtest.py). */
 export const DISCORDTEST = path.join(path.dirname(new URL(import.meta.url).pathname), "discordtest.py");
+/** profile_code and benchmark (perftools.py). */
+export const PERFTOOLS = path.join(path.dirname(new URL(import.meta.url).pathname), "perftools.py");
 /** run_unit_tests' built-in runner (testrunner.py). */
 export const TESTRUNNER = path.join(path.dirname(new URL(import.meta.url).pathname), "testrunner.py");
 /** Kojy's outline_file, find_symbol and inspect_package (codeintel.py). */
@@ -469,6 +471,11 @@ export class Supervisor {
 
   runningCount(): number {
     return this.procs.size + this.hosts.runningCount();
+  }
+
+  /** The process id of a bot running on this server (undefined when it isn't, or runs on an outside host). */
+  pidOf(uuid: string): number | undefined {
+    return this.procs.get(uuid)?.child.pid;
   }
 
   isRunning(uuid: string): boolean {
