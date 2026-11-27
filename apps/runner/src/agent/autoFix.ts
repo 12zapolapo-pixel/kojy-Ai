@@ -31,6 +31,11 @@ export const AUTOMATIC_RUN_LOCKED: Record<string, string> = {
   fetch_url: "reading web pages",
   web_search: "searching the web",
   replace_in_files: "replacing text across files",
+  rename_symbol: "renaming across files",
+  add_package: "changing the bot's dependencies (a missing well-known package is added by KojyAI itself)",
+  restore_file: "restoring files (KojyAI undoes a fix that doesn't hold by itself)",
+  format_code: "reformatting code",
+  run_unit_tests: "running the bot's unit tests",
   move_file: "moving or renaming files",
   undo_changes: "undoing changes (KojyAI undoes a fix that doesn't hold by itself)",
 };
@@ -86,7 +91,7 @@ export function automaticRefusal(_kind: AutomatedKind, tool: string, args: Recor
   const locked = AUTOMATIC_RUN_LOCKED[tool];
   if (locked) return no(locked);
   if (tool === "bot_control" && String(args.action ?? "") === "stop") return no("stopping the bot (restart it instead)");
-  if (!["write_file", "edit_file", "append_file", "multi_edit"].includes(tool)) return null;
+  if (!["write_file", "edit_file", "append_file", "multi_edit", "edit_lines"].includes(tool)) return null;
   let rel: string;
   try {
     rel = cleanRelPath(String(args.path ?? ""));
@@ -96,10 +101,12 @@ export function automaticRefusal(_kind: AutomatedKind, tool: string, args: Recor
   if (isPersistentData(rel)) return no(`changing the bot's saved data (${rel})`);
   if (DEPENDENCY_FILE.test(rel)) return no(`changing the bot's dependencies (${rel}); a missing well-known package is added by KojyAI itself`);
   const edits = tool === "multi_edit" ? (Array.isArray(args.edits) ? args.edits as Record<string, unknown>[] : []) : [];
+  const lineRange = () => currentText(rel).split("\n").slice(Math.max(0, Number(args.start_line) - 1), Math.max(0, Number(args.end_line))).join("\n");
   const before = tool === "edit_file" ? String(args.old_text ?? "")
+    : tool === "edit_lines" ? lineRange()
     : tool === "multi_edit" ? edits.map((e) => String(e.old_text ?? "")).join("\n")
     : tool === "append_file" ? "" : currentText(rel);
-  const after = tool === "edit_file" ? String(args.new_text ?? "")
+  const after = tool === "edit_file" || tool === "edit_lines" ? String(args.new_text ?? "")
     : tool === "multi_edit" ? edits.map((e) => String(e.new_text ?? "")).join("\n")
     : String(args.content ?? "");
   const risks = addedRisks(before, after);

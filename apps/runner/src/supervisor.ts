@@ -49,6 +49,8 @@ export const BOTCHECK = path.join(path.dirname(new URL(import.meta.url).pathname
 export const CODECHECK = path.join(path.dirname(new URL(import.meta.url).pathname), "codecheck.py");
 /** test_discord's fake Discord (discordtest.py). */
 export const DISCORDTEST = path.join(path.dirname(new URL(import.meta.url).pathname), "discordtest.py");
+/** run_unit_tests' built-in runner (testrunner.py). */
+export const TESTRUNNER = path.join(path.dirname(new URL(import.meta.url).pathname), "testrunner.py");
 /** Kojy's outline_file, find_symbol and inspect_package (codeintel.py). */
 export const CODEINTEL = path.join(path.dirname(new URL(import.meta.url).pathname), "codeintel.py");
 /** What a bot host runs (uploaded as kojy_start.py, see hoststart.py). */

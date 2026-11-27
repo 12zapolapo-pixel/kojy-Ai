@@ -4,6 +4,7 @@ inspects an installed library's real API.
   codeintel.py outline <file>      classes, functions and methods with line ranges and signatures
   codeintel.py symbol <name>       where a name is defined and where it is used, in every .py file under .
   codeintel.py inspect <target>    the API of a module, class or function (imports it: run in the bot's venv)
+  codeintel.py rename <old> <new> [folder]   every use of a name renamed (code only, never strings or comments), as JSON
 
 Plain text out, one finding per line, so the model can read it directly.
 OWNERSHIP: apps/runner/src
@@ -11,6 +12,11 @@ OWNERSHIP: apps/runner/src
 
 import ast
 import inspect
+import io
+import json
+import keyword
+import re
+import tokenize
 import importlib
 import os
 import sys
@@ -263,6 +269,44 @@ def inspect_target(target):
             print("\n".join(doc.split("\n")[:25]))
 
 
+def rename(old, new, folder="."):
+    """New text of every .py file that uses `old` as a name (strings and comments untouched)."""
+    out = {"files": {}, "counts": {}, "fstrings": [], "errors": []}
+    word = re.compile(r"(?<![\w.])" + re.escape(old) + r"(?!\w)")
+    for rel in py_files(folder):
+        rel = os.path.normpath(os.path.join(folder, rel)) if folder != "." else rel
+        try:
+            with open(rel, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if old not in text:
+            continue
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        except (tokenize.TokenError, SyntaxError, IndentationError) as e:
+            out["errors"].append(f"{rel}: can't read it ({e}); fix its syntax first")
+            continue
+        lines = text.splitlines(keepends=True)
+        hits = []
+        for t in tokens:
+            if t.type == tokenize.NAME and t.string == old:
+                hits.append(t.start)
+            elif t.type == tokenize.STRING and t.string.lstrip("rbuRBU")[:1] in ("f", "F") and word.search(t.string):
+                # Python 3.11 keeps an f-string as one token: names inside its {…} are reported, not changed.
+                out["fstrings"].append(f"{rel}:{t.start[0]}")
+            elif t.type == getattr(tokenize, "FSTRING_MIDDLE", -1):
+                continue
+        if not hits:
+            continue
+        for (row, col) in sorted(hits, reverse=True):
+            line = lines[row - 1]
+            lines[row - 1] = line[:col] + new + line[col + len(old):]
+        out["files"][rel] = "".join(lines)
+        out["counts"][rel] = len(hits)
+    print(json.dumps(out))
+
+
 def main():
     if len(sys.argv) < 3:
         print("usage: codeintel.py outline|symbol|inspect <arg>")
@@ -272,6 +316,11 @@ def main():
         outline(arg)
     elif mode == "symbol":
         symbol(arg)
+    elif mode == "rename":
+        if len(sys.argv) < 4 or not sys.argv[3].isidentifier() or keyword.iskeyword(sys.argv[3]):
+            print(json.dumps({"error": "the new name must be a valid Python name"}))
+            sys.exit(2)
+        rename(arg, sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else ".")
     elif mode == "inspect":
         sys.path.insert(0, os.getcwd())
         inspect_target(arg)

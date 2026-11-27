@@ -35,6 +35,7 @@ import { applyEdit, applyEdits } from "./editing.js";
 import { fetchPublic } from "./webFetch.js";
 import { packageFor } from "../packages.js";
 import { CODE_TOOL_SPECS, runCodeTool } from "./codeTools.js";
+import { DEV_TOOL_SPECS, runDevTool, syntaxNote } from "./devTools.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -154,6 +155,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   fn("update_todo", "Your checklist for a bigger request: each step and whether it's done. The owner sees it, and it stays in your instructions while you work, so a long task never loses track. Send the whole list every time.",
     { items: { type: "array", items: { type: "object", properties: { step: str("a short step"), done: { type: "boolean" } }, required: ["step"] } } }, ["items"]),
   ...CODE_TOOL_SPECS,
+  ...DEV_TOOL_SPECS,
 ];
 
 const TEXT_EXT = /\.(py|txt|md|json|ya?ml|toml|ini|cfg|env|example|js|ts|html|css|sh)$|(^|\/)(Dockerfile|Procfile|requirements[^/]*)$/i;
@@ -567,7 +569,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         ctx.changedFiles.add(rel);
         const delta = r.text.split("\n").length - text.split("\n").length;
         const note = r.how === "exact" ? "" : ` (your old_text differed from the file only in ${r.how}; matched anyway — read the lines again before the next edit there)`;
-        return { ok: true, output: `Edited${r.count > 1 ? ` ${r.count} places` : ""}.${note}`, summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}`, diff: changeDiff(text, r.text) };
+        const syntax = await syntaxNote(file, rel, false);
+        return { ok: true, output: `Edited${r.count > 1 ? ` ${r.count} places` : ""}.${note}${syntax ?? ""}`, summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}${syntax ? " — syntax error" : ""}`, diff: changeDiff(text, r.text) };
       }
 
       case "multi_edit": {
@@ -581,7 +584,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         writeFileSync(file, r.text);
         ctx.changedFiles.add(rel);
         const n = (args.edits as unknown[]).length;
-        return { ok: true, output: `Made ${n} edit${n === 1 ? "" : "s"}.`, summary: `Edited ${rel} (${n} change${n === 1 ? "" : "s"})`, diff: changeDiff(text, r.text) };
+        const syntax = await syntaxNote(file, rel, false);
+        return { ok: true, output: `Made ${n} edit${n === 1 ? "" : "s"}.${syntax ?? ""}`, summary: `Edited ${rel} (${n} change${n === 1 ? "" : "s"})${syntax ? " — syntax error" : ""}`, diff: changeDiff(text, r.text) };
       }
 
       case "append_file": {
@@ -597,7 +601,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         appendFileSync(file, glue + content);
         ctx.changedFiles.add(rel);
         const total = (before + glue + content).split("\n").length;
-        return { ok: true, output: `Added ${content.split("\n").length} lines; ${rel} has ${total} lines now.`, summary: `Added to ${rel} (now ${total} lines)`, diff: changeDiff(before, before + glue + content) };
+        const syntax = await syntaxNote(file, rel, true);
+        return { ok: true, output: `Added ${content.split("\n").length} lines; ${rel} has ${total} lines now.${syntax ?? ""}`, summary: `Added to ${rel} (now ${total} lines)`, diff: changeDiff(before, before + glue + content) };
       }
 
       case "move_file": {
@@ -635,7 +640,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         mkdirSync(path.dirname(file), { recursive: true });
         writeFileSync(file, content);
         ctx.changedFiles.add(rel);
-        return { ok: true, output: existed ? "File replaced." : "File created.", summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)`, diff: changeDiff(before, content) };
+        const syntax = await syntaxNote(file, rel, true);
+        return { ok: true, output: (existed ? "File replaced." : "File created.") + (syntax ?? ""), summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)`, diff: changeDiff(before, content) };
       }
 
       case "delete_file": {
@@ -1060,7 +1066,8 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
       }
 
       default: {
-        const code = await runCodeTool(name, args, ctx, { runCapture, ensureSnapshot });
+        const helpers = { runCapture, ensureSnapshot };
+        const code = await runCodeTool(name, args, ctx, helpers) ?? await runDevTool(name, args, ctx, helpers);
         if (code) return code;
         return { ok: false, output: `Unknown tool ${name}`, summary: `Unknown tool ${name}` };
       }
