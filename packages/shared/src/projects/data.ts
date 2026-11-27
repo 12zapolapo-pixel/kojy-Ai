@@ -99,6 +99,20 @@ export function readQueryProblem(sql: string): string | null {
   return null;
 }
 
+/** Why a data-changing statement may not run (null: it may): one INSERT, UPDATE, DELETE or REPLACE, nothing that changes the tables themselves. */
+export function writeQueryProblem(sql: string): string | null {
+  const s = sql.trim().replace(/;\s*$/, "");
+  if (!s) return "Empty statement.";
+  if (s.length > 4000) return "Statement is too long (4000 characters max).";
+  if (!/^(insert|update|delete|replace|with)\b/i.test(s)) return "Only one INSERT, UPDATE, DELETE or REPLACE can be run (use query_data to read).";
+  const bare = s.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "''");
+  if (bare.includes(";")) return "Run one statement at a time.";
+  if (/\b(attach|detach|pragma|drop|alter|create|vacuum|reindex|load_extension)\b/i.test(bare)) return "Only rows can be changed: no ATTACH, PRAGMA, DROP, ALTER or CREATE.";
+  if (/^with\b/i.test(s) && !/\b(insert|update|delete|replace)\b/i.test(bare)) return "Use query_data for a SELECT.";
+  if (/^(update|delete)\b/i.test(s) && !/\bwhere\b/i.test(bare)) return "An UPDATE or DELETE needs a WHERE (to change every row on purpose, write WHERE 1=1).";
+  return null;
+}
+
 /** The file path of a project's database, checked like every other project path. */
 export function databaseFile(uuid: string, dbPath: string): string {
   if (!DB_FILE.test(dbPath)) throw new ProjectFileError("Not a database file");

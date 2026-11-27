@@ -88,11 +88,28 @@ export function syntaxProblem(file: string): Promise<string | null> {
   });
 }
 
-/** What to add to a file change's result when the file no longer parses. */
+/** Names a .py file uses but never defines or imports (ruff F821/F822/F823), as "line N: message"; [] without ruff. */
+export function undefinedNames(file: string): Promise<string[]> {
+  if (!file.endsWith(".py")) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    execFile(RUFF(), ["check", "--isolated", "--no-cache", "--output-format", "concise", "--select", "F821,F822,F823", file], { timeout: 15_000 }, (_err, stdout) => {
+      const out: string[] = [];
+      for (const line of String(stdout ?? "").split("\n")) {
+        const m = /:(\d+):\d+: (F82\d) (.*)$/.exec(line.trim());
+        if (m) out.push(`line ${m[1]}: ${m[3]}`);
+      }
+      resolve(out.slice(0, 8));
+    });
+  });
+}
+
+/** What to add to a file change's result when the file no longer parses, or uses names that don't exist. */
 export async function syntaxNote(file: string, rel: string, partial: boolean): Promise<string | null> {
   const p = await syntaxProblem(file);
-  if (!p) return null;
-  return `\n⚠ ${rel} doesn't parse now (${p}).${partial ? " If you're still writing it in parts, finish it first; otherwise" : ""} fix this before anything else (read_file around that line).`;
+  if (p) return `\n⚠ ${rel} doesn't parse now (${p}).${partial ? " If you're still writing it in parts, finish it first; otherwise" : ""} fix this before anything else (read_file around that line).`;
+  const names = await undefinedNames(file);
+  if (!names.length) return null;
+  return `\n⚠ ${rel} uses names that aren't defined or imported anywhere in it: ${names.join("; ")}.${partial ? " If the next part defines them, fine;" : ""} Add the import or definition, or fix the spelling (find_symbol helps).`;
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -180,7 +197,7 @@ export async function runDevTool(name: string, args: Args, ctx: ToolContext, h: 
       return {
         ok: true,
         output: `Replaced lines ${start}-${end} with ${add.length} line${add.length === 1 ? "" : "s"}. Now:\n${numbered(after, start - 2, start + add.length + 1)}${note ?? ""}`,
-        summary: `Edited ${rel} lines ${start}-${end}${note ? " — syntax error" : ""}`,
+        summary: `Edited ${rel} lines ${start}-${end}${note ? " — needs a fix" : ""}`,
         diff: lineDiff(text, next, 2, 4000)?.text ?? "",
       };
     }

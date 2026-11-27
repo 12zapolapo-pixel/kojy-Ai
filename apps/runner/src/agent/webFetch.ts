@@ -88,7 +88,7 @@ export function htmlToText(html: string): string {
 export interface FetchedPage { url: string; status: number; contentType: string; text: string; clipped: boolean }
 
 /** Reads a public page as text. `allow` decides which resolved addresses are fine (tests only); `opts.raw` keeps the page's HTML as it came (web_search reads its links). */
-export async function fetchPublic(raw: string, allow: (ip: string) => boolean = (ip) => !isPrivateAddress(ip), opts: { raw?: boolean } = {}): Promise<FetchedPage> {
+export async function fetchPublic(raw: string, allow: (ip: string) => boolean = (ip) => !isPrivateAddress(ip), opts: { raw?: boolean; method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<FetchedPage & { headers?: Record<string, string> }> {
   let url = raw.trim();
   for (let hop = 0; ; hop++) {
     const problem = urlProblem(url);
@@ -96,9 +96,14 @@ export async function fetchPublic(raw: string, allow: (ip: string) => boolean = 
     const u = new URL(url);
     const res = await new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
       const lib = u.protocol === "https:" ? https : http;
+      const method = (opts.method ?? "GET").toUpperCase();
       const req = lib.request(u, {
-        method: "GET", lookup: publicOnly(allow), timeout: TIMEOUT_MS,
-        headers: { "user-agent": "KojyAI-coder/1.0 (+documentation reader)", accept: "text/html,application/json,text/plain,application/xml;q=0.9,*/*;q=0.5", "accept-encoding": "identity" },
+        method, lookup: publicOnly(allow), timeout: TIMEOUT_MS,
+        headers: {
+          "user-agent": "KojyAI-coder/1.0 (+documentation reader)", accept: "text/html,application/json,text/plain,application/xml;q=0.9,*/*;q=0.5",
+          ...(opts.headers ?? {}), "accept-encoding": "identity",
+          ...(opts.body !== undefined ? { "content-length": String(Buffer.byteLength(opts.body)) } : {}),
+        },
       }, (r) => {
         const chunks: Buffer[] = [];
         let size = 0;
@@ -109,8 +114,15 @@ export async function fetchPublic(raw: string, allow: (ip: string) => boolean = 
       });
       req.on("timeout", () => req.destroy(new Error(`no answer within ${TIMEOUT_MS / 1000}s`)));
       req.on("error", reject);
+      if (opts.body !== undefined) req.write(opts.body);
       req.end();
     });
+    const shown: Record<string, string> = {};
+    for (const k of ["content-type", "location", "retry-after", "x-ratelimit-remaining", "www-authenticate"]) if (res.headers[k]) shown[k] = String(res.headers[k]);
+    // Only a plain GET follows redirects; anything else reports them as they came.
+    if (opts.method && opts.method.toUpperCase() !== "GET" && res.status >= 300 && res.status < 400) {
+      return { url, status: res.status, contentType: String(res.headers["content-type"] ?? "").split(";")[0] ?? "", text: res.body.toString("utf8").slice(0, MAX_TEXT), clipped: false, headers: shown };
+    }
     if (res.status >= 300 && res.status < 400 && res.headers.location) {
       if (hop >= MAX_REDIRECTS) throw new Error("Too many redirects.");
       url = new URL(res.headers.location, url).toString();
@@ -119,7 +131,7 @@ export async function fetchPublic(raw: string, allow: (ip: string) => boolean = 
     const contentType = String(res.headers["content-type"] ?? "").toLowerCase();
     if (contentType && !/text\/|json|xml|javascript/.test(contentType)) throw new Error(`That address isn't a text page (${contentType.split(";")[0]}).`);
     let text = res.body.toString("utf8");
-    if (opts.raw) return { url, status: res.status, contentType: contentType.split(";")[0] ?? "", text, clipped: false };
+    if (opts.raw) return { url, status: res.status, contentType: contentType.split(";")[0] ?? "", text, clipped: false, headers: shown };
     if (/html/.test(contentType) || /^\s*<(!doctype html|html)/i.test(text)) text = htmlToText(text);
     else if (/json/.test(contentType)) {
       const pypi = /(^|\.)pypi\.org$/i.test(u.hostname) ? summarizePypi(text) : null;
@@ -127,7 +139,7 @@ export async function fetchPublic(raw: string, allow: (ip: string) => boolean = 
       else { try { text = JSON.stringify(JSON.parse(text), null, 1); } catch { /* as it came */ } }
     }
     const clipped = text.length > MAX_TEXT;
-    return { url, status: res.status, contentType: contentType.split(";")[0] ?? "", text: clipped ? text.slice(0, MAX_TEXT) : text, clipped };
+    return { url, status: res.status, contentType: contentType.split(";")[0] ?? "", text: clipped ? text.slice(0, MAX_TEXT) : text, clipped, headers: shown };
   }
 }
 

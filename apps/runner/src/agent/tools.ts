@@ -36,6 +36,7 @@ import { fetchPublic } from "./webFetch.js";
 import { packageFor } from "../packages.js";
 import { CODE_TOOL_SPECS, runCodeTool } from "./codeTools.js";
 import { DEV_TOOL_SPECS, runDevTool, syntaxNote } from "./devTools.js";
+import { OPS_TOOL_SPECS, runOpsTool, startupReport } from "./opsTools.js";
 
 export type Project = typeof botProjects.$inferSelect;
 
@@ -156,6 +157,7 @@ export const TOOL_SPECS: ToolSpec[] = [
     { items: { type: "array", items: { type: "object", properties: { step: str("a short step"), done: { type: "boolean" } }, required: ["step"] } } }, ["items"]),
   ...CODE_TOOL_SPECS,
   ...DEV_TOOL_SPECS,
+  ...OPS_TOOL_SPECS,
 ];
 
 const TEXT_EXT = /\.(py|txt|md|json|ya?ml|toml|ini|cfg|env|example|js|ts|html|css|sh)$|(^|\/)(Dockerfile|Procfile|requirements[^/]*)$/i;
@@ -570,7 +572,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         const delta = r.text.split("\n").length - text.split("\n").length;
         const note = r.how === "exact" ? "" : ` (your old_text differed from the file only in ${r.how}; matched anyway — read the lines again before the next edit there)`;
         const syntax = await syntaxNote(file, rel, false);
-        return { ok: true, output: `Edited${r.count > 1 ? ` ${r.count} places` : ""}.${note}${syntax ?? ""}`, summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}${syntax ? " — syntax error" : ""}`, diff: changeDiff(text, r.text) };
+        return { ok: true, output: `Edited${r.count > 1 ? ` ${r.count} places` : ""}.${note}${syntax ?? ""}`, summary: `Edited ${rel}${delta ? ` (${delta > 0 ? "+" : ""}${delta} lines)` : ""}${syntax ? " — needs a fix" : ""}`, diff: changeDiff(text, r.text) };
       }
 
       case "multi_edit": {
@@ -585,7 +587,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         ctx.changedFiles.add(rel);
         const n = (args.edits as unknown[]).length;
         const syntax = await syntaxNote(file, rel, false);
-        return { ok: true, output: `Made ${n} edit${n === 1 ? "" : "s"}.${syntax ?? ""}`, summary: `Edited ${rel} (${n} change${n === 1 ? "" : "s"})${syntax ? " — syntax error" : ""}`, diff: changeDiff(text, r.text) };
+        return { ok: true, output: `Made ${n} edit${n === 1 ? "" : "s"}.${syntax ?? ""}`, summary: `Edited ${rel} (${n} change${n === 1 ? "" : "s"})${syntax ? " — needs a fix" : ""}`, diff: changeDiff(text, r.text) };
       }
 
       case "append_file": {
@@ -602,7 +604,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         ctx.changedFiles.add(rel);
         const total = (before + glue + content).split("\n").length;
         const syntax = await syntaxNote(file, rel, true);
-        return { ok: true, output: `Added ${content.split("\n").length} lines; ${rel} has ${total} lines now.${syntax ?? ""}`, summary: `Added to ${rel} (now ${total} lines)`, diff: changeDiff(before, before + glue + content) };
+        return { ok: true, output: `Added ${content.split("\n").length} lines; ${rel} has ${total} lines now.${syntax ?? ""}`, summary: `Added to ${rel} (now ${total} lines)${syntax && !syntax.includes("still writing") ? " — needs a fix" : ""}`, diff: changeDiff(before, before + glue + content) };
       }
 
       case "move_file": {
@@ -641,7 +643,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         writeFileSync(file, content);
         ctx.changedFiles.add(rel);
         const syntax = await syntaxNote(file, rel, true);
-        return { ok: true, output: (existed ? "File replaced." : "File created.") + (syntax ?? ""), summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)`, diff: changeDiff(before, content) };
+        return { ok: true, output: (existed ? "File replaced." : "File created.") + (syntax ?? ""), summary: `${existed ? "Rewrote" : "Created"} ${rel} (${content.split("\n").length} lines)${syntax && !syntax.includes("still writing") ? " — needs a fix" : ""}`, diff: changeDiff(before, content) };
       }
 
       case "delete_file": {
@@ -985,12 +987,14 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
         if (action !== "stop" && !ctx.project.entrypoint) return { ok: false, output: "Set the entrypoint first.", summary: "Can't start: no entrypoint" };
         await ctx.db.update(botProjects).set({ desiredState: action === "stop" ? "stopped" : "running", ...(action !== "stop" ? { restartCount: 0 } : {}) })
           .where(eq(botProjects.id, ctx.project.id));
+        const since = Date.now();
         await ctx.supervisor.handle(uuid, action);
-        // Give it a moment to connect (or fail) so get_logs has something to show.
+        // Give it a moment to connect (or fail) so there's something to show.
         if (action !== "stop") await new Promise((r) => setTimeout(r, 8000));
         const [p] = await ctx.db.select({ status: botProjects.status, statusMessage: botProjects.statusMessage }).from(botProjects).where(eq(botProjects.id, ctx.project.id));
         const label = { start: "Started", stop: "Stopped", restart: "Restarted" }[action];
-        return { ok: true, output: `${label}. Status now: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}. Check get_logs to confirm it connected.`, summary: `${label} the bot (${p?.status})` };
+        const report = action === "stop" ? "" : await startupReport(ctx, since);
+        return { ok: true, output: `${label}. Status now: ${p?.status}${p?.statusMessage ? ` (${p.statusMessage})` : ""}.${report}${action === "stop" ? "" : "\nIf it hasn't connected yet, wait_for_logs waits for it."}`, summary: `${label} the bot (${p?.status})` };
       }
 
       case "get_logs": {
@@ -1067,7 +1071,7 @@ export async function runTool(name: string, args: Args, ctx: ToolContext): Promi
 
       default: {
         const helpers = { runCapture, ensureSnapshot };
-        const code = await runCodeTool(name, args, ctx, helpers) ?? await runDevTool(name, args, ctx, helpers);
+        const code = await runCodeTool(name, args, ctx, helpers) ?? await runDevTool(name, args, ctx, helpers) ?? await runOpsTool(name, args, ctx, helpers);
         if (code) return code;
         return { ok: false, output: `Unknown tool ${name}`, summary: `Unknown tool ${name}` };
       }

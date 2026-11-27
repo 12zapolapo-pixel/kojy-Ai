@@ -71,7 +71,7 @@ const RESUME_DELAY_MS = 20_000;
 const RESUME_WITHIN_MS = 30 * 60_000;
 
 /** Tools that only look at something: an older result is outdated once the same look is repeated. */
-const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "outline_file", "find_symbol", "inspect_package", "show_changes", "trace_error", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat", "query_data", "room_activity"]);
+const LOOK_TOOLS = new Set(["read_file", "list_files", "search_code", "outline_file", "find_symbol", "inspect_package", "show_changes", "trace_error", "lint_code", "get_logs", "find_emotes", "find_env_vars", "check_code", "work_log", "search_chat", "query_data", "room_activity"]);
 /** …and these, whatever their arguments: the newest always says more. */
 const NEWEST_WINS = new Set(["get_logs", "check_code", "show_changes", "trace_error"]);
 
@@ -1454,6 +1454,11 @@ function describeCall(name: string, args: Record<string, unknown>): string {
     case "add_package": return `Adding ${typeof args.name === "string" ? args.name.slice(0, 30) : "a package"}…`;
     case "restore_file": return `Restoring${p}…`;
     case "format_code": return "Tidying the code…";
+    case "modify_data": return args.restore === true ? "Restoring the bot's data…" : "Changing the bot's data…";
+    case "wait_for_logs": return "Waiting for the bot…";
+    case "http_request": return `Calling ${typeof args.url === "string" ? args.url.replace(/^https?:\/\//, "").slice(0, 40) : "an API"}…`;
+    case "lint_code": return "Reviewing the code…";
+    case "call_function": return `Calling ${typeof args.function === "string" ? args.function.slice(0, 40) : "a function"}…`;
     case "web_search": return `Searching the web for ${typeof args.query === "string" ? `“${args.query.slice(0, 40)}”` : "it"}…`;
     case "run_command": return `Running ${typeof args.command === "string" ? `\`${args.command.slice(0, 50)}\`` : "a command"}…`;
     case "git": return typeof args.action === "string" && args.action.includes("push") ? "Pushing to GitHub…" : "Working with git…";
@@ -1484,7 +1489,7 @@ export const AUTOMATIC_REFUSAL_SUMMARY = "Not allowed in an automatic fix";
 /** What such a refusal says in the history of a later owner request. */
 const AUTOMATIC_LIMIT_NOTE = "(Refused by the limits of an automatic crash fix. Those limits don't apply now: the owner is asking, and every tool works.)";
 /** Tools whose arguments carry file contents. */
-const BIG_ARG_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "run_python", "run_command", "replace_in_files", "edit_lines"]);
+const BIG_ARG_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "run_python", "run_command", "replace_in_files", "edit_lines", "http_request", "call_function"]);
 /** Tools that write files: a cut-off call to one is written in parts instead. */
 const WRITE_TOOLS = new Set(["write_file", "append_file", "edit_file", "multi_edit", "edit_lines"]);
 
